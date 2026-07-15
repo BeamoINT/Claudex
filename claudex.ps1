@@ -272,9 +272,20 @@ function Invoke-CurlWithDeadline([string[]] $Arguments, [string] $StandardInput,
 function Fetch-Models([int] $TimeoutMilliseconds = 5000) {
     $timeoutMilliseconds = [math]::Max(250, [math]::Min(5000, $TimeoutMilliseconds))
     $curlSeconds = [math]::Max(1, [int] [math]::Ceiling($timeoutMilliseconds / 1000.0))
-    $output = Invoke-CurlWithDeadline @('--silent', '--show-error', '--connect-timeout', '1',
-        '--max-time', [string] $curlSeconds, '--write-out', "`n%{http_code}", '--header', '@-', "$proxyUrl/v1/models") `
-        ("Authorization: Bearer $proxyToken`n") $timeoutMilliseconds
+    $healthRunDir = Join-Path $configDir 'run'
+    [IO.Directory]::CreateDirectory($healthRunDir) | Out-Null
+    $headerFile = Join-Path $healthRunDir ('.proxy-health-header-' + [guid]::NewGuid().ToString('N'))
+    try {
+        # PowerShell 5 can surface piped stdin in a .cmd invocation's command
+        # context. Curl's @file syntax keeps the bearer value out of argv while
+        # remaining compatible with native curl.exe and test/enterprise shims.
+        [IO.File]::WriteAllText($headerFile, "Authorization: Bearer $proxyToken`n", $utf8)
+        $output = Invoke-CurlWithDeadline @('--silent', '--show-error', '--connect-timeout', '1',
+            '--max-time', [string] $curlSeconds, '--write-out', "`n%{http_code}", '--header', "@$headerFile", "$proxyUrl/v1/models") `
+            '' $timeoutMilliseconds
+    } finally {
+        Remove-Item -LiteralPath $headerFile -Force -ErrorAction SilentlyContinue
+    }
     $normalized = $output.Replace("`r`n", "`n").TrimEnd([char[]] "`r`n")
     $lastNewline = $normalized.LastIndexOf("`n")
     $status = 200
