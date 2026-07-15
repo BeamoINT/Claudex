@@ -1,4 +1,5 @@
 param(
+    [int] $ClaudexInternalProxyWatchParentProcessId = 0,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $ClaudeArguments
 )
@@ -288,7 +289,11 @@ function Invoke-ProxyWatchLoop([int] $ParentProcessId) {
         Start-Sleep -Seconds 1
         if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { break }
         if (-not (Test-ProxyReachable)) {
-            try { Ensure-Proxy } catch { }
+            try { Ensure-Proxy } catch {
+                if ($env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE) {
+                    try { Add-Content -LiteralPath $env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE -Value $_.Exception.Message } catch { }
+                }
+            }
         }
     }
 }
@@ -298,7 +303,7 @@ function Start-ProxyWatcher {
     $hostExecutable = (Get-Process -Id $PID).Path
     $quotedScript = '"' + $PSCommandPath.Replace('"', '\"') + '"'
     $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedScript,
-        '--claudex-internal-proxy-watch', [string] $PID)
+        '-ClaudexInternalProxyWatchParentProcessId', [string] $PID)
     try {
         $parameters = @{ FilePath = $hostExecutable; ArgumentList = $arguments; PassThru = $true }
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $parameters.WindowStyle = 'Hidden' }
@@ -309,10 +314,8 @@ function Start-ProxyWatcher {
     }
 }
 
-if ($ClaudeArguments.Count -eq 2 -and $ClaudeArguments[0] -eq '--claudex-internal-proxy-watch') {
-    $watchedParent = 0
-    if (-not [int]::TryParse($ClaudeArguments[1], [ref] $watchedParent) -or $watchedParent -le 0) { exit 2 }
-    Invoke-ProxyWatchLoop $watchedParent
+if ($ClaudexInternalProxyWatchParentProcessId -gt 0) {
+    Invoke-ProxyWatchLoop $ClaudexInternalProxyWatchParentProcessId
     exit 0
 }
 

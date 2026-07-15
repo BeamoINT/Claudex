@@ -264,17 +264,16 @@ exit 1
         $env:FAKE_PROXY_READY_FILE = $proxyReady
         $env:FAKE_PROXY_START_LOG = $proxyStartLog
         $env:CLAUDEX_TEST_PROXY_REACHABLE_FILE = $proxyReady
+        $watcherErrorLog = Join-Path $temporary 'windows-proxy-watcher-errors.log'
+        $env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE = $watcherErrorLog
         $stateHashBefore = (Get-FileHash -LiteralPath (Join-Path $testConfig '.claude.json') -Algorithm SHA256).Hash
         $shellPath = (Get-Process -Id $PID).Path
         $parentCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('Start-Sleep -Seconds 15'))
         $dummyParent = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-EncodedCommand', $parentCommand) -PassThru
         $quotedLauncher = '"' + (Join-Path $root 'claudex.ps1') + '"'
         $watchArguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedLauncher,
-            '--claudex-internal-proxy-watch', [string] $dummyParent.Id)
-        $watcherStdout = Join-Path $temporary 'windows-proxy-watcher.stdout.log'
-        $watcherStderr = Join-Path $temporary 'windows-proxy-watcher.stderr.log'
-        $watcher = Start-Process -FilePath $shellPath -ArgumentList $watchArguments -PassThru -WindowStyle Hidden `
-            -RedirectStandardOutput $watcherStdout -RedirectStandardError $watcherStderr
+            '-ClaudexInternalProxyWatchParentProcessId', [string] $dummyParent.Id)
+        $watcher = Start-Process -FilePath $shellPath -ArgumentList $watchArguments -PassThru -WindowStyle Hidden
         try {
             foreach ($attempt in 1..100) {
                 if (Test-Path -LiteralPath $proxyReady -PathType Leaf) { break }
@@ -282,11 +281,8 @@ exit 1
             }
             if (-not (Test-Path -LiteralPath $proxyReady -PathType Leaf)) {
                 $watcher.Refresh()
-                $watcherOutput = if (Test-Path -LiteralPath $watcherStdout) { [IO.File]::ReadAllText($watcherStdout) } else { '' }
-                $watcherError = if (Test-Path -LiteralPath $watcherStderr) { [IO.File]::ReadAllText($watcherStderr) } else { '' }
-                $proxyErrorPath = Join-Path $testConfig 'logs\cliproxyapi.stderr.log'
-                $proxyError = if (Test-Path -LiteralPath $proxyErrorPath) { [IO.File]::ReadAllText($proxyErrorPath) } else { '' }
-                throw "assertion failed: Windows proxy watcher recovered a refused connection; watcherExited=$($watcher.HasExited); stdout=$watcherOutput; stderr=$watcherError; proxyStderr=$proxyError"
+                $watchErrors = if (Test-Path -LiteralPath $watcherErrorLog) { Get-Content -LiteralPath $watcherErrorLog -Raw } else { '' }
+                throw "assertion failed: Windows proxy watcher recovered a refused connection; watcherExited=$($watcher.HasExited); watcherErrors=$watchErrors"
             }
             Start-Sleep -Milliseconds 300
             $watcher.Refresh()
@@ -304,6 +300,7 @@ exit 1
             Remove-Item Env:FAKE_PROXY_READY_FILE -ErrorAction SilentlyContinue
             Remove-Item Env:FAKE_PROXY_START_LOG -ErrorAction SilentlyContinue
             Remove-Item Env:CLAUDEX_TEST_PROXY_REACHABLE_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE -ErrorAction SilentlyContinue
         }
     }
 
