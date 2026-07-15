@@ -15,13 +15,14 @@ This audit targets Claude Code 2.1.210, the version used for the July 2026 produ
 | Agents and tasks | Terra/Luna names expose the actual model; concurrency and no-recursion guards limit cooldown storms; Sol reconciles task state | Argument-contract tests |
 | Context and compaction | 400k accounting, 280k automatic compaction, and session cache suppress transient false zero values | Status-line regression tests |
 | Usage limits | Direct web response, cached outage behavior, low-quota alert, account selection, and app-server recovery | Fake-service regressions and live app-server query |
-| Model picker and banner | Stable friendly labels through model metadata and the status line; non-interactive cleanup without rewriting fullscreen cursor frames | JSON/state, byte-stream, and interactive-frame regressions |
+| Model picker and banner | Stable friendly labels through model metadata and the status line without rewriting terminal or machine output | JSON/state and output-immutability regressions |
 | Cursor and mouse | Native terminal cursor plus application pointer OSC with cleanup | Pseudo-terminal regression on macOS |
 | macOS/Linux install | Bash installer, dependency selection, service startup, backups, and private permissions | Isolated install test and GitHub matrix |
 | Native Windows install | PowerShell tool mode, CMD shim, native installer, backups, and private config | PowerShell isolated suite and GitHub Windows runner |
 | Codex authentication | Standard Codex file-backed session is synchronized atomically; live account changes invalidate account-scoped state; logout removes the bridge | Logged-in, refreshed-session, switched-account, missing-file, and logged-out regressions |
 | Claude Code updates | Installer checks immediately; launcher checks daily without blocking and negotiates optional flags from current `--help` | Capability and update scheduling regressions |
-| Resume hints | Claude's generated resume footer is rewritten to the matching Claudex or direct-Chrome launcher | Byte-stream and concurrent-session regressions |
+| Resume hints | An unambiguous Claudex or direct-Chrome resume command is appended without cursor movement or row erasure | Concurrent-session and narrow-terminal safety regressions |
+| Machine output | Stdout/stderr, JSON, stream-JSON, and schema-constrained output remain byte-for-byte native | Split UTF-8, callback-order, and structured-output regressions |
 
 ## Transparent Claude Code features
 
@@ -43,4 +44,4 @@ Maintenance and management subcommands (`agents`, `auth`, `auto-mode`, `doctor`,
 
 ## Regression policy
 
-The repository's cross-platform tests verify wrapper arguments, authentication lifecycle, environment isolation, effort and Solplan modes, conservative plan policy, permissions, task/agent policy, model labels, quota sanitization, fallback behavior, resume rewriting, status rendering, compaction stabilization, cursor behavior, and installers. The runtime capability check handles additive CLI changes automatically; the matrix is extended whenever a release introduces a new behavior that needs Claudex-specific adaptation.
+The repository's cross-platform tests verify wrapper arguments, authentication lifecycle, environment isolation, effort and Solplan modes, conservative plan policy, permissions, task/agent policy, model labels, quota sanitization, fallback behavior, resume attribution, status rendering, compaction stabilization, cursor behavior, and installers. The runtime capability check handles additive CLI changes automatically; the matrix is extended whenever a release introduces a new behavior that needs Claudex-specific adaptation.

@@ -29,26 +29,48 @@ try {
     [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T01:00:00Z","tokens":{"access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"codex-source-id","account_id":"account-test"}}', $utf8)
 
     if ($isWindowsPlatform) {
-        $fakeCurl = Join-Path $fakeBin 'curl.cmd'
-        [IO.File]::WriteAllText($fakeCurl, @'
-@echo off
-echo %* | findstr /c:"test-token" /c:"secret-access-token" >nul
-if not errorlevel 1 exit /b 90
-echo %* | findstr /c:"/wham/usage" >nul
-if not errorlevel 1 (
-  if "%FAKE_USAGE_FAIL%"=="1" exit /b 22
-  echo {"user_id":"private-user","account_id":"private-account","email":"private@example.com","plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":82,"limit_window_seconds":604800,"reset_after_seconds":565127,"reset_at":1784666240},"secondary_window":null},"code_review_rate_limit":null,"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","metered_feature":"codex_bengalfox","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":1784705933},"secondary_window":null}}],"credits":{"has_credits":false,"unlimited":false,"overage_limit_reached":false,"balance":"0"},"spend_control":{"reached":false,"individual_limit":null},"rate_limit_reached_type":null,"rate_limit_reset_credits":{"available_count":1}}
-  exit /b 0
-)
-if not "%FAKE_PROXY_READY_FILE%"=="" if not exist "%FAKE_PROXY_READY_FILE%" exit /b 7
-echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}
-'@, $utf8)
+        $fakeCurl = Join-Path $fakeBin 'curl.exe'
+        Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+
+public static class ClaudexTestCurl
+{
+    public static int Main(string[] args)
+    {
+        bool usage = false;
+        string headerFile = null;
+        foreach (string argument in args)
+        {
+            if (argument.Contains("test-token") || argument.Contains("secret-access-token")) return 90;
+            if (argument.Contains("/wham/usage")) usage = true;
+            if (argument.StartsWith("@") && argument.Length > 1) headerFile = argument.Substring(1);
+        }
+        if (usage)
+        {
+            if (Environment.GetEnvironmentVariable("FAKE_USAGE_FAIL") == "1") return 22;
+            Console.WriteLine(@"{""user_id"":""private-user"",""account_id"":""private-account"",""email"":""private@example.com"",""plan_type"":""pro"",""rate_limit"":{""allowed"":true,""limit_reached"":false,""primary_window"":{""used_percent"":82,""limit_window_seconds"":604800,""reset_after_seconds"":565127,""reset_at"":1784666240},""secondary_window"":null},""code_review_rate_limit"":null,""additional_rate_limits"":[{""limit_name"":""GPT-5.3-Codex-Spark"",""metered_feature"":""codex_bengalfox"",""rate_limit"":{""allowed"":true,""limit_reached"":false,""primary_window"":{""used_percent"":0,""limit_window_seconds"":604800,""reset_after_seconds"":604800,""reset_at"":1784705933},""secondary_window"":null}}],""credits"":{""has_credits"":false,""unlimited"":false,""overage_limit_reached"":false,""balance"":""0""},""spend_control"":{""reached"":false,""individual_limit"":null},""rate_limit_reached_type"":null,""rate_limit_reset_credits"":{""available_count"":1}}");
+            return 0;
+        }
+        string ready = Environment.GetEnvironmentVariable("FAKE_PROXY_READY_FILE");
+        if (!String.IsNullOrEmpty(ready) && !File.Exists(ready)) return 7;
+        if (String.IsNullOrEmpty(headerFile) || !File.Exists(headerFile) ||
+            !File.ReadAllText(headerFile).Contains("Authorization: Bearer test-token")) return 91;
+        Console.WriteLine(@"{""data"":[{""id"":""gpt-5.6-sol""},{""id"":""gpt-5.6-terra""},{""id"":""gpt-5.6-luna""}]}");
+        return 0;
+    }
+}
+'@ -OutputAssembly $fakeCurl -OutputType ConsoleApplication
         function global:claude {
             $firstArgument = if ($args) { [string] $args[0] } else { '' }
             if ($firstArgument -eq '--version') { Write-Output '2.1.210 (test)'; return }
             if ($firstArgument -eq '--help') { Write-Output '--model --agents --append-system-prompt --permission-mode --settings --effort'; return }
             if ($firstArgument -eq 'auto-mode' -and $args.Count -gt 1 -and $args[1] -eq 'defaults') {
-                Write-Output '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
+                if ($env:FAKE_AUTO_MODE_DEFAULT_VERSION -eq '2') {
+                    Write-Output '{"allow":["Updated default allow rule"],"environment":["Updated default environment rule"],"soft_deny":["Updated soft deny"],"hard_deny":["Updated hard deny"]}'
+                } else {
+                    Write-Output '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
+                }
                 return
             }
             if ($firstArgument -eq 'update') { return }
@@ -62,6 +84,10 @@ echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]
                 if ($env:FAKE_FOREIGN_RESUME -eq '1') {
                     $foreignRecord = @{ sessionId = '223e4567-e89b-12d3-a456-426614174001'; cwd = 'C:\foreign'; isSidechain = $false } | ConvertTo-Json -Compress
                     [IO.File]::WriteAllText((Join-Path $projectDirectory '223e4567-e89b-12d3-a456-426614174001.jsonl'), "$foreignRecord`n", $utf8)
+                }
+                if ($env:FAKE_SAME_CWD_RESUME -eq '1') {
+                    $sameCwdRecord = @{ sessionId = '323e4567-e89b-12d3-a456-426614174002'; cwd = (Get-Location).Path; isSidechain = $false } | ConvertTo-Json -Compress
+                    [IO.File]::WriteAllText((Join-Path $projectDirectory '323e4567-e89b-12d3-a456-426614174002.jsonl'), "$sameCwdRecord`n", $utf8)
                 }
                 Write-Output 'Resume this session with:'
                 Write-Output 'claude --resume 123e4567-e89b-12d3-a456-426614174000'
@@ -216,7 +242,13 @@ exit 1
     [IO.File]::WriteAllText((Join-Path $testConfig 'settings.json'), ($seedSettings | ConvertTo-Json -Depth 100), $utf8)
 
     $output = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
-    Assert-True ($output.Contains('AUTO=gpt-5.6-terra')) 'auto classifier'
+    if (-not $output.Contains('AUTO=gpt-5.6-terra')) {
+        $proxyRecoveryLog = Join-Path $testConfig 'logs\proxy-recovery.log'
+        $proxyRecoveryDetail = if (Test-Path -LiteralPath $proxyRecoveryLog -PathType Leaf) {
+            Get-Content -LiteralPath $proxyRecoveryLog -Raw
+        } else { 'proxy recovery log was not created' }
+        throw "assertion failed: auto classifier; proxy diagnostics: $proxyRecoveryDetail"
+    }
     Assert-True ($output.Contains('BG=gpt-5.6-luna')) 'background classifier'
     Assert-True ($output.Contains('SUBAGENT=gpt-5.6-terra')) 'subagent model'
     Assert-True ($output.Contains('CONCURRENCY=3')) 'tool concurrency'
@@ -246,6 +278,15 @@ exit 1
     Assert-True (-not $output.Contains('"claudex-builder"')) 'legacy builder alias removed'
     Assert-True (-not $output.Contains('"claudex-fast"')) 'legacy fast alias removed'
     Assert-True (-not $output.Contains('"model":"gpt-5.6-sol"')) 'leader model is not delegated'
+    $env:CLAUDEX_MODEL = 'gpt-5.6-luna'
+    try {
+        $configuredModel = (& (Join-Path $root 'claudex.ps1') test-prompt | Out-String)
+        Assert-True ($configuredModel.Contains('--model gpt-5.6-luna')) 'configured default model routes the launch'
+        $configuredModelOverride = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
+        Assert-True ($configuredModelOverride.Contains('--model gpt-5.6-terra')) 'explicit model shortcut overrides configured default'
+        $configuredChrome = (& (Join-Path $root 'claudex.ps1') --claude-chrome --print chrome-test | Out-String)
+        Assert-True (-not $configuredChrome.Contains('--model gpt-5.6-luna')) 'direct Chrome ignores managed default model'
+    } finally { Remove-Item Env:CLAUDEX_MODEL -ErrorAction SilentlyContinue }
     $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
     try { $interactiveWrapperOutput = (& (Join-Path $root 'claudex.ps1') --terra interactive-render-test | Out-String) }
     finally { Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT -ErrorAction SilentlyContinue }
@@ -257,6 +298,16 @@ exit 1
     Assert-True (@($composedSettings.autoMode.environment | Where-Object { $_ -eq 'Default environment rule' }).Count -eq 1) 'upstream auto-mode environment preserved'
     Assert-True (@($composedSettings.autoMode.environment | Where-Object { $_ -eq 'User custom environment rule' }).Count -eq 1) 'user auto-mode environment rule preserved'
     Assert-True (@($composedSettings.autoMode.environment | Where-Object { $_.StartsWith('Explicitly approved development transfer:') }).Count -eq 1) 'approved development transfer composed'
+    $env:FAKE_AUTO_MODE_DEFAULT_VERSION = '2'
+    try { & (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-Null }
+    finally { Remove-Item Env:FAKE_AUTO_MODE_DEFAULT_VERSION -ErrorAction SilentlyContinue }
+    $updatedSettings = Get-Content -LiteralPath (Join-Path $testConfig 'settings.json') -Raw | ConvertFrom-Json
+    Assert-True (@($updatedSettings.autoMode.allow | Where-Object { $_ -eq 'Default allow rule' }).Count -eq 0) 'removed upstream allow default does not persist'
+    Assert-True (@($updatedSettings.autoMode.allow | Where-Object { $_ -eq 'Updated default allow rule' }).Count -eq 1) 'updated upstream allow default is active'
+    Assert-True (@($updatedSettings.autoMode.allow | Where-Object { $_ -eq 'User custom allow rule' }).Count -eq 1) 'custom allow survives upstream replacement'
+    Assert-True (@($updatedSettings.autoMode.environment | Where-Object { $_ -eq 'Default environment rule' }).Count -eq 0) 'removed upstream environment default does not persist'
+    Assert-True (@($updatedSettings.autoMode.environment | Where-Object { $_ -eq 'Updated default environment rule' }).Count -eq 1) 'updated upstream environment default is active'
+    Assert-True (@($updatedSettings.autoMode.environment | Where-Object { $_ -eq 'User custom environment rule' }).Count -eq 1) 'custom environment survives upstream replacement'
 
     if ($isWindowsPlatform) {
         $proxyReady = Join-Path $temporary 'windows-proxy-ready'
@@ -341,10 +392,17 @@ exit 1
     Remove-Item Env:FAKE_CLAUDE_RESUME
     Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT
     Remove-Item Env:CLAUDEX_TEST_RESUME_CAPTURE_FILE
-    Assert-True ($resumeFooter.Contains("$([char]27)[2A$([char]27)[JResume this session with:")) 'resume footer rows replaced'
-    Assert-True ($resumeFooter.Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'Claudex resume command'
+    Assert-True (-not $resumeFooter.Contains("$([char]27)[2A")) 'resume correction never moves or erases terminal rows'
+    Assert-True ($resumeFooter.Contains('Claudex resume: claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'Claudex resume command appended'
     $windowsLauncher = [IO.File]::ReadAllText((Join-Path $root 'claudex.ps1'))
     Assert-True ($windowsLauncher.Contains('if ($rewriteResumeFooter) { Update-ResumeFooter $resumeMarker }')) 'resume footer is rewritten independently of exit status'
+    Assert-True ($windowsLauncher.Contains("Join-Path `$configDir 'auto-mode-defaults.json'")) 'Windows uses the shared auto-mode defaults snapshot schema'
+    Assert-True ($windowsLauncher.Contains('try { Ensure-Proxy $startModel }')) 'selected launch model is checked without driving proxy health'
+    Assert-True ($windowsLauncher.Contains("if (`$RequiredModel -eq 'opusplan') { @('gpt-5.6-sol', 'gpt-5.6-terra') }")) 'Solplan health checks its two concrete backing models'
+    Assert-True ($windowsLauncher.Contains('ConvertTo-WindowsCommandLineArgument')) 'Windows native argv serializer is installed'
+    Assert-True ($windowsLauncher.Contains('if ($null -eq $Value -or $Value.Length -eq 0) { return ''""'' }')) 'Windows native argv serializer preserves empty arguments'
+    Assert-True ($windowsLauncher.Contains('if ($character -eq ''"'')')) 'Windows native argv serializer escapes embedded quotes'
+    Assert-True ($windowsLauncher.Contains("`$earlyRuntimeBypass = `$true")) 'maintenance and direct Chrome recovery bypass is installed'
 
     Remove-Item -LiteralPath $resumeCapture -Force
     $env:FAKE_CLAUDE_RESUME = '1'
@@ -359,8 +417,13 @@ exit 1
     $concurrentResumeFooter = [IO.File]::ReadAllText($resumeCapture)
     Assert-True ($concurrentResumeFooter.Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'root resume survives concurrent foreign session'
     Assert-True (-not $concurrentResumeFooter.Contains('223e4567-e89b-12d3-a456-426614174001')) 'foreign session is not selected for resume'
+    Remove-Item -LiteralPath $resumeCapture -Force
+    $env:FAKE_SAME_CWD_RESUME = '1'
+    & (Join-Path $root 'claudex.ps1') | Out-Null
+    Assert-True (-not (Test-Path -LiteralPath $resumeCapture -PathType Leaf)) 'ambiguous same-directory resume is never guessed'
     Remove-Item Env:FAKE_CLAUDE_RESUME
     Remove-Item Env:FAKE_FOREIGN_RESUME
+    Remove-Item Env:FAKE_SAME_CWD_RESUME
     Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT
     Remove-Item Env:CLAUDEX_TEST_RESUME_CAPTURE_FILE
 
@@ -531,41 +594,8 @@ exit 1
     $smallStatus = ($smallJson | & (Join-Path $root 'statusline.ps1') | Out-String)
     Assert-True ($smallStatus.Contains('<1% context')) 'real sub-percent usage is labeled accurately'
 
-    $billingFrame = "GPT-5.6 Sol with high effort$([char]27)[41G$([char]0x00B7)$([char]27)[43GAPI$([char]27)[47GUsage$([char]27)[53GBilling`r"
-    $filteredFrame = $billingFrame | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
-    Assert-True (($filteredFrame | Out-String).Contains('GPT-5.6 Sol with high effort')) 'banner retained'
-    Assert-True (-not ($filteredFrame | Out-String).Contains('API Usage Billing')) 'billing label removed'
-    $interactiveFrame = "$([char]27)[2;1H[Tool] Install local app$([char]27)[3;1H/model opus$([char]27)[4;1H7"
-    $env:CLAUDEX_TEST_INTERACTIVE_TUI = '1'
-    try { $interactiveFrameOutput = $interactiveFrame | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)' }
-    finally { Remove-Item Env:CLAUDEX_TEST_INTERACTIVE_TUI -ErrorAction SilentlyContinue }
-    Assert-True (($interactiveFrameOutput | Out-String).TrimEnd() -eq $interactiveFrame) 'interactive fullscreen output remains byte-for-byte native'
-    $modelFooter = '2% until auto-compact - /model opus[1m'
-    $filteredModelFooter = $modelFooter | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
-    Assert-True (($filteredModelFooter | Out-String).Contains('/model GPT-5.6 Sol')) 'footer model uses friendly name'
-    Assert-True (-not ($filteredModelFooter | Out-String).Contains('opus[1m')) 'footer model SGR fragment removed'
-    $rateLimitError = 'API Error: Request rejected (429) - All credentials for model gpt-5.6-sol are cooling down'
-    $filteredRateLimit = $rateLimitError.Replace(' - ', " $([char]0x00B7) ") | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
-    Assert-True (($filteredRateLimit | Out-String).Contains('Your Codex rate limit for GPT-5.6 Sol is exhausted')) '429 explains exhausted Codex rate limit'
-    Assert-True (($filteredRateLimit | Out-String).Contains('/usage-limit')) '429 points to usage limit details'
-    Assert-True (-not ($filteredRateLimit | Out-String).Contains('credentials')) '429 hides internal credential-pool wording'
-    $resumeFrame = 'Resume this session with: claude --resume 123e4567-e89b-12d3-a456-426614174000'
-    $filteredResume = $resumeFrame | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
-    Assert-True (($filteredResume | Out-String).Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'resume command rewritten'
-    $strictErrorPreference = $ErrorActionPreference
-    try {
-        # Windows PowerShell 5 wraps intentional native stderr as a
-        # NativeCommandError when the suite uses Stop globally.
-        $ErrorActionPreference = 'Continue'
-        $filteredResumeError = & node --require (Join-Path $root 'preload.cjs') -e 'process.stderr.write(process.argv[1])' $resumeFrame 2>&1
-    } finally {
-        $ErrorActionPreference = $strictErrorPreference
-    }
-    Assert-True (($filteredResumeError | Out-String).Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'stderr resume command rewritten'
-    $solplanPicker = 'Opus Plan Mode - Use Opus in plan mode, Sonnet otherwise'
-    $filteredSolplan = $solplanPicker | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
-    Assert-True (($filteredSolplan | Out-String).Contains('GPT-5.6 Solplan')) 'Solplan picker label'
-    Assert-True (($filteredSolplan | Out-String).Contains('GPT-5.6 Sol in plan mode, GPT-5.6 Terra otherwise')) 'Solplan picker description'
+    & node (Join-Path $root 'scripts\check-preload.mjs')
+    Assert-True ($LASTEXITCODE -eq 0) 'preload terminal regressions'
     $env:CLAUDEX_TEST_TTY_INPUT = '1'
     $inputAlias = & node -e 'const p=require(process.argv[1]);process.stdout.write(Buffer.from(p.rewriteSolplanInput(process.argv[2]+String.fromCharCode(13))).toString(process.argv[3]))' (Join-Path $root 'preload.cjs') '/model solplan' hex
     Remove-Item Env:CLAUDEX_TEST_TTY_INPUT

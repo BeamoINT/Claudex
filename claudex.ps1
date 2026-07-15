@@ -13,6 +13,21 @@ $previousSessionMode = [Environment]::GetEnvironmentVariable('CLAUDEX_SESSION_MO
 $previousEffortLevel = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_EFFORT_LEVEL', 'Process')
 $previousModelMode = [Environment]::GetEnvironmentVariable('CLAUDEX_MODEL_MODE', 'Process')
 $previousInteractiveTui = [Environment]::GetEnvironmentVariable('CLAUDEX_INTERACTIVE_TUI', 'Process')
+$sessionEnvironmentNames = @(
+    'BUN_OPTIONS', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME', 'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION', 'ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES', 'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES', 'CLAUDE_CODE_AUTO_MODE_MODEL',
+    'CLAUDE_CODE_BG_CLASSIFIER_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_ALWAYS_ENABLE_EFFORT',
+    'CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY', 'CLAUDE_CODE_MAX_RETRIES', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+    'CLAUDE_CODE_AUTO_COMPACT_WINDOW'
+)
+$previousSessionEnvironment = @{}
+foreach ($environmentName in $sessionEnvironmentNames) {
+    $previousSessionEnvironment[$environmentName] = [Environment]::GetEnvironmentVariable($environmentName, 'Process')
+}
 $utf8 = New-Object Text.UTF8Encoding($false)
 
 $configDir = if ($env:CLAUDEX_CONFIG_DIR) { $env:CLAUDEX_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.config\claudex' }
@@ -25,19 +40,18 @@ function Fail([string] $Message, [int] $Code = 1) {
     exit $Code
 }
 
-if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) {
-    Fail "missing $configFile; reinstall or restore the Claudex configuration."
-}
-foreach ($line in [IO.File]::ReadAllLines($configFile)) {
-    if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
-        $name = $Matches[1]
-        $value = $Matches[2].Trim()
-        if (($value.StartsWith("'") -and $value.EndsWith("'")) -or
-            ($value.StartsWith('"') -and $value.EndsWith('"'))) {
-            $value = $value.Substring(1, $value.Length - 2)
+if (Test-Path -LiteralPath $configFile -PathType Leaf) {
+    foreach ($line in [IO.File]::ReadAllLines($configFile)) {
+        if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
+            $name = $Matches[1]
+            $value = $Matches[2].Trim()
+            if (($value.StartsWith("'") -and $value.EndsWith("'")) -or
+                ($value.StartsWith('"') -and $value.EndsWith('"'))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            $value = $value -replace '\\ ', ' '
+            [Environment]::SetEnvironmentVariable($name, $value, 'Process')
         }
-        $value = $value -replace '\\ ', ' '
-        [Environment]::SetEnvironmentVariable($name, $value, 'Process')
     }
 }
 
@@ -48,8 +62,6 @@ function Env-OrDefault([string] $Name, [string] $Default) {
 }
 
 $proxyToken = Env-OrDefault 'CLAUDEX_PROXY_TOKEN' ''
-if (-not $proxyToken) { Fail 'CLAUDEX_PROXY_TOKEN is not configured' }
-if ($proxyToken.Contains("`r") -or $proxyToken.Contains("`n")) { Fail 'CLAUDEX_PROXY_TOKEN contains an unsupported newline.' 2 }
 $proxyUrl = Env-OrDefault 'CLAUDEX_PROXY_URL' 'http://127.0.0.1:8318'
 $model = Env-OrDefault 'CLAUDEX_MODEL' 'gpt-5.6-sol'
 $permissionMode = Env-OrDefault 'CLAUDEX_PERMISSION_MODE' 'auto'
@@ -80,21 +92,41 @@ if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('--login', '--lo
     exit $LASTEXITCODE
 }
 
-if (-not (Test-Path -LiteralPath $settingsFile -PathType Leaf)) {
-    Fail "missing $settingsFile; reinstall or restore the Claudex settings."
+$earlyRuntimeBypass = $false
+$earlyMaintenanceCommands = @('--help', '-h', '--version', '-v', 'agents', 'auth', 'gateway', 'install', 'mcp', 'plugin', 'plugins', 'project', 'setup-token', 'ultrareview', 'update', 'upgrade')
+foreach ($earlyArgument in $ClaudeArguments) {
+    if ($earlyArgument -eq '--claude-chrome') { $earlyRuntimeBypass = $true; break }
+    if ($earlyArgument -in @('--sol', '--terra', '--luna', '--solplan', '--manual', '--auto', '--accept-edits', '--ultracode', '--max-effort')) { continue }
+    if ($earlyArgument -in $earlyMaintenanceCommands) { $earlyRuntimeBypass = $true }
+    break
 }
 
-if ($permissionMode -notin @('manual', 'auto', 'acceptEdits', 'dontAsk', 'plan')) {
-    Fail "invalid CLAUDEX_PERMISSION_MODE '$permissionMode'; expected manual, auto, acceptEdits, dontAsk, or plan." 2
-}
 $managedCodexModelIds = @('gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna')
-foreach ($modelSetting in @(
-    @{ Name = 'CLAUDEX_AUTO_MODE_MODEL'; Value = $autoModeModel },
-    @{ Name = 'CLAUDEX_BACKGROUND_MODEL'; Value = $backgroundModel },
-    @{ Name = 'CLAUDEX_SUBAGENT_MODEL'; Value = $subagentModel }
-)) {
-    if ($modelSetting.Value -notin $managedCodexModelIds) {
-        Fail "$($modelSetting.Name) must be a managed Codex model (gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna)." 2
+function Assert-ProxyConfiguration {
+    if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) {
+        Fail "missing $configFile; reinstall or restore the Claudex configuration."
+    }
+    if (-not (Test-Path -LiteralPath $settingsFile -PathType Leaf)) {
+        Fail "missing $settingsFile; reinstall or restore the Claudex settings."
+    }
+    if (-not $proxyToken) { Fail 'CLAUDEX_PROXY_TOKEN is not configured' }
+    if ($proxyToken.Contains("`r") -or $proxyToken.Contains("`n")) { Fail 'CLAUDEX_PROXY_TOKEN contains an unsupported newline.' 2 }
+    if ($model -notin $managedCodexModelIds) {
+        Fail "invalid CLAUDEX_MODEL '$model'; expected gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna." 2
+    }
+}
+if (-not $earlyRuntimeBypass) {
+    if ($permissionMode -notin @('manual', 'auto', 'acceptEdits', 'dontAsk', 'plan')) {
+        Fail "invalid CLAUDEX_PERMISSION_MODE '$permissionMode'; expected manual, auto, acceptEdits, dontAsk, or plan." 2
+    }
+    foreach ($modelSetting in @(
+        @{ Name = 'CLAUDEX_AUTO_MODE_MODEL'; Value = $autoModeModel },
+        @{ Name = 'CLAUDEX_BACKGROUND_MODEL'; Value = $backgroundModel },
+        @{ Name = 'CLAUDEX_SUBAGENT_MODEL'; Value = $subagentModel }
+    )) {
+        if ($modelSetting.Value -notin $managedCodexModelIds) {
+            Fail "$($modelSetting.Name) must be a managed Codex model (gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna)." 2
+        }
     }
 }
 
@@ -106,23 +138,37 @@ function Require-Integer([string] $Name, [string] $Value, [int] $Minimum, [int] 
     return $number
 }
 
-$toolConcurrencyNumber = Require-Integer 'CLAUDEX_MAX_TOOL_USE_CONCURRENCY' $toolConcurrency 1 2147483647
-$agentConcurrencyNumber = Require-Integer 'CLAUDEX_MAX_AGENT_CONCURRENCY' $agentConcurrency 1 2147483647
-$maxRetriesNumber = Require-Integer 'CLAUDEX_MAX_RETRIES' $maxRetries 0 15
-$contextWindowNumber = Require-Integer 'CLAUDEX_CONTEXT_WINDOW' $contextWindow 100000 1000000
-$compactWindowNumber = Require-Integer 'CLAUDEX_AUTO_COMPACT_WINDOW' $compactWindow 100000 $contextWindowNumber
-$usageRefreshNumber = Require-Integer 'CLAUDEX_USAGE_REFRESH_SECONDS' $usageRefresh 60 3600
-$usageTimeoutNumber = Require-Integer 'CLAUDEX_USAGE_TIMEOUT_SECONDS' $usageTimeout 1 30
-$usageMaxStaleNumber = Require-Integer 'CLAUDEX_USAGE_MAX_STALE_SECONDS' $usageMaxStale $usageRefreshNumber 604800
-$usageAlertNumber = Require-Integer 'CLAUDEX_USAGE_ALERT_PERCENT' $usageAlert 0 100
-$claudeUpdateIntervalNumber = Require-Integer 'CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS' $claudeUpdateInterval 3600 2592000
-if ($mousePointer -notin @('pointer', 'default', 'off')) {
-    Fail 'CLAUDEX_MOUSE_POINTER_SHAPE must be pointer, default, or off.' 2
+if (-not $earlyRuntimeBypass) {
+    $toolConcurrencyNumber = Require-Integer 'CLAUDEX_MAX_TOOL_USE_CONCURRENCY' $toolConcurrency 1 2147483647
+    $agentConcurrencyNumber = Require-Integer 'CLAUDEX_MAX_AGENT_CONCURRENCY' $agentConcurrency 1 2147483647
+    $maxRetriesNumber = Require-Integer 'CLAUDEX_MAX_RETRIES' $maxRetries 0 15
+    $contextWindowNumber = Require-Integer 'CLAUDEX_CONTEXT_WINDOW' $contextWindow 100000 1000000
+    $compactWindowNumber = Require-Integer 'CLAUDEX_AUTO_COMPACT_WINDOW' $compactWindow 100000 $contextWindowNumber
+    $usageRefreshNumber = Require-Integer 'CLAUDEX_USAGE_REFRESH_SECONDS' $usageRefresh 60 3600
+    $usageTimeoutNumber = Require-Integer 'CLAUDEX_USAGE_TIMEOUT_SECONDS' $usageTimeout 1 30
+    $usageMaxStaleNumber = Require-Integer 'CLAUDEX_USAGE_MAX_STALE_SECONDS' $usageMaxStale $usageRefreshNumber 604800
+    $usageAlertNumber = Require-Integer 'CLAUDEX_USAGE_ALERT_PERCENT' $usageAlert 0 100
+    $claudeUpdateIntervalNumber = Require-Integer 'CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS' $claudeUpdateInterval 3600 2592000
+    if ($mousePointer -notin @('pointer', 'default', 'off')) { Fail 'CLAUDEX_MOUSE_POINTER_SHAPE must be pointer, default, or off.' 2 }
+    if ($usageDisplay -notin @('on', 'off')) { Fail 'CLAUDEX_USAGE_DISPLAY must be on or off.' 2 }
+    if ($usageSource -notin @('auto', 'web', 'app-server')) { Fail 'CLAUDEX_USAGE_SOURCE must be auto, web, or app-server.' 2 }
+    if ($claudeAutoUpdate -notin @('on', 'off')) { Fail 'CLAUDEX_CLAUDE_AUTO_UPDATE must be on or off.' 2 }
+    if ($planModePolicy -notin @('conservative', 'normal')) { Fail 'CLAUDEX_PLAN_MODE_POLICY must be conservative or normal.' 2 }
+} else {
+    $toolConcurrencyNumber = 3; $agentConcurrencyNumber = 3; $maxRetriesNumber = 4
+    $contextWindowNumber = 400000; $compactWindowNumber = 280000
+    $usageRefreshNumber = 300; $usageTimeoutNumber = 8; $usageMaxStaleNumber = 86400; $usageAlertNumber = 20
+    $claudeUpdateIntervalNumber = 86400
+    if ($mousePointer -notin @('pointer', 'default', 'off')) { $mousePointer = 'pointer' }
+    if ($usageDisplay -notin @('on', 'off')) { $usageDisplay = 'on' }
+    if ($usageSource -notin @('auto', 'web', 'app-server')) { $usageSource = 'auto' }
+    if ($claudeAutoUpdate -notin @('on', 'off')) { $claudeAutoUpdate = 'on' }
+    if ($planModePolicy -notin @('conservative', 'normal')) { $planModePolicy = 'conservative' }
+    if ($permissionMode -notin @('manual', 'auto', 'acceptEdits', 'dontAsk', 'plan')) { $permissionMode = 'auto' }
+    if ($autoModeModel -notin $managedCodexModelIds) { $autoModeModel = 'gpt-5.6-terra' }
+    if ($backgroundModel -notin $managedCodexModelIds) { $backgroundModel = 'gpt-5.6-luna' }
+    if ($subagentModel -notin $managedCodexModelIds) { $subagentModel = 'gpt-5.6-terra' }
 }
-if ($usageDisplay -notin @('on', 'off')) { Fail 'CLAUDEX_USAGE_DISPLAY must be on or off.' 2 }
-if ($usageSource -notin @('auto', 'web', 'app-server')) { Fail 'CLAUDEX_USAGE_SOURCE must be auto, web, or app-server.' 2 }
-if ($claudeAutoUpdate -notin @('on', 'off')) { Fail 'CLAUDEX_CLAUDE_AUTO_UPDATE must be on or off.' 2 }
-if ($planModePolicy -notin @('conservative', 'normal')) { Fail 'CLAUDEX_PLAN_MODE_POLICY must be conservative or normal.' 2 }
 
 $env:CLAUDE_CONFIG_DIR = $configDir
 $stateFile = Join-Path $configDir '.claude.json'
@@ -151,33 +197,158 @@ function Update-ModelCache {
     Move-Item -LiteralPath $tempFile -Destination $stateFile -Force
 }
 
-function Fetch-Models {
-    $output = "Authorization: Bearer $proxyToken" | & $curlCommand --silent --show-error --fail --max-time 5 `
-        --header '@-' "$proxyUrl/v1/models" 2>$null
-    if ($LASTEXITCODE -ne 0) { throw 'proxy request failed' }
-    return ($output | Out-String | ConvertFrom-Json)
+function ConvertTo-WindowsCommandLineArgument([string] $Value) {
+    if ($null -eq $Value -or $Value.Length -eq 0) { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    $builder = New-Object Text.StringBuilder
+    [void] $builder.Append('"')
+    $slashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') { $slashes++; continue }
+        if ($character -eq '"') {
+            [void] $builder.Append(('\' * (($slashes * 2) + 1)))
+            [void] $builder.Append('"')
+        } else {
+            if ($slashes -gt 0) { [void] $builder.Append(('\' * $slashes)) }
+            [void] $builder.Append($character)
+        }
+        $slashes = 0
+    }
+    if ($slashes -gt 0) { [void] $builder.Append(('\' * ($slashes * 2))) }
+    [void] $builder.Append('"')
+    return $builder.ToString()
 }
 
-function Test-ProxyReady {
+function Join-WindowsCommandLine([string[]] $Arguments) {
+    return (@($Arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument ([string] $_) }) -join ' ')
+}
+
+function ConvertTo-CmdArgument([string] $Value) {
+    if ($null -eq $Value) { $Value = '' }
+    # Delayed expansion is disabled by the caller. Keep metacharacters inside a
+    # quoted token and use cmd's doubled-quote representation for literal quotes.
+    return '"' + $Value.Replace('%', '%%').Replace('"', '""') + '"'
+}
+
+function Invoke-CurlWithDeadline([string[]] $Arguments, [string] $StandardInput, [int] $TimeoutMilliseconds) {
+    $command = Get-Command $curlCommand -ErrorAction SilentlyContinue
+    if (-not $command) { throw "curl executable was not found: $curlCommand" }
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $commandPath = [string] $command.Source
+    $extension = [IO.Path]::GetExtension($commandPath).ToLowerInvariant()
+    if ($extension -in @('.cmd', '.bat')) {
+        $commandLine = (ConvertTo-CmdArgument $commandPath) + ' ' +
+            (@($Arguments | ForEach-Object { ConvertTo-CmdArgument ([string] $_) }) -join ' ')
+        $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
+        # cmd /s /c requires one outer quote pair around a command whose
+        # executable path is itself quoted. Passing this through ordinary
+        # CreateProcess argv quoting produces a malformed, never-run shim.
+        $startInfo.Arguments = '/d /s /v:off /c "' + $commandLine + '"'
+    } elseif ($command.CommandType -eq 'ExternalScript' -or $extension -eq '.ps1') {
+        # ProcessStartInfo cannot CreateProcess a PowerShell script directly.
+        # Run a fixed encoded bootstrap; proxy credentials live in the private
+        # header file, never in this command line.
+        $escapedPath = $commandPath.Replace("'", "''")
+        $argumentLiteral = @($Arguments | ForEach-Object { "'" + ([string] $_).Replace("'", "''") + "'" }) -join ','
+        $bootstrap = "& '$escapedPath' @($argumentLiteral); exit `$LASTEXITCODE"
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
+        $startInfo.FileName = (Get-Process -Id $PID).Path
+        $startInfo.Arguments = Join-WindowsCommandLine @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded)
+    } else {
+        $startInfo.FileName = $commandPath
+        $startInfo.Arguments = Join-WindowsCommandLine $Arguments
+    }
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
     try {
-        $models = Fetch-Models
-        return @($models.data | ForEach-Object { $_.id }) -contains $model
-    } catch { return $false }
+        if (-not $process.Start()) { throw 'could not start curl.' }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $process.StandardInput.Write($StandardInput)
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            try { $process.Kill() } catch { }
+            try { $process.WaitForExit(1000) | Out-Null } catch { }
+            throw 'proxy request exceeded its wall-clock deadline.'
+        }
+        $output = $stdout.GetAwaiter().GetResult()
+        $errorOutput = $stderr.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) {
+            $safeError = ([string] $errorOutput).Replace($proxyToken, '[redacted]').Replace("`r", ' ').Replace("`n", ' ').Trim()
+            $transport = "$($command.CommandType):$commandPath"
+            if ($safeError) { throw "proxy request via $transport failed with exit code $($process.ExitCode): $safeError" }
+            throw "proxy request via $transport failed with exit code $($process.ExitCode)."
+        }
+        return $output
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Fetch-Models([int] $TimeoutMilliseconds = 5000) {
+    $timeoutMilliseconds = [math]::Max(250, [math]::Min(5000, $TimeoutMilliseconds))
+    $curlSeconds = [math]::Max(1, [int] [math]::Ceiling($timeoutMilliseconds / 1000.0))
+    $healthRunDir = Join-Path $configDir 'run'
+    [IO.Directory]::CreateDirectory($healthRunDir) | Out-Null
+    $headerFile = Join-Path $healthRunDir ('.proxy-health-header-' + [guid]::NewGuid().ToString('N'))
+    try {
+        # PowerShell 5 can surface piped stdin in a .cmd invocation's command
+        # context. Curl's @file syntax keeps the bearer value out of argv while
+        # remaining compatible with native curl.exe and test/enterprise shims.
+        [IO.File]::WriteAllText($headerFile, "Authorization: Bearer $proxyToken`n", $utf8)
+        $output = Invoke-CurlWithDeadline @('--silent', '--show-error', '--connect-timeout', '1',
+            '--max-time', [string] $curlSeconds, '--write-out', "`n%{http_code}", '--header', "@$headerFile", "$proxyUrl/v1/models") `
+            '' $timeoutMilliseconds
+    } finally {
+        Remove-Item -LiteralPath $headerFile -Force -ErrorAction SilentlyContinue
+    }
+    $normalized = $output.Replace("`r`n", "`n").TrimEnd([char[]] "`r`n")
+    $lastNewline = $normalized.LastIndexOf("`n")
+    $status = 200
+    $body = $normalized
+    if ($lastNewline -ge 0 -and $normalized.Substring($lastNewline + 1) -match '^\d{3}$') {
+        $status = [int] $Matches[0]
+        $body = $normalized.Substring(0, $lastNewline)
+    }
+    if ($status -in @(401, 403)) {
+        throw (New-Object UnauthorizedAccessException -ArgumentList 'the proxy rejected the configured local authentication token.')
+    }
+    if ($status -lt 200 -or $status -ge 300) { throw "proxy health endpoint returned HTTP $status." }
+    return ($body | ConvertFrom-Json)
+}
+
+function Get-ProxyHealth([int] $TimeoutMilliseconds = 5000) {
+    try {
+        $models = Fetch-Models $TimeoutMilliseconds
+        $script:lastProxyModelIds = @($models.data | ForEach-Object { [string] $_.id } | Where-Object { $_ })
+        if ($script:lastProxyModelIds.Count -gt 0) { return 'healthy' }
+        Write-ProxyRecoveryDiagnostic 'proxy health response contained no model identifiers'
+        return 'unhealthy'
+    } catch [UnauthorizedAccessException] {
+        Write-ProxyRecoveryDiagnostic 'proxy health request was rejected by local authentication'
+        return 'authentication-failed'
+    } catch {
+        Write-ProxyRecoveryDiagnostic ("proxy health request failed: " + $_.Exception.Message)
+        return 'unhealthy'
+    }
+}
+
+function Test-ProxyReady([int] $TimeoutMilliseconds = 5000) {
+    return (Get-ProxyHealth $TimeoutMilliseconds) -eq 'healthy'
 }
 
 function Test-ProxyReachable {
     if ($env:CLAUDEX_TEST_PROXY_REACHABLE_FILE) {
         return (Test-Path -LiteralPath $env:CLAUDEX_TEST_PROXY_REACHABLE_FILE -PathType Leaf)
     }
-    $client = $null
-    try {
-        $uri = [Uri] $proxyUrl
-        if ($uri.Host -notin @('127.0.0.1', 'localhost', '::1')) { return (Test-ProxyReady) }
-        $client = New-Object Net.Sockets.TcpClient
-        $connection = $client.ConnectAsync($uri.Host, $uri.Port)
-        return $connection.Wait(500) -and $client.Connected
-    } catch { return $false }
-    finally { if ($client) { $client.Dispose() } }
+    # A listening socket is not health: a wedged, unauthenticated, or unrelated
+    # service can own the port. Require the authenticated models contract.
+    return (Get-ProxyHealth 2000) -eq 'healthy'
 }
 
 function Find-ProxyExecutable {
@@ -192,7 +363,51 @@ function Find-ProxyExecutable {
     return $null
 }
 
-function Ensure-Proxy {
+function Write-ProxyRecoveryDiagnostic([string] $Message) {
+    try {
+        $logDir = Join-Path $configDir 'logs'
+        $logFile = Join-Path $logDir 'proxy-recovery.log'
+        [IO.Directory]::CreateDirectory($logDir) | Out-Null
+        $safeMessage = ([string] $Message).Replace("`r", ' ').Replace("`n", ' ')
+        if ($proxyToken) { $safeMessage = $safeMessage.Replace($proxyToken, '[redacted]') }
+        [IO.File]::AppendAllText($logFile,
+            "$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss.fffK') $safeMessage$([Environment]::NewLine)", $utf8)
+        $item = Get-Item -LiteralPath $logFile -ErrorAction SilentlyContinue
+        if ($item -and $item.Length -gt 131072) {
+            $content = [IO.File]::ReadAllText($logFile)
+            $keep = if ($content.Length -gt 65536) { $content.Substring($content.Length - 65536) } else { $content }
+            $firstNewline = $keep.IndexOf("`n")
+            if ($firstNewline -ge 0) { $keep = $keep.Substring($firstNewline + 1) }
+            $temporary = "$logFile.tmp.$PID.$([guid]::NewGuid().ToString('N'))"
+            [IO.File]::WriteAllText($temporary, $keep, $utf8)
+            Move-Item -LiteralPath $temporary -Destination $logFile -Force
+        }
+    } catch { }
+}
+
+function Get-ProxyStartupMutexName {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $identity = [IO.Path]::GetFullPath($configDir).ToLowerInvariant()
+        $hash = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity))
+        $suffix = -join ($hash[0..15] | ForEach-Object { $_.ToString('x2') })
+        return "Local\Claudex.ProxyStart.$suffix"
+    } finally { $sha.Dispose() }
+}
+
+function Assert-ProxyModelAvailable([string] $RequiredModel) {
+    if (-not $RequiredModel) { return }
+    # opusplan is Claude Code's virtual plan/implementation route. The proxy
+    # advertises the two concrete Codex models that back it, not the alias.
+    $requiredModels = if ($RequiredModel -eq 'opusplan') { @('gpt-5.6-sol', 'gpt-5.6-terra') } else { @($RequiredModel) }
+    $missingModels = @($requiredModels | Where-Object { $script:lastProxyModelIds -notcontains $_ })
+    if ($missingModels.Count -gt 0) {
+        Write-ProxyRecoveryDiagnostic "proxy is healthy but selected model route is unavailable: $RequiredModel (missing: $($missingModels -join ', '))"
+        throw "the authenticated Codex account does not advertise the model route required by '$RequiredModel'. Run: claudex --doctor"
+    }
+}
+
+function Ensure-Proxy([string] $RequiredModel = $model) {
     Write-ProxyWatcherTestTrace 'recovery: begin'
     if (-not (Test-Path -LiteralPath $codexSessionHelper -PathType Leaf)) {
         throw "authentication helper is missing: $codexSessionHelper; reinstall Claudex."
@@ -200,49 +415,96 @@ function Ensure-Proxy {
     & $codexSessionHelper sync
     if ($LASTEXITCODE -ne 0) { throw "authentication synchronization failed with exit code $LASTEXITCODE." }
     Write-ProxyWatcherTestTrace 'recovery: authentication synchronized'
-    if (Test-ProxyReady) { return }
+    $initialHealth = Get-ProxyHealth 3000
+    if ($initialHealth -eq 'healthy') { Assert-ProxyModelAvailable $RequiredModel; return }
+    if ($initialHealth -eq 'authentication-failed') {
+        Write-ProxyRecoveryDiagnostic 'proxy authentication failed; startup was not attempted'
+        throw 'the running local proxy rejected the configured authentication token; reinstall Claudex or restore its managed env and proxy config.'
+    }
     Write-ProxyWatcherTestTrace 'recovery: readiness check failed'
+    Write-ProxyRecoveryDiagnostic 'authenticated proxy readiness failed; entering recovery'
     $runDir = Join-Path $configDir 'run'
     $lockDir = Join-Path $runDir 'proxy-start.lock'
     $ownerFile = Join-Path $lockDir 'owner-pid'
     [IO.Directory]::CreateDirectory($runDir) | Out-Null
     $lockAcquired = $false
-    foreach ($attempt in 1..300) {
-        try {
-            New-Item -Path $lockDir -ItemType Directory -ErrorAction Stop | Out-Null
-            [IO.File]::WriteAllText($ownerFile, "$PID`n", $utf8)
-            $lockAcquired = $true
-            break
-        } catch {
-            if (Test-ProxyReady) { return }
+    $legacyLockOwned = $false
+    $startupMutex = $null
+    $useNamedMutex = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    if ($useNamedMutex) {
+        $lockDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        $startupMutex = New-Object Threading.Mutex($false, (Get-ProxyStartupMutexName))
+        try { $lockAcquired = $startupMutex.WaitOne(30000) }
+        catch [Threading.AbandonedMutexException] { $lockAcquired = $true }
+        if ($lockAcquired) {
             try {
-                $lockOwner = 0
-                $ownerAlive = (Test-Path -LiteralPath $ownerFile -PathType Leaf) -and
-                    [int]::TryParse(([IO.File]::ReadAllText($ownerFile).Trim()), [ref] $lockOwner) -and
-                    $null -ne (Get-Process -Id $lockOwner -ErrorAction SilentlyContinue)
-                if ($lockOwner -gt 0 -and -not $ownerAlive) {
-                    Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
-                    Remove-Item -LiteralPath $lockDir -Force -ErrorAction SilentlyContinue
-                } elseif ($lockOwner -le 0 -and (Test-Path -LiteralPath $lockDir -PathType Container)) {
-                    # The creator writes owner-pid immediately after creating
-                    # the directory. Only recover a missing-owner lock after a
-                    # short grace period so another live starter is not evicted.
-                    $ownerlessAge = [DateTime]::UtcNow - (Get-Item -LiteralPath $lockDir).LastWriteTimeUtc
-                    if ($ownerlessAge.TotalSeconds -ge 2) {
+                # Keep interoperating with an older launcher that only knows
+                # the directory lock. A recent legacy owner gets a bounded
+                # chance to finish; an old/PID-reused record is reclaimed.
+                if (Test-Path -LiteralPath $lockDir -PathType Container) {
+                    $legacyAge = [DateTime]::UtcNow - (Get-Item -LiteralPath $lockDir).LastWriteTimeUtc
+                    if ($legacyAge.TotalMinutes -lt 2) {
+                        while ([DateTime]::UtcNow -lt $lockDeadline) {
+                            if (Test-ProxyReady 1000) {
+                                Assert-ProxyModelAvailable $RequiredModel
+                                $startupMutex.ReleaseMutex()
+                                $startupMutex.Dispose()
+                                return
+                            }
+                            Start-Sleep -Milliseconds 100
+                        }
+                    }
+                    Remove-Item -LiteralPath $lockDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                New-Item -Path $lockDir -ItemType Directory -ErrorAction Stop | Out-Null
+                [IO.File]::WriteAllText($ownerFile, "$PID`n", $utf8)
+                $legacyLockOwned = $true
+            } catch {
+                try { $startupMutex.ReleaseMutex() } catch { }
+                $startupMutex.Dispose()
+                throw
+            }
+        }
+    } else {
+        foreach ($attempt in 1..300) {
+            try {
+                New-Item -Path $lockDir -ItemType Directory -ErrorAction Stop | Out-Null
+                [IO.File]::WriteAllText($ownerFile, "$PID`n", $utf8)
+                $lockAcquired = $true
+                break
+            } catch {
+                if (Test-ProxyReady 1000) { Assert-ProxyModelAvailable $RequiredModel; return }
+                try {
+                    $lockOwner = 0
+                    $ownerAlive = (Test-Path -LiteralPath $ownerFile -PathType Leaf) -and
+                        [int]::TryParse(([IO.File]::ReadAllText($ownerFile).Trim()), [ref] $lockOwner) -and
+                        $null -ne (Get-Process -Id $lockOwner -ErrorAction SilentlyContinue)
+                    if ($lockOwner -gt 0 -and -not $ownerAlive) {
                         Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
                         Remove-Item -LiteralPath $lockDir -Force -ErrorAction SilentlyContinue
+                    } elseif ($lockOwner -le 0 -and (Test-Path -LiteralPath $lockDir -PathType Container)) {
+                        $ownerlessAge = [DateTime]::UtcNow - (Get-Item -LiteralPath $lockDir).LastWriteTimeUtc
+                        if ($ownerlessAge.TotalSeconds -ge 2) {
+                            Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
+                            Remove-Item -LiteralPath $lockDir -Force -ErrorAction SilentlyContinue
+                        }
                     }
-                }
-            } catch { }
-            Start-Sleep -Milliseconds 100
+                } catch { }
+                Start-Sleep -Milliseconds 100
+            }
         }
     }
-    if (-not $lockAcquired) { throw 'timed out waiting for another session to start the local proxy.' }
+    if (-not $lockAcquired) {
+        if ($startupMutex) { $startupMutex.Dispose() }
+        Write-ProxyRecoveryDiagnostic 'timed out waiting for the proxy startup mutex'
+        throw 'timed out waiting for another session to start the local proxy.'
+    }
     Write-ProxyWatcherTestTrace 'recovery: startup lock acquired'
+    Write-ProxyRecoveryDiagnostic 'proxy startup lock acquired'
 
     $becameReady = $false
     try {
-        if (Test-ProxyReady) { $becameReady = $true; return }
+        if (Test-ProxyReady 2000) { Assert-ProxyModelAvailable $RequiredModel; $becameReady = $true; return }
         $proxyBinary = Find-ProxyExecutable
         if (-not $proxyBinary) { throw 'CLIProxyAPI is not reachable and no proxy executable was found.' }
         [Console]::Error.WriteLine('claudex: starting the local CLIProxyAPI service...')
@@ -262,18 +524,37 @@ function Ensure-Proxy {
         if ($arguments.Count -gt 0) { $startParameters.ArgumentList = $arguments }
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $startParameters.WindowStyle = 'Hidden' }
         Write-ProxyWatcherTestTrace "recovery: starting $proxyBinary"
+        Write-ProxyRecoveryDiagnostic "starting compatibility service: $proxyBinary"
         Start-Process @startParameters | Out-Null
         Write-ProxyWatcherTestTrace 'recovery: process launched'
-        foreach ($attempt in 1..100) {
-            if (Test-ProxyReady) { $becameReady = $true; break }
+        $readinessDeadline = [DateTime]::UtcNow.AddSeconds(15)
+        while ([DateTime]::UtcNow -lt $readinessDeadline) {
+            $remaining = [int] [math]::Max(250, ($readinessDeadline - [DateTime]::UtcNow).TotalMilliseconds)
+            if (Test-ProxyReady ([math]::Min(2000, $remaining))) {
+                Assert-ProxyModelAvailable $RequiredModel
+                $becameReady = $true
+                break
+            }
             Start-Sleep -Milliseconds 100
         }
         Write-ProxyWatcherTestTrace "recovery: readiness loop completed; ready=$becameReady"
+        Write-ProxyRecoveryDiagnostic "proxy readiness loop completed; ready=$becameReady"
     } finally {
-        Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $lockDir -Force -ErrorAction SilentlyContinue
+        if ($useNamedMutex) {
+            if ($legacyLockOwned) {
+                Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $lockDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if ($lockAcquired) { try { $startupMutex.ReleaseMutex() } catch { } }
+            if ($startupMutex) { $startupMutex.Dispose() }
+        } else {
+            Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $lockDir -Force -ErrorAction SilentlyContinue
+        }
     }
-    if (-not $becameReady) { throw 'local proxy did not become healthy. Run: claudex --doctor' }
+    if (-not $becameReady) {
+        throw 'local proxy did not become healthy before the 15-second deadline. Run: claudex --doctor'
+    }
 }
 
 function Start-AuthWatcher {
@@ -309,6 +590,7 @@ function Invoke-ProxyWatchLoop([int] $ParentProcessId) {
                 Write-ProxyWatcherTestTrace 'proxy recovery completed'
             } catch {
                 Write-ProxyWatcherTestTrace ("proxy recovery failed: " + $_.Exception.Message)
+                Write-ProxyRecoveryDiagnostic ("proxy recovery failed: " + $_.Exception.Message)
             }
         }
     }
@@ -336,13 +618,17 @@ if ($ClaudexInternalProxyWatchParentProcessId -gt 0) {
     exit 0
 }
 
-# Internal watcher processes exit above before touching the user-facing state.
-Update-ModelCache
+# Internal watcher processes exit above before touching user-facing state.
 
-function Load-ClaudeCapabilities {
+function Resolve-ClaudeCommand {
     $claudeCommand = Get-Command claude -ErrorAction SilentlyContinue
     if (-not $claudeCommand) { Fail 'Claude Code was not found. Install Claude Code and retry.' }
+    $script:claudeCommand = $claudeCommand
     $script:claudeInvocation = if ($claudeCommand.CommandType -eq 'Function') { $claudeCommand.Name } else { $claudeCommand.Source }
+}
+
+function Load-ClaudeCapabilities {
+    Resolve-ClaudeCommand
     $script:claudeHelp = (& $script:claudeInvocation --help 2>$null | Out-String)
     if ([string]::IsNullOrWhiteSpace($script:claudeHelp)) { Fail 'Claude Code did not return its capability list.' }
     if (-not $script:claudeHelp.Contains('--model')) {
@@ -354,14 +640,40 @@ function Update-AutoModeRules {
     $managedSettings = Join-Path $configDir 'settings.json'
     if ([IO.Path]::GetFullPath($settingsFile) -ne [IO.Path]::GetFullPath($managedSettings)) { return }
     $tempFile = $null
+    $snapshotTemp = $null
     try {
-        $defaults = (& $script:claudeInvocation auto-mode defaults 2>$null | Out-String) | ConvertFrom-Json
-        foreach ($property in @('allow', 'environment', 'soft_deny', 'hard_deny')) {
-            if ($null -eq $defaults.PSObject.Properties[$property]) { return }
+        $snapshotFile = Join-Path $configDir 'auto-mode-defaults.json'
+        $previousSnapshot = $null
+        if (Test-Path -LiteralPath $snapshotFile -PathType Leaf) {
+            try {
+                $candidateSnapshot = Get-Content -LiteralPath $snapshotFile -Raw | ConvertFrom-Json
+                $snapshotValid = $true
+                foreach ($property in @('allow', 'environment', 'soft_deny', 'hard_deny')) {
+                    if ($null -eq $candidateSnapshot.PSObject.Properties[$property]) { $snapshotValid = $false; break }
+                }
+                if ($snapshotValid) { $previousSnapshot = $candidateSnapshot }
+            } catch { }
+        }
+        $defaultsAreFresh = $false
+        try {
+            $defaults = (& $script:claudeInvocation auto-mode defaults 2>$null | Out-String) | ConvertFrom-Json
+            foreach ($property in @('allow', 'environment', 'soft_deny', 'hard_deny')) {
+                if ($null -eq $defaults.PSObject.Properties[$property]) { throw "missing auto-mode default: $property" }
+            }
+            $defaultsAreFresh = $true
+        } catch {
+            if ($null -eq $previousSnapshot) { return }
+            $defaults = $previousSnapshot
         }
         $settings = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
         if ($null -eq $settings.PSObject.Properties['autoMode']) {
             $settings | Add-Member -NotePropertyName autoMode -NotePropertyValue ([pscustomobject]@{})
+        }
+        $previousAllow = @()
+        $previousEnvironment = @()
+        if ($null -ne $previousSnapshot) {
+            $previousAllow = @($previousSnapshot.allow)
+            $previousEnvironment = @($previousSnapshot.environment)
         }
         $approval = 'Explicit Action Approval: A user message that explicitly approves a specific action and target, including reissuing it after a denial or unambiguously referring to the immediately preceding blocked action with language such as approve that, go ahead, or proceed, satisfies named-and-specific consent for matching SOFT BLOCK rules. Do not force the user to restate the command, ask for duplicate confirmation, or treat the prior denial as permanent. This does not override HARD BLOCK rules or authorize a broader action.'
         $requestedConfig = 'Requested Agent Configuration: Editing agent configuration is routine when the user explicitly asks for that specific configuration or permission change. Treat that edit as user-requested rather than Self-Modification; unrelated permission widening remains blocked.'
@@ -370,13 +682,15 @@ function Update-AutoModeRules {
         $existingAllow = if ($null -ne $settings.autoMode.PSObject.Properties['allow']) {
             @($settings.autoMode.allow | Where-Object {
                 -not $_.StartsWith('Explicit Action Approval:') -and
-                -not $_.StartsWith('Requested Agent Configuration:')
+                -not $_.StartsWith('Requested Agent Configuration:') -and
+                $_ -notin $previousAllow
             })
         } else { @() }
         $existingEnvironment = if ($null -ne $settings.autoMode.PSObject.Properties['environment']) {
             @($settings.autoMode.environment | Where-Object {
                 -not $_.StartsWith('User-designated task boundary:') -and
-                -not $_.StartsWith('Explicitly approved development transfer:')
+                -not $_.StartsWith('Explicitly approved development transfer:') -and
+                $_ -notin $previousEnvironment
             })
         } else { @() }
         $composedAllow = @(@($defaults.allow) + $existingAllow + @($approval, $requestedConfig) | Select-Object -Unique)
@@ -384,16 +698,30 @@ function Update-AutoModeRules {
         $settings.autoMode | Add-Member -NotePropertyName allow -NotePropertyValue $composedAllow -Force
         $settings.autoMode | Add-Member -NotePropertyName environment -NotePropertyValue $composedEnvironment -Force
         $serializedSettings = $settings | ConvertTo-Json -Depth 100
-        if ($serializedSettings -eq (Get-Content -LiteralPath $settingsFile -Raw)) { return }
-        $tempFile = Join-Path $configDir ('settings.json.tmp.' + [guid]::NewGuid().ToString('N'))
-        [IO.File]::WriteAllText($tempFile, $serializedSettings, $utf8)
-        Move-Item -LiteralPath $tempFile -Destination $settingsFile -Force
-        $tempFile = $null
+        if ($serializedSettings -ne (Get-Content -LiteralPath $settingsFile -Raw)) {
+            $tempFile = Join-Path $configDir ('settings.json.tmp.' + [guid]::NewGuid().ToString('N'))
+            [IO.File]::WriteAllText($tempFile, $serializedSettings, $utf8)
+            Move-Item -LiteralPath $tempFile -Destination $settingsFile -Force
+            $tempFile = $null
+        }
+        if ($defaultsAreFresh) {
+            $snapshot = [ordered]@{
+                allow = @($defaults.allow)
+                environment = @($defaults.environment)
+                soft_deny = @($defaults.soft_deny)
+                hard_deny = @($defaults.hard_deny)
+            }
+            $snapshotTemp = Join-Path $configDir ('.auto-mode-defaults.tmp.' + [guid]::NewGuid().ToString('N'))
+            [IO.File]::WriteAllText($snapshotTemp, (($snapshot | ConvertTo-Json -Depth 20) + "`n"), $utf8)
+            Move-Item -LiteralPath $snapshotTemp -Destination $snapshotFile -Force
+            $snapshotTemp = $null
+        }
     } catch {
         # Older Claude Code builds may not expose auto-mode defaults. The
         # shipped settings remain valid and capability negotiation continues.
     } finally {
         if ($tempFile) { Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue }
+        if ($snapshotTemp) { Remove-Item -LiteralPath $snapshotTemp -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -444,6 +772,8 @@ function Model-Name([string] $Id) {
 }
 
 function Invoke-Doctor {
+    Assert-ProxyConfiguration
+    Update-ModelCache
     Load-ClaudeCapabilities
     Update-AutoModeRules
     try { Ensure-Proxy } catch { Fail $_.Exception.Message }
@@ -596,27 +926,53 @@ if ($directChrome) {
     else { Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
     Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
     Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue
+    foreach ($environmentName in $sessionEnvironmentNames | Where-Object {
+        $_ -like 'ANTHROPIC_DEFAULT_*' -or $_ -like 'CLAUDE_CODE_*MODEL*' -or $_ -eq 'CLAUDE_CODE_ALWAYS_ENABLE_EFFORT'
+    }) {
+        Remove-Item -LiteralPath "Env:$environmentName" -ErrorAction SilentlyContinue
+    }
     $forwardArguments.Insert(0, '--chrome')
 }
 
-# GPT-specific input aliases and non-interactive cleanup belong only to proxied sessions.
 if ($useProxy) {
-    $preload = Join-Path $configDir 'preload.cjs'
-    if (Test-Path -LiteralPath $preload -PathType Leaf) {
-        $preloadForBun = $preload.Replace('\', '/').Replace(' ', '\ ')
-        $existingBunOptions = [Environment]::GetEnvironmentVariable('BUN_OPTIONS', 'Process')
-        $env:BUN_OPTIONS = ("--preload $preloadForBun $existingBunOptions").Trim()
-    }
-    if ((-not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) -or $env:CLAUDEX_TEST_TTY_OUTPUT -eq '1') { $env:CLAUDEX_INTERACTIVE_TUI = '1' }
-    else { Remove-Item Env:CLAUDEX_INTERACTIVE_TUI -ErrorAction SilentlyContinue }
+    Assert-ProxyConfiguration
+    Update-ModelCache
+    if (-not $startModel) { $startModel = $model }
 }
 
-Load-ClaudeCapabilities
+# GPT-specific input aliases and non-interactive cleanup belong only to proxied sessions.
+$preload = Join-Path $configDir 'preload.cjs'
+$preloadForBun = $preload.Replace('\', '/').Replace(' ', '\ ')
+$existingBunOptions = [Environment]::GetEnvironmentVariable('BUN_OPTIONS', 'Process')
+function Remove-ClaudexPreloadOption([string] $Options) {
+    if (-not $Options) { return '' }
+    $managed = "--preload $preloadForBun"
+    $quotedManaged = '--preload "' + $preload.Replace('\', '/') + '"'
+    $cleaned = [regex]::Replace($Options, '(^|\s)' + [regex]::Escape($managed) + '(?=\s|$)', ' ')
+    $cleaned = [regex]::Replace($cleaned, '(^|\s)' + [regex]::Escape($quotedManaged) + '(?=\s|$)', ' ')
+    return ([regex]::Replace($cleaned, '\s+', ' ')).Trim()
+}
+$cleanBunOptions = Remove-ClaudexPreloadOption $existingBunOptions
+if ($useProxy) {
+    if (Test-Path -LiteralPath $preload -PathType Leaf) {
+        $env:BUN_OPTIONS = ("--preload $preloadForBun $cleanBunOptions").Trim()
+    } elseif ($cleanBunOptions) { $env:BUN_OPTIONS = $cleanBunOptions }
+    else { Remove-Item Env:BUN_OPTIONS -ErrorAction SilentlyContinue }
+    if ((-not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) -or $env:CLAUDEX_TEST_TTY_OUTPUT -eq '1') { $env:CLAUDEX_INTERACTIVE_TUI = '1' }
+    else { Remove-Item Env:CLAUDEX_INTERACTIVE_TUI -ErrorAction SilentlyContinue }
+} elseif ($cleanBunOptions) {
+    $env:BUN_OPTIONS = $cleanBunOptions
+} else {
+    Remove-Item Env:BUN_OPTIONS -ErrorAction SilentlyContinue
+}
+
+if ($useProxy -or $effortMode) { Load-ClaudeCapabilities }
+else { Resolve-ClaudeCommand; $script:claudeHelp = '' }
 if ($useProxy -or ($forwardArguments.Count -gt 0 -and $forwardArguments[0] -eq 'auto-mode')) { Update-AutoModeRules }
 if ($forwardArguments.Count -eq 0 -or $forwardArguments[0] -notin @('update', 'upgrade')) { Start-ClaudeUpdateCheck }
 
 if ($useProxy) {
-    try { Ensure-Proxy } catch { Fail $_.Exception.Message }
+    try { Ensure-Proxy $startModel } catch { Fail $_.Exception.Message }
     $authWatcher = Start-AuthWatcher
     $proxyWatcher = Start-ProxyWatcher
 
@@ -715,6 +1071,19 @@ $rewriteResumeFooter = ((-not [Console]::IsInputRedirected -and -not [Console]::
 foreach ($argument in $forwardArguments) {
     if ($argument -in @('--print', '-p', '--help', '-h', '--version', '-v', 'doctor')) { $rewriteResumeFooter = $false }
 }
+$requestedResumeSessionId = ''
+for ($resumeIndex = 0; $resumeIndex -lt $forwardArguments.Count; $resumeIndex++) {
+    $resumeArgument = [string] $forwardArguments[$resumeIndex]
+    if ($resumeArgument -in @('--resume', '--session-id') -and $resumeIndex + 1 -lt $forwardArguments.Count) {
+        $requestedResumeSessionId = [string] $forwardArguments[$resumeIndex + 1]
+        break
+    }
+    if ($resumeArgument -match '^--(?:resume|session-id)=(.+)$') {
+        $requestedResumeSessionId = $Matches[1]
+        break
+    }
+}
+if ($requestedResumeSessionId -notmatch '^[0-9a-fA-F-]{36}$') { $requestedResumeSessionId = '' }
 $resumeMarker = $null
 if ($rewriteResumeFooter) {
     $resumeMarker = Join-Path $configDir ('.resume-start-' + [guid]::NewGuid().ToString('N'))
@@ -728,10 +1097,23 @@ function Update-ResumeFooter([string] $Marker) {
     $projectDirectory = Join-Path (Join-Path $sessionConfigDir 'projects') $projectKey
     if (-not (Test-Path -LiteralPath $projectDirectory -PathType Container)) { return }
     $markerTime = (Get-Item -LiteralPath $Marker).LastWriteTimeUtc
-    $candidates = @(Get-ChildItem -LiteralPath $projectDirectory -File -Filter '*.jsonl' |
-        Where-Object { $_.LastWriteTimeUtc -ge $markerTime } |
-        Sort-Object LastWriteTimeUtc -Descending)
-    $latest = $null
+    if ($requestedResumeSessionId) {
+        $explicitCandidate = Join-Path $projectDirectory ($requestedResumeSessionId + '.jsonl')
+        $candidates = if (Test-Path -LiteralPath $explicitCandidate -PathType Leaf) { @((Get-Item -LiteralPath $explicitCandidate)) } else { @() }
+    } else {
+        $allCandidates = @(Get-ChildItem -LiteralPath $projectDirectory -File -Filter '*.jsonl')
+        # A new root session creates its transcript near launch. Prefer the
+        # earliest newly-created matching transcript so a later same-cwd tab
+        # cannot steal this launch's footer merely by exiting first.
+        $newCandidates = @($allCandidates | Where-Object { $_.CreationTimeUtc -ge $markerTime } |
+            Sort-Object CreationTimeUtc, Name)
+        $newNames = @($newCandidates | ForEach-Object { $_.FullName })
+        $updatedCandidates = @($allCandidates | Where-Object {
+            $_.LastWriteTimeUtc -ge $markerTime -and $_.FullName -notin $newNames
+        } | Sort-Object LastWriteTimeUtc -Descending)
+        $candidates = @($newCandidates + $updatedCandidates)
+    }
+    $matchingCandidates = @()
     foreach ($candidate in $candidates) {
         $candidateSessionId = [IO.Path]::GetFileNameWithoutExtension($candidate.Name)
         if ($candidateSessionId -notmatch '^[0-9a-fA-F-]{36}$') { continue }
@@ -748,24 +1130,62 @@ function Update-ResumeFooter([string] $Marker) {
                 }
             } catch { }
         }
-        if ($matchesRootSession) { $latest = $candidate; break }
+        if ($matchesRootSession) { $matchingCandidates += $candidate }
     }
-    if ($null -eq $latest) { return }
+    # Never guess between concurrent same-directory sessions. Claude's native
+    # footer remains intact; correction is appended only when attribution is
+    # unambiguous (or an explicit resume/session ID selected one transcript).
+    if ($matchingCandidates.Count -ne 1) { return }
+    $latest = $matchingCandidates[0]
     $sessionId = [IO.Path]::GetFileNameWithoutExtension($latest.Name)
     if ($sessionId -notmatch '^[0-9a-fA-F-]{36}$') { return }
-    $escape = [char]27
     $resumeCommand = if ($directChrome) { 'claudex --claude-chrome --resume' } else { 'claudex --resume' }
-    $footer = "$escape[2A$escape[JResume this session with:`n$resumeCommand $sessionId`n"
+    $footer = "Claudex resume: $resumeCommand $sessionId`n"
     if ($env:CLAUDEX_TEST_RESUME_CAPTURE_FILE) {
         [IO.File]::WriteAllText($env:CLAUDEX_TEST_RESUME_CAPTURE_FILE, $footer, $utf8)
     }
     [Console]::Out.Write($footer)
 }
 
+function Invoke-ClaudeProcess([Collections.Generic.List[string]] $Arguments) {
+    if ($script:claudeCommand.CommandType -in @('Function', 'Filter', 'Cmdlet')) {
+        & $script:claudeInvocation @Arguments
+        $script:claudeProcessExitCode = if ($null -ne $LASTEXITCODE) { [int] $LASTEXITCODE } elseif ($?) { 0 } else { 1 }
+        return
+    }
+    if ($script:claudeCommand.CommandType -eq 'ExternalScript') {
+        & $script:claudeInvocation @Arguments
+        $script:claudeProcessExitCode = if ($null -ne $LASTEXITCODE) { [int] $LASTEXITCODE } elseif ($?) { 0 } else { 1 }
+        return
+    }
+
+    $commandPath = [string] $script:claudeCommand.Source
+    $extension = [IO.Path]::GetExtension($commandPath).ToLowerInvariant()
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    if ($extension -in @('.cmd', '.bat')) {
+        $commandLine = (ConvertTo-CmdArgument $commandPath) + ' ' +
+            (@($Arguments | ForEach-Object { ConvertTo-CmdArgument ([string] $_) }) -join ' ')
+        $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
+        $startInfo.Arguments = Join-WindowsCommandLine @('/d', '/s', '/v:off', '/c', $commandLine)
+    } else {
+        $startInfo.FileName = $commandPath
+        $startInfo.Arguments = Join-WindowsCommandLine @($Arguments)
+    }
+    $startInfo.UseShellExecute = $false
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { throw 'Claude Code could not be started.' }
+        $process.WaitForExit()
+        $script:claudeProcessExitCode = $process.ExitCode
+    } finally { $process.Dispose() }
+}
+
 try {
     Set-MousePointer $mousePointer
-    & claude @claudeLaunchArguments
-    $exitCode = $LASTEXITCODE
+    $script:claudeProcessExitCode = 1
+    Invoke-ClaudeProcess $claudeLaunchArguments
+    $exitCode = $script:claudeProcessExitCode
     if ($rewriteResumeFooter) { Update-ResumeFooter $resumeMarker }
 } finally {
     if ($authWatcher -and -not $authWatcher.HasExited) {
@@ -786,5 +1206,10 @@ try {
     else { $env:CLAUDEX_MODEL_MODE = $previousModelMode }
     if ($null -eq $previousInteractiveTui) { Remove-Item Env:CLAUDEX_INTERACTIVE_TUI -ErrorAction SilentlyContinue }
     else { $env:CLAUDEX_INTERACTIVE_TUI = $previousInteractiveTui }
+    foreach ($environmentName in $sessionEnvironmentNames) {
+        $previousValue = $previousSessionEnvironment[$environmentName]
+        if ($null -eq $previousValue) { Remove-Item -LiteralPath "Env:$environmentName" -ErrorAction SilentlyContinue }
+        else { [Environment]::SetEnvironmentVariable($environmentName, [string] $previousValue, 'Process') }
+    }
 }
 exit $exitCode

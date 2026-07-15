@@ -101,6 +101,7 @@ if ($usageDisplay -ne 'off' -and (Test-Path -LiteralPath $usageHelper -PathType 
         $lastAttemptPath = Join-Path $usageCacheDir 'last-attempt'
         $lastSuccessPath = Join-Path $usageCacheDir 'last-success'
         $refreshLock = Join-Path $usageCacheDir 'refresh.lock'
+        $refreshOwnerPath = Join-Path $refreshLock 'owner-pid'
         $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
         $lastAttempt = 0L
         if (Test-Path -LiteralPath $lastAttemptPath -PathType Leaf) { [long]::TryParse(([IO.File]::ReadAllText($lastAttemptPath).Trim()), [ref] $lastAttempt) | Out-Null }
@@ -112,11 +113,27 @@ if ($usageDisplay -ne 'off' -and (Test-Path -LiteralPath $usageHelper -PathType 
                 [IO.File]::WriteAllText($lastAttemptPath, "$now`n", $utf8)
                 $powershell = (Get-Process -Id $PID).Path
                 $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $usageHelper + '"'), '-RefreshCache', '-LockHeld')
-                Start-Process -FilePath $powershell -ArgumentList $arguments -WindowStyle Hidden | Out-Null
+                $refreshProcess = Start-Process -FilePath $powershell -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                [IO.File]::WriteAllText($refreshOwnerPath, "$($refreshProcess.Id)`n", $utf8)
                 $started = $true
             } catch {
                 if (-not $started -and $now - $lastAttempt -ge ($refreshSeconds * 2) -and (Test-Path -LiteralPath $refreshLock -PathType Container)) {
-                    Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
+                    $refreshOwner = 0
+                    if (Test-Path -LiteralPath $refreshOwnerPath -PathType Leaf) {
+                        [int]::TryParse(([IO.File]::ReadAllText($refreshOwnerPath).Trim()), [ref] $refreshOwner) | Out-Null
+                    }
+                    $ownerIsDead = $refreshOwner -gt 0 -and -not (Get-Process -Id $refreshOwner -ErrorAction SilentlyContinue)
+                    $ownerlessIsStale = $false
+                    if ($refreshOwner -le 0) {
+                        try {
+                            $lockAge = ([DateTime]::UtcNow - (Get-Item -LiteralPath $refreshLock).LastWriteTimeUtc).TotalSeconds
+                            $ownerlessIsStale = $lockAge -ge 2
+                        } catch { $ownerlessIsStale = $false }
+                    }
+                    if ($ownerIsDead -or $ownerlessIsStale) {
+                        Remove-Item -LiteralPath $refreshOwnerPath -Force -ErrorAction SilentlyContinue
+                        Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
+                    }
                 }
             }
         }

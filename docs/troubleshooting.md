@@ -40,10 +40,13 @@ The managed bridge retries transient upstream 500/502/503/504 responses before
 Claude Code sees them, including failures before the first stream byte. A red
 API error that remains after those bounded retries is a persistent failure and
 is intentionally still shown.
-When Codex reports an exhausted model quota, Claudex labels it as a rate limit
-and points to `/usage-limit`. If you sign into another account in Codex Desktop
-or the Codex CLI, the running Claudex session follows that account
-automatically; press Continue after the new sign-in completes.
+When Codex reports an exhausted model quota, run `/usage-limit` to inspect the
+reset window or select another signed-in account. Claudex deliberately leaves
+terminal and machine output byte-for-byte native, so the bridge's technical
+cooldown wording can remain visible for a genuine quota exhaustion. If you sign
+into another account in Codex Desktop or the Codex CLI, the running Claudex
+session follows that account automatically; press Continue after the new
+sign-in completes.
 
 ## Local proxy does not become healthy
 

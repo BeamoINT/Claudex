@@ -14,6 +14,7 @@ $bridgeAuthDir = if ($env:CLAUDEX_CODEX_AUTH_DIR) { $env:CLAUDEX_CODEX_AUTH_DIR 
 $bridgeAuthFile = Join-Path $bridgeAuthDir 'codex-claudex-managed.json'
 $usageCacheDir = Join-Path $configDir 'usage-cache'
 $usageAccountFile = Join-Path $configDir 'codex-usage-account'
+$usageGenerationFile = Join-Path $configDir 'usage-generation'
 $utf8 = New-Object Text.UTF8Encoding($false)
 
 function Write-Failure([string] $Message) {
@@ -26,45 +27,73 @@ function Clear-BridgeSession {
 
 function Clear-AccountScopedState {
     Remove-Item -LiteralPath $usageAccountFile -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $usageCacheDir -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($name in @('limits.json', 'summary', 'last-attempt', 'last-success')) {
+        Remove-Item -LiteralPath (Join-Path $usageCacheDir $name) -Force -ErrorAction SilentlyContinue
+    }
+    [IO.Directory]::CreateDirectory($configDir) | Out-Null
+    $generationTemporary = Join-Path $configDir ('.usage-generation-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    [IO.File]::WriteAllText($generationTemporary, ([guid]::NewGuid().ToString('N') + "`n"), $utf8)
+    Move-Item -LiteralPath $generationTemporary -Destination $usageGenerationFile -Force
+}
+
+function Get-JsonProperty($Object, [string] $Name, $Default = $null) {
+    if ($null -eq $Object -or $null -eq $Object.PSObject.Properties[$Name]) { return $Default }
+    $value = $Object.$Name
+    if ($null -eq $value) { return $Default }
+    return $value
 }
 
 function Test-CodexLogin {
     $codex = Get-Command codex -ErrorAction SilentlyContinue
     if (-not $codex) { return $false }
-    & $codex.Source login status *> $null
-    return $LASTEXITCODE -eq 0
+    try {
+        & $codex.Source login status *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
 }
 
 function Sync-Session {
     $codex = Get-Command codex -ErrorAction SilentlyContinue
     if (-not $codex) {
         Clear-BridgeSession
+        Clear-AccountScopedState
         Write-Failure 'Codex CLI was not found. Install Codex, run `codex login`, and retry.'
         return 10
     }
     if (-not (Test-CodexLogin)) {
         Clear-BridgeSession
+        Clear-AccountScopedState
         Write-Failure 'Codex is logged out. Run `codex login` (or `claudex --login`) and retry.'
         return 11
     }
     if (-not (Test-Path -LiteralPath $codexAuthFile -PathType Leaf)) {
         Clear-BridgeSession
+        Clear-AccountScopedState
         Write-Failure 'Codex is logged in, but its credentials are stored in the OS keyring.'
         Write-Failure 'Run `claudex --login` once so Codex can create a reusable file-backed local session.'
         return 13
     }
     try { $source = Get-Content -LiteralPath $codexAuthFile -Raw | ConvertFrom-Json } catch {
         Clear-BridgeSession
+        Clear-AccountScopedState
         Write-Failure 'Codex auth.json is not valid JSON. Run `claudex --login` to repair the session.'
         return 14
     }
-    $tokens = $source.tokens
-    if ($source.auth_mode -ne 'chatgpt' -or -not $tokens -or
-        [string]::IsNullOrWhiteSpace([string] $tokens.access_token) -or
-        [string]::IsNullOrWhiteSpace([string] $tokens.refresh_token) -or
-        [string]::IsNullOrWhiteSpace([string] $tokens.account_id)) {
+    $tokens = Get-JsonProperty $source 'tokens' $null
+    $authMode = [string] (Get-JsonProperty $source 'auth_mode' '')
+    $accessToken = [string] (Get-JsonProperty $tokens 'access_token' '')
+    $refreshToken = [string] (Get-JsonProperty $tokens 'refresh_token' '')
+    $accountId = [string] (Get-JsonProperty $tokens 'account_id' '')
+    $idToken = [string] (Get-JsonProperty $tokens 'id_token' '')
+    $sourceRefresh = [string] (Get-JsonProperty $source 'last_refresh' '')
+    if ($authMode -ne 'chatgpt' -or -not $tokens -or
+        [string]::IsNullOrWhiteSpace($accessToken) -or
+        [string]::IsNullOrWhiteSpace($refreshToken) -or
+        [string]::IsNullOrWhiteSpace($accountId)) {
         Clear-BridgeSession
+        Clear-AccountScopedState
         Write-Failure 'Claudex requires Codex ChatGPT sign-in. Run `claudex --login` and choose ChatGPT.'
         return 14
     }
@@ -77,14 +106,14 @@ function Sync-Session {
             $existing = Get-Content -LiteralPath $bridgeAuthFile -Raw | ConvertFrom-Json
             $previousAccount = [string] $existing.account_id
             $existingRefresh = [string] $existing.last_refresh
-            $sourceRefresh = [string] $source.last_refresh
+            $sourceRefresh = [string] $sourceRefresh
             $existingDisabled = $null -ne $existing.PSObject.Properties['disabled'] -and [bool] $existing.disabled
             $existingExpired = $null -ne $existing.PSObject.Properties['expired'] -and [bool] $existing.expired
             if ($existing.type -eq 'codex' -and $existing.access_token -and
-                $existing.account_id -eq $tokens.account_id -and
-                $existing.access_token -eq $tokens.access_token -and
-                $existing.refresh_token -eq $tokens.refresh_token -and
-                ([string] $existing.id_token) -eq ([string] $tokens.id_token) -and
+                $existing.account_id -eq $accountId -and
+                $existing.access_token -eq $accessToken -and
+                $existing.refresh_token -eq $refreshToken -and
+                ([string] (Get-JsonProperty $existing 'id_token' '')) -eq $idToken -and
                 -not $existingDisabled -and -not $existingExpired -and
                 [string]::CompareOrdinal($existingRefresh, $sourceRefresh) -ge 0) {
                 $shouldWrite = $false
@@ -94,17 +123,17 @@ function Sync-Session {
     if ($shouldWrite) {
         $candidate = [ordered]@{
             type = 'codex'
-            access_token = [string] $tokens.access_token
-            refresh_token = [string] $tokens.refresh_token
-            id_token = [string] $tokens.id_token
-            account_id = [string] $tokens.account_id
-            last_refresh = [string] $source.last_refresh
+            access_token = $accessToken
+            refresh_token = $refreshToken
+            id_token = $idToken
+            account_id = $accountId
+            last_refresh = $sourceRefresh
             disabled = $false
             expired = $false
         }
         $temporary = Join-Path $bridgeAuthDir ('.codex-session-' + [guid]::NewGuid().ToString('N') + '.tmp')
         [IO.File]::WriteAllText($temporary, (($candidate | ConvertTo-Json -Compress) + "`n"), $utf8)
-        if ($previousAccount -and $previousAccount -ne [string] $tokens.account_id) {
+        if (-not $previousAccount -or $previousAccount -ne $accountId) {
             Clear-AccountScopedState
         }
         Move-Item -LiteralPath $temporary -Destination $bridgeAuthFile -Force
@@ -127,6 +156,7 @@ function Watch-Session {
             return 2
         }
     }
+    try { Sync-Session | Out-Null } catch { }
     $fingerprint = Get-AuthFingerprint
     if ($env:CLAUDEX_AUTH_WATCH_READY_FILE) {
         [IO.File]::WriteAllText($env:CLAUDEX_AUTH_WATCH_READY_FILE, "ready`n", $utf8)
@@ -164,6 +194,7 @@ switch ($Action) {
         $codex = Get-Command codex -ErrorAction SilentlyContinue
         if ($codex) { & $codex.Source logout; $exitCode = $LASTEXITCODE } else { $exitCode = 10 }
         Clear-BridgeSession
+        Clear-AccountScopedState
         if ($exitCode -ne 0) {
             if ($codex) { Write-Failure 'Codex logout failed, but the local Claudex bridge session was cleared.' }
             else { Write-Failure 'Codex CLI was not found; the local Claudex bridge session was cleared.' }

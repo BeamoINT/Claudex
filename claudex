@@ -3,15 +3,29 @@ set -euo pipefail
 
 readonly claudex_config_dir="${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}"
 readonly config_file="$claudex_config_dir/env"
-readonly settings_file="${CLAUDEX_SETTINGS_FILE:-$claudex_config_dir/settings.json}"
 readonly curl_bin="${CLAUDEX_CURL_BIN:-curl}"
 
-if [[ ! -r "$config_file" ]]; then
+early_runtime_bypass=0
+for early_argument in "$@"; do
+  case "$early_argument" in
+    --claude-chrome) early_runtime_bypass=1; break ;;
+    --sol|--terra|--luna|--solplan|--manual|--auto|--accept-edits|--ultracode|--max-effort) ;;
+    *) break ;;
+  esac
+done
+case "${1:-}" in
+  --help|-h|--version|-v|agents|auth|doctor|gateway|install|mcp|plugin|plugins|project|setup-token|ultrareview|update|upgrade)
+    early_runtime_bypass=1
+    ;;
+esac
+
+if [[ ! -r "$config_file" ]] && (( ! early_runtime_bypass )); then
   printf '%s\n' "claudex: missing $config_file; reinstall or restore the Claudex configuration." >&2
   exit 1
 fi
 
-source "$config_file"
+if [[ -r "$config_file" ]]; then source "$config_file"; fi
+readonly settings_file="${CLAUDEX_SETTINGS_FILE:-$claudex_config_dir/settings.json}"
 readonly codex_session_helper="${CLAUDEX_CODEX_SESSION_HELPER:-$claudex_config_dir/codex-session}"
 export CLAUDEX_CODEX_AUTH_DIR CLAUDEX_CODEX_SOURCE_AUTH_FILE CLAUDEX_CODEX_AUTH_FILE
 
@@ -31,17 +45,17 @@ case "${1:-}" in
     ;;
 esac
 
-if [[ ! -r "$settings_file" ]]; then
+if (( ! early_runtime_bypass )) && [[ ! -r "$settings_file" ]]; then
   printf '%s\n' "claudex: missing $settings_file; reinstall or restore the Claudex settings." >&2
   exit 1
 fi
 
-if ! command -v jq >/dev/null 2>&1; then
+if (( ! early_runtime_bypass )) && ! command -v jq >/dev/null 2>&1; then
   printf '%s\n' "claudex: jq is required but was not found in PATH." >&2
   exit 1
 fi
 
-: "${CLAUDEX_PROXY_TOKEN:?CLAUDEX_PROXY_TOKEN is not configured}"
+: "${CLAUDEX_PROXY_TOKEN:=}"
 : "${CLAUDEX_PROXY_URL:=http://127.0.0.1:8318}"
 : "${CLAUDEX_MODEL:=gpt-5.6-sol}"
 : "${CLAUDEX_PERMISSION_MODE:=auto}"
@@ -64,23 +78,36 @@ fi
 : "${CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS:=86400}"
 : "${CLAUDEX_PLAN_MODE_POLICY:=conservative}"
 
-case "$CLAUDEX_PROXY_TOKEN" in
+if (( ! early_runtime_bypass )) && [[ -z "$CLAUDEX_PROXY_TOKEN" ]]; then
+  printf '%s\n' 'claudex: CLAUDEX_PROXY_TOKEN is not configured' >&2
+  exit 1
+fi
+
+if (( ! early_runtime_bypass )); then case "$CLAUDEX_PROXY_TOKEN" in
   *$'\n'*|*$'\r'*)
     printf '%s\n' "claudex: CLAUDEX_PROXY_TOKEN contains an unsupported newline." >&2
     exit 2
     ;;
-esac
+esac; fi
 
-case "$CLAUDEX_PERMISSION_MODE" in
+if (( ! early_runtime_bypass )); then case "$CLAUDEX_MODEL" in
+  gpt-5.6-sol|gpt-5.6-terra|gpt-5.6-luna) ;;
+  *)
+    printf '%s\n' "claudex: CLAUDEX_MODEL must be a managed Codex model (gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna)." >&2
+    exit 2
+    ;;
+esac; fi
+
+if (( ! early_runtime_bypass )); then case "$CLAUDEX_PERMISSION_MODE" in
   manual|auto|acceptEdits|dontAsk|plan) ;;
   *)
     printf '%s\n' "claudex: invalid CLAUDEX_PERMISSION_MODE '$CLAUDEX_PERMISSION_MODE'." >&2
     printf '%s\n' "claudex: expected manual, auto, acceptEdits, dontAsk, or plan." >&2
     exit 2
     ;;
-esac
+esac; fi
 
-for codex_model_setting in CLAUDEX_AUTO_MODE_MODEL CLAUDEX_BACKGROUND_MODEL CLAUDEX_SUBAGENT_MODEL; do
+if (( ! early_runtime_bypass )); then for codex_model_setting in CLAUDEX_AUTO_MODE_MODEL CLAUDEX_BACKGROUND_MODEL CLAUDEX_SUBAGENT_MODEL; do
   codex_model_value="${!codex_model_setting}"
   case "$codex_model_value" in
     gpt-5.6-sol|gpt-5.6-terra|gpt-5.6-luna) ;;
@@ -89,8 +116,9 @@ for codex_model_setting in CLAUDEX_AUTO_MODE_MODEL CLAUDEX_BACKGROUND_MODEL CLAU
       exit 2
       ;;
   esac
-done
+done; fi
 
+if (( ! early_runtime_bypass )); then
 if [[ ! "$CLAUDEX_MAX_TOOL_USE_CONCURRENCY" =~ ^[0-9]+$ ]] || (( CLAUDEX_MAX_TOOL_USE_CONCURRENCY < 1 )); then
   printf '%s\n' "claudex: CLAUDEX_MAX_TOOL_USE_CONCURRENCY must be a positive integer." >&2
   exit 2
@@ -163,6 +191,7 @@ fi
 case "$CLAUDEX_PLAN_MODE_POLICY" in conservative|normal) ;;
   *) printf '%s\n' 'claudex: CLAUDEX_PLAN_MODE_POLICY must be conservative or normal.' >&2; exit 2 ;;
 esac
+fi
 
 export CLAUDEX_USAGE_DISPLAY CLAUDEX_USAGE_REFRESH_SECONDS CLAUDEX_USAGE_TIMEOUT_SECONDS CLAUDEX_USAGE_MAX_STALE_SECONDS
 export CLAUDEX_USAGE_SOURCE CLAUDEX_USAGE_ALERT_PERCENT
@@ -170,12 +199,35 @@ export CLAUDEX_USAGE_SOURCE CLAUDEX_USAGE_ALERT_PERCENT
 # Keep Claudex model choices, sessions, and preferences isolated from normal Claude Code.
 export CLAUDE_CONFIG_DIR="$claudex_config_dir"
 
+acquire_state_lock() {
+  local lock_dir="$1" attempt mtime=0 now
+  mkdir -p "$(dirname "$lock_dir")"
+  for attempt in {1..100}; do
+    if mkdir "$lock_dir" 2>/dev/null; then return 0; fi
+    if stat -f '%m' "$lock_dir" >/dev/null 2>&1; then
+      mtime=$(stat -f '%m' "$lock_dir")
+    else
+      mtime=$(stat -c '%Y' "$lock_dir" 2>/dev/null || printf 0)
+    fi
+    now=$(date +%s)
+    if [[ "$mtime" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]] && (( now - mtime >= 60 )); then
+      rmdir "$lock_dir" 2>/dev/null || true
+    fi
+    sleep 0.02
+  done
+  return 1
+}
+
+release_state_lock() {
+  rmdir "$1" 2>/dev/null || true
+}
+
 # Claude Code's welcome banner does not use ANTHROPIC_CUSTOM_MODEL_OPTION_NAME.
 # Seed its isolated model-option cache so custom GPT IDs have friendly names in
 # both the banner and model picker. Preserve unrelated cached options.
 ensure_model_display_names() {
   local state_file="$CLAUDE_CONFIG_DIR/.claude.json"
-  local tmp_file
+  local tmp_file lock_dir="$CLAUDE_CONFIG_DIR/run/model-display.lock"
   local managed_options='[
     {"value":"opusplan","label":"GPT-5.6 Solplan","description":"GPT-5.6 Sol in plan mode, GPT-5.6 Terra for implementation"},
     {"value":"gpt-5.6-sol","label":"GPT-5.6 Sol","description":"Frontier capability for planning and the hardest engineering work"},
@@ -183,6 +235,7 @@ ensure_model_display_names() {
     {"value":"gpt-5.6-luna","label":"GPT-5.6 Luna","description":"Fast, efficient model for search, triage, and mechanical tasks"}
   ]'
 
+  acquire_state_lock "$lock_dir" || return 0
   if [[ -s "$state_file" ]] && jq -e --argjson managed "$managed_options" '
     . as $root
     | all($managed[] as $expected;
@@ -191,44 +244,113 @@ ensure_model_display_names() {
         and $matches[0].label == $expected.label
         and $matches[0].description == $expected.description)
   ' "$state_file" >/dev/null 2>&1; then
+    release_state_lock "$lock_dir"
     return 0
   fi
 
   mkdir -p "$CLAUDE_CONFIG_DIR"
   tmp_file=$(mktemp "$CLAUDE_CONFIG_DIR/.claude.json.tmp.XXXXXX")
   if [[ -s "$state_file" ]] && jq -e 'type == "object"' "$state_file" >/dev/null 2>&1; then
-    jq --argjson managed "$managed_options" '
+    if ! jq --argjson managed "$managed_options" '
       ($managed | map(.value)) as $managed_ids
       | .additionalModelOptionsCache = (
           ((.additionalModelOptionsCache // [])
             | map(.value as $value | select(($managed_ids | index($value)) == null)))
           + $managed
         )
-    ' "$state_file" > "$tmp_file"
+    ' "$state_file" > "$tmp_file"; then
+      rm -f "$tmp_file"
+      release_state_lock "$lock_dir"
+      return 0
+    fi
   else
-    jq -n --argjson managed "$managed_options" \
-      '{additionalModelOptionsCache: $managed}' > "$tmp_file"
+    if ! jq -n --argjson managed "$managed_options" \
+      '{additionalModelOptionsCache: $managed}' > "$tmp_file"; then
+      rm -f "$tmp_file"
+      release_state_lock "$lock_dir"
+      return 0
+    fi
   fi
   mv -f "$tmp_file" "$state_file"
+  release_state_lock "$lock_dir"
 }
 
-ensure_model_display_names
+if (( ! early_runtime_bypass )) || { [[ -r "$settings_file" ]] && command -v jq >/dev/null 2>&1; }; then
+  ensure_model_display_names
+fi
 
 fetch_models() {
-  printf 'Authorization: Bearer %s\n' "$CLAUDEX_PROXY_TOKEN" | \
-    "$curl_bin" --silent --show-error --fail --max-time 5 --header @- \
-    "${CLAUDEX_PROXY_URL}/v1/models"
+  local timeout_seconds="${1:-1}" response_file status_file request_pid timer_pid request_status=0
+  local http_status status_output
+  local run_dir="$claudex_config_dir/run"
+  mkdir -p "$run_dir"
+  response_file=$(mktemp "$run_dir/.proxy-health.XXXXXX")
+  status_file=$(mktemp "$run_dir/.proxy-health-status.XXXXXX")
+  chmod 600 "$response_file" 2>/dev/null || true
+  chmod 600 "$status_file" 2>/dev/null || true
+
+  "$curl_bin" --silent --show-error \
+    --connect-timeout 0.5 --max-time "$timeout_seconds" \
+    --header <(printf 'Authorization: Bearer %s\n' "$CLAUDEX_PROXY_TOKEN") \
+    --output "$response_file" --write-out '%{http_code}' \
+    "${CLAUDEX_PROXY_URL}/v1/models" > "$status_file" &
+  request_pid=$!
+  (
+    sleep "$timeout_seconds"
+    kill -TERM "$request_pid" 2>/dev/null || exit 0
+    sleep 0.1
+    kill -KILL "$request_pid" 2>/dev/null || true
+  ) &
+  timer_pid=$!
+  wait "$request_pid" || request_status=$?
+  kill "$timer_pid" 2>/dev/null || true
+  wait "$timer_pid" 2>/dev/null || true
+
+  if (( request_status != 0 )); then
+    rm -f "$response_file" "$status_file"
+    return "$request_status"
+  fi
+  status_output=$(<"$status_file")
+  # Test doubles and curl-compatible wrappers may ignore --output/--write-out
+  # and emit the body on stdout. Accept that shape without weakening real HTTP
+  # status validation.
+  if [[ ! -s "$response_file" && "$status_output" == \{* ]]; then
+    printf '%s\n' "$status_output" > "$response_file"
+    http_status=200
+  else
+    http_status="${status_output##*$'\n'}"
+  fi
+  rm -f "$status_file"
+  case "$http_status" in
+    2??) cat "$response_file"; rm -f "$response_file"; return 0 ;;
+    401|403) rm -f "$response_file"; return 41 ;;
+    *) rm -f "$response_file"; return 42 ;;
+  esac
 }
 
 models_are_valid() {
-  jq -e --arg model "$CLAUDEX_MODEL" '
-    [.data[]?.id] as $ids
-    | ($ids | length) > 0 and ($ids | index($model) != null)
-  ' >/dev/null 2>&1
+  jq -e '[.data[]?.id | select(type == "string" and length > 0)] | length > 0' >/dev/null 2>&1
 }
 
 proxy_ready() {
-  fetch_models 2>/dev/null | models_are_valid
+  local models fetch_status=0
+  models=$(fetch_models 1 2>/dev/null) || fetch_status=$?
+  (( fetch_status == 0 )) || return "$fetch_status"
+  printf '%s\n' "$models" | models_are_valid || return 43
+}
+
+selected_model_is_available() {
+  local selected_model="$1" models required_models
+  case "$selected_model" in
+    opusplan) required_models='["gpt-5.6-sol", "gpt-5.6-terra"]' ;;
+    *) required_models=$(printf '["%s"]' "$selected_model") ;;
+  esac
+  models=$(fetch_models 2) || return 1
+  printf '%s\n' "$models" | jq -e --argjson required "$required_models" '
+    [.data[]?.id] as $ids
+    | [$required[] as $model | select(($ids | index($model)) == null)]
+    | length == 0
+  ' >/dev/null 2>&1
 }
 
 proxy_reachable() {
@@ -236,14 +358,7 @@ proxy_reachable() {
     [[ -e "$CLAUDEX_TEST_PROXY_REACHABLE_FILE" ]]
     return
   fi
-  local authority host port
-  authority="${CLAUDEX_PROXY_URL#*://}"
-  authority="${authority%%/*}"
-  host="${authority%:*}"
-  port="${authority##*:}"
-  [[ "$host" == 127.0.0.1 || "$host" == localhost ]] || { proxy_ready; return; }
-  [[ "$port" =~ ^[0-9]+$ ]] || return 1
-  (exec 9<>"/dev/tcp/$host/$port") 2>/dev/null
+  proxy_ready
 }
 
 proxy_executable() {
@@ -279,98 +394,279 @@ start_proxy_watcher() {
   proxy_watcher_pid=$!
 }
 
+current_shell_pid() {
+  local destination="$1"
+  # Bash 3.2 does not expose BASHPID. A short-lived child reports the real PID
+  # of whichever launcher or watcher process directly spawned it. Write to a
+  # file so command substitution cannot insert another short-lived subshell.
+  sh -c 'printf "%s\n" "$PPID" > "$1"' claudex-pid "$destination"
+}
+
+process_identity() {
+  local pid="$1"
+  ps -p "$pid" -o lstart= 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]][[:space:]]*/ /g'
+}
+
+lock_age_seconds() {
+  local path="$1" mtime=0 now
+  if stat -f '%m' "$path" >/dev/null 2>&1; then
+    mtime=$(stat -f '%m' "$path")
+  else
+    mtime=$(stat -c '%Y' "$path" 2>/dev/null || printf 0)
+  fi
+  now=$(date +%s)
+  if [[ "$mtime" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$(( now - mtime ))"
+  else
+    printf '%s\n' 0
+  fi
+}
+
+record_proxy_recovery() {
+  local message="$1" run_dir="$CLAUDE_CONFIG_DIR/run" log_file temporary size
+  mkdir -p "$run_dir"
+  log_file="$run_dir/proxy-recovery.log"
+  (umask 077; printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$message" >> "$log_file")
+  chmod 600 "$log_file" 2>/dev/null || true
+  size=$(wc -c < "$log_file" 2>/dev/null | tr -d ' ' || printf 0)
+  if [[ "$size" =~ ^[0-9]+$ ]] && (( size > 65536 )); then
+    temporary=$(mktemp "$run_dir/.proxy-recovery.XXXXXX")
+    tail -c 32768 "$log_file" > "$temporary" 2>/dev/null || true
+    chmod 600 "$temporary" 2>/dev/null || true
+    mv -f "$temporary" "$log_file"
+  fi
+}
+
+read_lock_field() {
+  local owner_file="$1" field="$2"
+  awk -F= -v field="$field" '$1 == field { sub(/^[^=]*=/, ""); print; exit }' "$owner_file" 2>/dev/null
+}
+
+lock_owner_is_current() {
+  local owner_file="$1" pid identity current
+  pid=$(read_lock_field "$owner_file" pid)
+  identity=$(read_lock_field "$owner_file" identity)
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ -n "$identity" ]] || return 0
+  current=$(process_identity "$pid")
+  [[ -n "$current" && "$current" == "$identity" ]]
+}
+
+release_proxy_lock() {
+  local lock_dir="$1" nonce="$2" owner_file="$lock_dir/owner"
+  [[ "$(read_lock_field "$owner_file" nonce)" == "$nonce" ]] || return 0
+  rm -f "$owner_file" 2>/dev/null || true
+  rmdir "$lock_dir" 2>/dev/null || true
+}
+
+reclaim_proxy_lock() {
+  local lock_dir="$1" observed_nonce="$2" owner_file="$lock_dir/owner"
+  local quarantine="$lock_dir.stale.$observed_nonce"
+  [[ -n "$observed_nonce" ]] || return 1
+  [[ "$(read_lock_field "$owner_file" nonce)" == "$observed_nonce" ]] || return 1
+  [[ ! -e "$quarantine" ]] || return 1
+  mv "$lock_dir" "$quarantine" 2>/dev/null || return 1
+  if [[ "$(read_lock_field "$quarantine/owner" nonce)" != "$observed_nonce" ]]; then
+    record_proxy_recovery "startup lock quarantine changed ownership unexpectedly"
+    return 1
+  fi
+  rm -f "$quarantine/owner" 2>/dev/null || true
+  rmdir "$quarantine" 2>/dev/null || true
+  record_proxy_recovery "reclaimed stale startup lock nonce=$observed_nonce"
+}
+
+write_managed_proxy_pid() {
+  local pid="$1" run_dir="$CLAUDE_CONFIG_DIR/run" pid_file temporary identity
+  pid_file="$run_dir/managed-proxy"
+  identity=$(process_identity "$pid")
+  temporary=$(mktemp "$run_dir/.managed-proxy.XXXXXX")
+  {
+    printf 'pid=%s\n' "$pid"
+    printf 'identity=%s\n' "$identity"
+  } > "$temporary"
+  chmod 600 "$temporary" 2>/dev/null || true
+  mv -f "$temporary" "$pid_file"
+}
+
+stop_unhealthy_managed_proxy() {
+  local pid_file="$CLAUDE_CONFIG_DIR/run/managed-proxy" pid identity current attempt
+  [[ -r "$pid_file" ]] || return 0
+  pid=$(read_lock_field "$pid_file" pid)
+  identity=$(read_lock_field "$pid_file" identity)
+  if [[ ! "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$pid_file"
+    return 0
+  fi
+  current=$(process_identity "$pid")
+  [[ -n "$identity" && "$current" == "$identity" ]] || {
+    record_proxy_recovery "ignored stale managed proxy pid metadata pid=$pid"
+    rm -f "$pid_file"
+    return 0
+  }
+  kill -TERM "$pid" 2>/dev/null || true
+  for attempt in {1..20}; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null && [[ "$(process_identity "$pid")" == "$identity" ]]; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pid_file"
+  record_proxy_recovery "stopped unresponsive managed proxy pid=$pid"
+}
+
 ensure_proxy() {
+  local health_status=0
   if [[ ! -x "$codex_session_helper" ]]; then
+    record_proxy_recovery "authentication helper is missing"
     printf '%s\n' "claudex: authentication helper is missing: $codex_session_helper" >&2
     printf '%s\n' 'claudex: reinstall Claudex to repair the installation.' >&2
     return 1
   fi
-  "$codex_session_helper" sync || return $?
+  local sync_status=0
+  "$codex_session_helper" sync || sync_status=$?
+  if (( sync_status != 0 )); then
+    record_proxy_recovery "authentication synchronization failed status=$sync_status"
+    return "$sync_status"
+  fi
 
   if proxy_ready; then
     return 0
+  else
+    health_status=$?
+    if (( health_status == 41 )); then
+      record_proxy_recovery "proxy rejected the configured authentication token"
+      printf '%s\n' 'claudex: the local proxy rejected its configured authentication token; rerun the installer to repair matching credentials.' >&2
+      return 1
+    fi
   fi
 
   # Concurrent Claudex tabs can notice a stopped bridge at the same time.
   # Serialize startup so only one process can bind the loopback port.
-  local run_dir="$CLAUDE_CONFIG_DIR/run" lock_dir owner_file attempt lock_owner=""
-  local lock_mtime=0 now=0
-  local lock_acquired=0
+  local run_dir="$CLAUDE_CONFIG_DIR/run" lock_dir owner_file attempt owner_tmp orphan_nonce orphan_tmp owner_pid_file
+  local lock_acquired=0 owner_pid owner_identity owner_nonce observed_nonce lock_age
+  local lock_deadline startup_deadline proxy_pid
   lock_dir="$run_dir/proxy-start.lock"
-  owner_file="$lock_dir/owner-pid"
+  owner_file="$lock_dir/owner"
   mkdir -p "$run_dir"
-  for attempt in {1..300}; do
+  lock_deadline=$(( SECONDS + 30 ))
+  while (( SECONDS < lock_deadline )); do
     if mkdir "$lock_dir" 2>/dev/null; then
-      if ! printf '%s\n' "$$" > "$owner_file"; then
+      owner_pid_file=$(mktemp "$run_dir/.proxy-owner-pid.XXXXXX")
+      current_shell_pid "$owner_pid_file"
+      read -r owner_pid < "$owner_pid_file"
+      rm -f "$owner_pid_file"
+      owner_identity=$(process_identity "$owner_pid")
+      owner_nonce="${owner_pid}.$(date +%s).${RANDOM}.${RANDOM}"
+      owner_tmp=$(mktemp "$run_dir/.proxy-start-owner.XXXXXX")
+      {
+        printf 'pid=%s\n' "$owner_pid"
+        printf 'identity=%s\n' "$owner_identity"
+        printf 'nonce=%s\n' "$owner_nonce"
+      } > "$owner_tmp"
+      chmod 600 "$owner_tmp" 2>/dev/null || true
+      if ! mv -f "$owner_tmp" "$owner_file"; then
+        rm -f "$owner_tmp" 2>/dev/null || true
         rmdir "$lock_dir" 2>/dev/null || true
         return 1
       fi
       lock_acquired=1
       break
     fi
-    if proxy_ready; then return 0; fi
-    lock_owner=""
-    if [[ -r "$owner_file" ]]; then read -r lock_owner < "$owner_file" || lock_owner=""; fi
-    if [[ "$lock_owner" =~ ^[0-9]+$ ]] && ! kill -0 "$lock_owner" 2>/dev/null; then
-      rm -f "$owner_file" 2>/dev/null || true
-      rmdir "$lock_dir" 2>/dev/null || true
-    elif [[ ! "$lock_owner" =~ ^[0-9]+$ ]]; then
-      # The creator writes owner-pid immediately after mkdir. Give that write a
-      # short grace period, then recover a lock left by a crash in that gap.
-      if stat -f '%m' "$lock_dir" >/dev/null 2>&1; then
-        lock_mtime=$(stat -f '%m' "$lock_dir")
-      else
-        lock_mtime=$(stat -c '%Y' "$lock_dir" 2>/dev/null || printf 0)
-      fi
-      now=$(date +%s)
-      if [[ "$lock_mtime" =~ ^[0-9]+$ ]] && (( now - lock_mtime >= 2 )); then
-        rm -f "$owner_file" 2>/dev/null || true
-        rmdir "$lock_dir" 2>/dev/null || true
-      fi
+    if proxy_ready; then return 0
+    elif (( $? == 41 )); then
+      record_proxy_recovery "proxy authentication failed while waiting for startup lock"
+      return 1
+    fi
+    lock_age=$(lock_age_seconds "$lock_dir")
+    observed_nonce=$(read_lock_field "$owner_file" nonce)
+    if { [[ -n "$observed_nonce" ]] && ! lock_owner_is_current "$owner_file" && (( lock_age >= 2 )); } \
+        || { [[ -n "$observed_nonce" ]] && (( lock_age >= 20 )); }; then
+      reclaim_proxy_lock "$lock_dir" "$observed_nonce" || true
+    elif [[ -z "$observed_nonce" ]] && (( lock_age >= 2 )); then
+      # A crash between mkdir and the atomic owner-file rename leaves no nonce.
+      orphan_nonce="orphan.$(date +%s).${RANDOM}"
+      orphan_tmp=$(mktemp "$run_dir/.proxy-start-owner.XXXXXX")
+      printf 'nonce=%s\n' "$orphan_nonce" > "$orphan_tmp"
+      chmod 600 "$orphan_tmp" 2>/dev/null || true
+      if ln "$orphan_tmp" "$owner_file" 2>/dev/null; then :; fi
+      rm -f "$orphan_tmp"
+      reclaim_proxy_lock "$lock_dir" "$orphan_nonce" || true
     fi
     sleep 0.1
   done
   if (( ! lock_acquired )); then
+    record_proxy_recovery "timed out after 30s waiting for startup lock"
     printf '%s\n' "claudex: timed out waiting for another session to start the local proxy." >&2
     return 1
   fi
+  trap 'release_proxy_lock "$lock_dir" "$owner_nonce"' EXIT
 
-  if (
-    trap 'rm -f "$owner_file" 2>/dev/null || true; rmdir "$lock_dir" 2>/dev/null || true' EXIT
-    if proxy_ready; then exit 0; fi
-
-    printf '%s\n' "claudex: starting the local CLIProxyAPI service..." >&2
-    proxy_config="${CLAUDEX_PROXY_CONFIG:-$CLAUDE_CONFIG_DIR/cliproxyapi.yaml}"
-    homebrew_proxy_config=""
-    if command -v brew >/dev/null 2>&1; then
-      homebrew_proxy_config="$(brew --prefix)/etc/cliproxyapi.conf"
-    fi
-    if command -v brew >/dev/null 2>&1 \
-        && brew list --formula cliproxyapi >/dev/null 2>&1 \
-        && { [[ ! -r "$proxy_config" ]] || [[ "$proxy_config" == "$homebrew_proxy_config" ]]; }; then
-      brew services start cliproxyapi >/dev/null
-    else
-      proxy_bin=$(proxy_executable) || {
-        printf '%s\n' "claudex: CLIProxyAPI is not reachable and no proxy executable was found." >&2
-        exit 1
-      }
-      log_dir="$CLAUDE_CONFIG_DIR/logs"
-      mkdir -p "$log_dir"
-      if [[ -r "$proxy_config" ]]; then
-        nohup "$proxy_bin" -config "$proxy_config" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
-      else
-        nohup "$proxy_bin" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
-      fi
-    fi
-
-    for attempt in {1..100}; do
-      if proxy_ready; then exit 0; fi
-      sleep 0.1
-    done
-    exit 1
-  ); then
+  if proxy_ready; then
+    release_proxy_lock "$lock_dir" "$owner_nonce"
+    trap - EXIT
     return 0
+  elif (( $? == 41 )); then
+    record_proxy_recovery "proxy authentication failed after startup lock acquisition"
+    release_proxy_lock "$lock_dir" "$owner_nonce"
+    trap - EXIT
+    return 1
   fi
+
+  printf '%s\n' "claudex: starting the local CLIProxyAPI service..." >&2
+  record_proxy_recovery "starting authenticated proxy recovery"
+  stop_unhealthy_managed_proxy
+  proxy_config="${CLAUDEX_PROXY_CONFIG:-$CLAUDE_CONFIG_DIR/cliproxyapi.yaml}"
+  homebrew_proxy_config=""
+  if command -v brew >/dev/null 2>&1; then
+    homebrew_proxy_config="$(brew --prefix)/etc/cliproxyapi.conf"
+  fi
+  if command -v brew >/dev/null 2>&1 \
+      && brew list --formula cliproxyapi >/dev/null 2>&1 \
+      && { [[ ! -r "$proxy_config" ]] || [[ "$proxy_config" == "$homebrew_proxy_config" ]]; }; then
+    if ! brew services start cliproxyapi >/dev/null; then
+      record_proxy_recovery "Homebrew proxy service failed to start"
+      release_proxy_lock "$lock_dir" "$owner_nonce"
+      trap - EXIT
+      return 1
+    fi
+  else
+    proxy_bin=$(proxy_executable) || {
+      record_proxy_recovery "proxy executable is missing"
+      printf '%s\n' "claudex: CLIProxyAPI is not reachable and no proxy executable was found." >&2
+      release_proxy_lock "$lock_dir" "$owner_nonce"
+      trap - EXIT
+      return 1
+    }
+    log_dir="$CLAUDE_CONFIG_DIR/logs"
+    mkdir -p "$log_dir"
+    if [[ -r "$proxy_config" ]]; then
+      nohup "$proxy_bin" -config "$proxy_config" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
+    else
+      nohup "$proxy_bin" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
+    fi
+    proxy_pid=$!
+    write_managed_proxy_pid "$proxy_pid"
+  fi
+
+  startup_deadline=$(( SECONDS + 10 ))
+  while (( SECONDS < startup_deadline )); do
+    if proxy_ready; then
+      release_proxy_lock "$lock_dir" "$owner_nonce"
+      trap - EXIT
+      return 0
+    elif (( $? == 41 )); then
+      record_proxy_recovery "new proxy rejected the configured authentication token"
+      release_proxy_lock "$lock_dir" "$owner_nonce"
+      trap - EXIT
+      return 1
+    fi
+    sleep 0.1
+  done
+  record_proxy_recovery "proxy did not become semantically healthy within 10s"
+  release_proxy_lock "$lock_dir" "$owner_nonce"
+  trap - EXIT
 
   printf '%s\n' "claudex: local proxy did not become healthy. Run: claudex --doctor" >&2
   return 1
@@ -442,17 +738,35 @@ ensure_auto_mode_rules() {
   # Recompose from the current binary's defaults so Claudex's scoped additions
   # never discard new or existing upstream safety rules after an update.
   [[ "$settings_file" == "$claudex_config_dir/settings.json" ]] || return 0
-  local defaults_json tmp_file
-  defaults_json=$(claude auto-mode defaults 2>/dev/null) || return 0
-  printf '%s\n' "$defaults_json" | jq -e '
+  local defaults_json previous_defaults='{}' tmp_file snapshot_file snapshot_tmp defaults_are_fresh=0
+  local lock_dir="$claudex_config_dir/run/auto-mode.lock"
+  acquire_state_lock "$lock_dir" || return 0
+  snapshot_file="$claudex_config_dir/auto-mode-defaults.json"
+  if [[ -s "$snapshot_file" ]] && jq -e '
     (.allow | type == "array") and
     (.environment | type == "array") and
     (.soft_deny | type == "array") and
     (.hard_deny | type == "array")
-  ' >/dev/null 2>&1 || return 0
+  ' "$snapshot_file" >/dev/null 2>&1; then
+    previous_defaults=$(<"$snapshot_file")
+  fi
+  if defaults_json=$(claude auto-mode defaults 2>/dev/null) && printf '%s\n' "$defaults_json" | jq -e '
+      (.allow | type == "array") and
+      (.environment | type == "array") and
+      (.soft_deny | type == "array") and
+      (.hard_deny | type == "array")
+    ' >/dev/null 2>&1; then
+    defaults_are_fresh=1
+  elif [[ "$previous_defaults" != '{}' ]]; then
+    defaults_json="$previous_defaults"
+  else
+    release_state_lock "$lock_dir"
+    return 0
+  fi
 
   tmp_file=$(mktemp "$claudex_config_dir/settings.json.tmp.XXXXXX")
   if jq --argjson defaults "$defaults_json" \
+      --argjson previous "$previous_defaults" \
       --arg approval 'Explicit Action Approval: A user message that explicitly approves a specific action and target, including reissuing it after a denial or unambiguously referring to the immediately preceding blocked action with language such as approve that, go ahead, or proceed, satisfies named-and-specific consent for matching SOFT BLOCK rules. Do not force the user to restate the command, ask for duplicate confirmation, or treat the prior denial as permanent. This does not override HARD BLOCK rules or authorize a broader action.' \
       --arg requested_config 'Requested Agent Configuration: Editing agent configuration is routine when the user explicitly asks for that specific configuration or permission change. Treat that edit as user-requested rather than Self-Modification; unrelated permission widening remains blocked.' \
       --arg task_boundary 'User-designated task boundary: A repository, cloud project, host, bucket, service, or destination that the user explicitly identifies in their own message as owned or controlled infrastructure and as the intended target is trusted for the specifically requested operation and data flow only. Merely naming a target does not establish trust; do not infer trust for agent-selected destinations, unrelated resources, or broader scopes.' \
@@ -460,11 +774,15 @@ ensure_auto_mode_rules() {
         def stable_unique:
           reduce .[] as $item ([]; if index($item) == null then . + [$item] else . end);
         .autoMode = (.autoMode // {})
-        | ((.autoMode.allow // []) | map(select(
-            (startswith("Explicit Action Approval:") or startswith("Requested Agent Configuration:")) | not
+        | ($previous.allow // []) as $previous_allow
+        | ($previous.environment // []) as $previous_environment
+        | ((.autoMode.allow // []) | map(. as $rule | select(
+            ((startswith("Explicit Action Approval:") or startswith("Requested Agent Configuration:")) | not)
+            and (($previous_allow | index($rule)) == null)
           ))) as $custom_allow
-        | ((.autoMode.environment // []) | map(select(
-            (startswith("User-designated task boundary:") or startswith("Explicitly approved development transfer:")) | not
+        | ((.autoMode.environment // []) | map(. as $rule | select(
+            ((startswith("User-designated task boundary:") or startswith("Explicitly approved development transfer:")) | not)
+            and (($previous_environment | index($rule)) == null)
           ))) as $custom_environment
         | .autoMode.allow = (($defaults.allow + $custom_allow + [$approval, $requested_config]) | stable_unique)
         | .autoMode.environment = (($defaults.environment + $custom_environment + [$task_boundary, $approved_transfer]) | stable_unique)
@@ -477,7 +795,17 @@ ensure_auto_mode_rules() {
     fi
   else
     rm -f "$tmp_file"
+    release_state_lock "$lock_dir"
+    return 0
   fi
+
+  if (( defaults_are_fresh )); then
+    snapshot_tmp=$(mktemp "$claudex_config_dir/.auto-mode-defaults.XXXXXX")
+    printf '%s\n' "$defaults_json" | jq '.' > "$snapshot_tmp"
+    chmod 600 "$snapshot_tmp" 2>/dev/null || true
+    mv -f "$snapshot_tmp" "$snapshot_file"
+  fi
+  release_state_lock "$lock_dir"
 }
 
 model_name() {
@@ -497,7 +825,7 @@ doctor() {
 
   local saved_model models proxy_version missing=0 model
   saved_model=$(jq -r '.model // "gpt-5.6-sol"' "$settings_file")
-  models=$(fetch_models)
+  models=$(fetch_models 5)
   local proxy_bin
   proxy_bin=$(proxy_executable) || proxy_bin=""
   if [[ -n "$proxy_bin" ]]; then
@@ -588,17 +916,18 @@ if [[ "${1:-}" == "--account" ]]; then
   exec "$usage_helper" --account "$1"
 fi
 
-start_model=""
+start_model="$CLAUDEX_MODEL"
+start_model_explicit=0
 effort_mode=""
 permission_mode="$CLAUDEX_PERMISSION_MODE"
 direct_chrome=0
 forwarded_args=()
 while (( $# > 0 )); do
   case "$1" in
-    --sol) start_model="gpt-5.6-sol" ;;
-    --terra) start_model="gpt-5.6-terra" ;;
-    --luna) start_model="gpt-5.6-luna" ;;
-    --solplan) start_model="opusplan" ;;
+    --sol) start_model="gpt-5.6-sol"; start_model_explicit=1 ;;
+    --terra) start_model="gpt-5.6-terra"; start_model_explicit=1 ;;
+    --luna) start_model="gpt-5.6-luna"; start_model_explicit=1 ;;
+    --solplan) start_model="opusplan"; start_model_explicit=1 ;;
     --manual) permission_mode="manual" ;;
     --auto) permission_mode="auto" ;;
     --accept-edits) permission_mode="acceptEdits" ;;
@@ -665,7 +994,7 @@ for argument in ${forwarded_args[@]+"${forwarded_args[@]}"}; do
 done
 
 if (( direct_chrome )); then
-  [[ -z "$start_model" ]] || {
+  (( ! start_model_explicit )) || {
     printf '%s\n' 'claudex: --sol, --terra, --luna, and --solplan cannot be combined with --claude-chrome because Chrome requires a first-party Anthropic model.' >&2
     exit 2
   }
@@ -678,6 +1007,7 @@ if (( direct_chrome )); then
     unset CLAUDE_CONFIG_DIR
   fi
   unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
+  start_model=""
   # Bash 3.2 (the system Bash on macOS) treats an empty array expansion as an
   # unbound variable under `set -u`; use its compatible conditional expansion.
   forwarded_args=(--chrome ${forwarded_args[@]+"${forwarded_args[@]}"})
@@ -686,12 +1016,22 @@ fi
 # The preload provides GPT-specific input aliases and non-interactive cleanup.
 # Never inject it into first-party Claude/Chrome or maintenance commands.
 readonly claudex_preload="$claudex_config_dir/preload.cjs"
+inherited_bun_options="${BUN_OPTIONS:-}"
+escaped_claudex_preload="${claudex_preload// /\\ }"
+managed_preload_option="--preload $escaped_claudex_preload"
+while [[ "$inherited_bun_options" == "$managed_preload_option" || "$inherited_bun_options" == "$managed_preload_option "* ]]; do
+  inherited_bun_options="${inherited_bun_options#"$managed_preload_option"}"
+  inherited_bun_options="${inherited_bun_options# }"
+done
 if (( use_proxy )) && [[ -r "$claudex_preload" ]]; then
-  readonly escaped_claudex_preload="${claudex_preload// /\\ }"
-  export BUN_OPTIONS="--preload $escaped_claudex_preload ${BUN_OPTIONS:-}"
+  export BUN_OPTIONS="$managed_preload_option${inherited_bun_options:+ $inherited_bun_options}"
   if { [[ -t 0 && -t 1 ]] || [[ "${CLAUDEX_TEST_TTY_OUTPUT:-0}" == 1 ]]; }; then export CLAUDEX_INTERACTIVE_TUI=1
   else unset CLAUDEX_INTERACTIVE_TUI
   fi
+elif [[ -n "$inherited_bun_options" ]]; then
+  export BUN_OPTIONS="$inherited_bun_options"
+else
+  unset BUN_OPTIONS
 fi
 
 load_claude_capabilities
@@ -703,6 +1043,11 @@ esac
 
 if (( use_proxy )); then
   ensure_proxy
+  if ! selected_model_is_available "$start_model"; then
+    printf '%s\n' "claudex: selected model '$start_model' is not advertised by the authenticated Codex account." >&2
+    printf '%s\n' 'claudex: choose an available managed model or run `claudex --doctor` for the full catalog check.' >&2
+    exit 1
+  fi
   auth_watcher_pid=""
   proxy_watcher_pid=""
   start_auth_watcher
@@ -786,7 +1131,7 @@ fi
 if (( ! direct_chrome )) && [[ "$settings_file" != "$CLAUDE_CONFIG_DIR/settings.json" && "$effort_mode" != ultracode ]]; then
   claude_args+=(--settings "$settings_file")
 fi
-if [[ -n "$start_model" ]]; then
+if (( use_proxy )) && [[ -n "$start_model" ]]; then
   claude_args+=(--model "$start_model")
   if [[ "$start_model" == opusplan ]]; then export CLAUDEX_MODEL_MODE=solplan; fi
 fi
@@ -874,6 +1219,7 @@ if (( rewrite_resume_footer )); then
   project_key=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
   project_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$project_key"
   latest_session_file=""
+  matching_session_count=0
   if [[ -d "$project_dir" ]]; then
     while IFS= read -r candidate; do
       candidate_session_id="${candidate##*/}"
@@ -889,20 +1235,21 @@ if (( rewrite_resume_footer )); then
             and (.cwd // "") == $cwd
             and ((.isSidechain // false) == false))
         ' >/dev/null 2>&1 || continue
+      matching_session_count=$(( matching_session_count + 1 ))
       if [[ -z "$latest_session_file" || "$candidate" -nt "$latest_session_file" ]]; then latest_session_file="$candidate"; fi
     done < <(find "$project_dir" -maxdepth 1 -type f -name '*.jsonl' -newer "$resume_marker" -print 2>/dev/null)
   fi
-  if [[ -n "$latest_session_file" ]]; then
+  if (( matching_session_count == 1 )) && [[ -n "$latest_session_file" ]]; then
     session_id="${latest_session_file##*/}"
     session_id="${session_id%.jsonl}"
     if [[ "$session_id" =~ ^[0-9a-fA-F-]{36}$ ]]; then
       # Claude Code prints its hardcoded binary name after the JavaScript
-      # runtime has already shut down. Replace those final two terminal rows
-      # from the launcher, which still owns the authenticated resume path.
+      # runtime has already shut down. Append the authenticated Claudex path;
+      # cursor-up erasure can corrupt wrapped or resized terminal output.
       if (( direct_chrome )); then
-        printf '\033[2A\033[JResume this session with:\nclaudex --claude-chrome --resume %s\n' "$session_id"
+        printf '\nResume this session with Claudex:\nclaudex --claude-chrome --resume %s\n' "$session_id"
       else
-        printf '\033[2A\033[JResume this session with:\nclaudex --resume %s\n' "$session_id"
+        printf '\nResume this session with Claudex:\nclaudex --resume %s\n' "$session_id"
       fi
     fi
   fi

@@ -4,10 +4,11 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
 $root = $PSScriptRoot
+$proxyVersion = '7.2.80'
 $binDir = if ($env:CLAUDEX_BIN_DIR) { $env:CLAUDEX_BIN_DIR } else { Join-Path $env:USERPROFILE '.local\bin' }
 $configDir = if ($env:CLAUDEX_CONFIG_DIR) { $env:CLAUDEX_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.config\claudex' }
 $managedBinDir = Join-Path $configDir 'bin'
-$managedProxy = Join-Path $managedBinDir 'cliproxyapi.exe'
+$managedProxy = Join-Path $managedBinDir "cliproxyapi-$proxyVersion.exe"
 $authDir = Join-Path $configDir 'codex-accounts'
 $envFile = Join-Path $configDir 'env'
 $settingsTarget = Join-Path $configDir 'settings.json'
@@ -19,8 +20,7 @@ $preloadTarget = Join-Path $configDir 'preload.cjs'
 $proxyConfigTarget = Join-Path $configDir 'cliproxyapi.yaml'
 $launcherTarget = Join-Path $binDir 'claudex.ps1'
 $cmdTarget = Join-Path $binDir 'claudex.cmd'
-$proxyVersion = '7.2.77'
-$proxyPort = if ($env:CLAUDEX_PROXY_PORT) { [int] $env:CLAUDEX_PROXY_PORT } else { 8318 }
+$proxyPortText = if ($env:CLAUDEX_PROXY_PORT) { $env:CLAUDEX_PROXY_PORT } else { '8318' }
 $skipDependencies = $env:CLAUDEX_SKIP_DEPENDENCY_INSTALL -eq '1'
 $skipService = $env:CLAUDEX_SKIP_SERVICE_START -eq '1'
 $utf8 = New-Object Text.UTF8Encoding($false)
@@ -28,6 +28,11 @@ $utf8 = New-Object Text.UTF8Encoding($false)
 function Fail([string] $Message) {
     [Console]::Error.WriteLine("install.ps1: $Message")
     exit 1
+}
+
+$proxyPort = 0
+if (-not [int]::TryParse($proxyPortText, [ref] $proxyPort) -or $proxyPort -lt 1 -or $proxyPort -gt 65535) {
+    Fail 'CLAUDEX_PROXY_PORT must be an integer from 1 to 65535'
 }
 
 foreach ($sourceFile in @('claudex.ps1', 'claudex.cmd', 'codex-session.ps1', 'statusline.ps1', 'usage-limit.ps1', 'preload.cjs', 'settings.json', 'skills\usage-limit\SKILL.md')) {
@@ -51,8 +56,8 @@ function Find-ProxyExecutable {
 function Install-Proxy {
     $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     switch ($architecture) {
-        'x64' { $arch = 'amd64'; $expected = 'daa8277af35e2a5c7bbc9a71e768dceed5bdb31e66d48ac36be63b3d52338d1d' }
-        'arm64' { $arch = 'aarch64'; $expected = 'cbef6ab244741a41ad9d278716bf37cac7a233b80063d22254df04132e0c39cc' }
+        'x64' { $arch = 'amd64'; $expected = 'a8e1a805bae83150d2e1c7e25b4c22714461d4536173f0bd93be8bbc1333be4c' }
+        'arm64' { $arch = 'aarch64'; $expected = '01085cef19e880d8897a79f762a224735e768a11bda4a6a2f988db752b89777e' }
         default { Fail "unsupported Windows CPU architecture: $architecture" }
     }
     $asset = "CLIProxyAPI_${proxyVersion}_windows_${arch}.zip"
@@ -174,12 +179,22 @@ streaming:
 "@
 [IO.File]::WriteAllText($proxyConfigTarget, $proxyConfig, $utf8)
 $managedProxyForEnv = if (Test-Path -LiteralPath $managedProxy -PathType Leaf) { $managedProxy } else { $proxyBinary }
+$runtimeProxyUrl = if ($env:CLAUDEX_PROXY_URL) { $env:CLAUDEX_PROXY_URL } elseif ($existingVariables['CLAUDEX_PROXY_URL']) { $existingVariables['CLAUDEX_PROXY_URL'] } else { "http://127.0.0.1:$proxyPort" }
+$runtimeProxyConfig = if ($env:CLAUDEX_PROXY_CONFIG) { $env:CLAUDEX_PROXY_CONFIG } elseif ($existingVariables['CLAUDEX_PROXY_CONFIG']) { $existingVariables['CLAUDEX_PROXY_CONFIG'] } else { $proxyConfigTarget }
+$existingProxyBin = [string] $existingVariables['CLAUDEX_PROXY_BIN']
+$existingProxyBinLeaf = if ($existingProxyBin) { Split-Path $existingProxyBin -Leaf } else { '' }
+$existingProxyBinParent = if ($existingProxyBin) { Split-Path $existingProxyBin -Parent } else { '' }
+$previousManagedProxy = $existingProxyBin -and
+    ([IO.Path]::GetFullPath($existingProxyBinParent) -eq [IO.Path]::GetFullPath($managedBinDir)) -and
+    ($existingProxyBinLeaf -eq 'cliproxyapi.exe' -or $existingProxyBinLeaf -match '^cliproxyapi-\d+\.\d+\.\d+\.exe$')
+$runtimeProxyBin = if ($env:CLAUDEX_PROXY_BIN) { $env:CLAUDEX_PROXY_BIN } elseif ($existingProxyBin -and -not $previousManagedProxy) { $existingProxyBin } else { $managedProxyForEnv }
+$runtimeAuthDir = if ($env:CLAUDEX_CODEX_AUTH_DIR) { $env:CLAUDEX_CODEX_AUTH_DIR } elseif ($existingVariables['CLAUDEX_CODEX_AUTH_DIR']) { $existingVariables['CLAUDEX_CODEX_AUTH_DIR'] } else { $authDir }
 $managedLines = @(
     "CLAUDEX_PROXY_TOKEN=$proxyToken",
-    "CLAUDEX_PROXY_URL=http://127.0.0.1:$proxyPort",
-    "CLAUDEX_PROXY_CONFIG=$proxyConfigTarget",
-    "CLAUDEX_PROXY_BIN=$managedProxyForEnv",
-    "CLAUDEX_CODEX_AUTH_DIR=$authDir"
+    "CLAUDEX_PROXY_URL=$runtimeProxyUrl",
+    "CLAUDEX_PROXY_CONFIG=$runtimeProxyConfig",
+    "CLAUDEX_PROXY_BIN=$runtimeProxyBin",
+    "CLAUDEX_CODEX_AUTH_DIR=$runtimeAuthDir"
 )
 [IO.File]::WriteAllLines($envFile, @($managedLines + $existingLines), $utf8)
 

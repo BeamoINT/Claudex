@@ -16,10 +16,19 @@ readonly usage_skill_target="$config_dir/skills/usage-limit/SKILL.md"
 readonly preload_target="$config_dir/preload.cjs"
 readonly proxy_config_target="$config_dir/cliproxyapi.yaml"
 readonly launcher_target="$bin_dir/claudex"
-readonly proxy_version="7.2.77"
+readonly proxy_version="7.2.80"
 readonly proxy_port="${CLAUDEX_PROXY_PORT:-8318}"
 readonly skip_deps="${CLAUDEX_SKIP_DEPENDENCY_INSTALL:-0}"
 readonly skip_service="${CLAUDEX_SKIP_SERVICE_START:-0}"
+
+# Preserve values supplied for this installer invocation. Sourcing the existing
+# managed env below must not silently override an explicit repair/migration
+# target selected by the caller.
+caller_proxy_token_set=${CLAUDEX_PROXY_TOKEN+x}; caller_proxy_token=${CLAUDEX_PROXY_TOKEN-}
+caller_proxy_url_set=${CLAUDEX_PROXY_URL+x}; caller_proxy_url=${CLAUDEX_PROXY_URL-}
+caller_proxy_config_set=${CLAUDEX_PROXY_CONFIG+x}; caller_proxy_config=${CLAUDEX_PROXY_CONFIG-}
+caller_proxy_bin_set=${CLAUDEX_PROXY_BIN+x}; caller_proxy_bin=${CLAUDEX_PROXY_BIN-}
+caller_auth_dir_set=${CLAUDEX_CODEX_AUTH_DIR+x}; caller_auth_dir=${CLAUDEX_CODEX_AUTH_DIR-}
 login=0
 
 usage() {
@@ -40,6 +49,9 @@ while (( $# > 0 )); do
   esac
   shift
 done
+
+[[ "$proxy_port" =~ ^[0-9]+$ ]] && (( proxy_port >= 1 && proxy_port <= 65535 )) || \
+  fail 'CLAUDEX_PROXY_PORT must be an integer from 1 to 65535'
 
 for source_file in claudex codex-session statusline usage-limit preload.cjs settings.json skills/usage-limit/SKILL.md; do
   [[ -r "$root/$source_file" ]] || fail "missing repository file: $source_file"
@@ -73,10 +85,10 @@ proxy_asset_details() {
     *) fail "unsupported CPU architecture: $(uname -m)" ;;
   esac
   case "${os}_${arch}" in
-    darwin_aarch64) checksum=a7c265f86895bb9d946ad28e3a126a502096dc91afb7e9838477aa4d39e84554 ;;
-    darwin_amd64) checksum=6ff8fad7afaaf0f952d24ac9fb1df790eab62a64ea90981386cbbbdfbc3e9c37 ;;
-    linux_aarch64) checksum=42fffb0ce6b8ebb897520d4fe80541371ef861658f2ff5acfe1c815aace5c4f3 ;;
-    linux_amd64) checksum=dc0814cd0fc33f472ea4f3d5587447e14ffcb34853edac9a523edc1c5d7ba860 ;;
+    darwin_aarch64) checksum=7b13a17670a7d24318e3d6a3f24ff38696cf23ab44894fc93fbd53fbb68dfda6 ;;
+    darwin_amd64) checksum=e442331bf90e908adac1da0b5536c360318dd95708f21423705ed0ae6d311fcc ;;
+    linux_aarch64) checksum=c86b709019e6a86ca068772a1ec6f528f314030076163655789f8243be928549 ;;
+    linux_amd64) checksum=6c973562831c4ace016b057708ccb6529ba88af93fe67841ed109b81fe030b9a ;;
   esac
   printf '%s %s %s\n' "$os" "$arch" "$checksum"
 }
@@ -95,11 +107,13 @@ managed_proxy_is_current() {
 }
 
 install_proxy() {
-  local os arch expected asset url archive actual temp_dir
-  read -r os arch expected <<< "$(proxy_asset_details)"
+  local os arch expected asset url archive actual temp_dir details
+  details=$(proxy_asset_details) || return
+  read -r os arch expected <<< "$details"
   asset="CLIProxyAPI_${proxy_version}_${os}_${arch}.tar.gz"
   url="https://github.com/router-for-me/CLIProxyAPI/releases/download/v${proxy_version}/${asset}"
   temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/claudex-proxy.XXXXXX")
+  trap 'rm -rf "$temp_dir"' RETURN
   archive="$temp_dir/$asset"
   printf 'Downloading verified internal compatibility service v%s for %s/%s...\n' "$proxy_version" "$os" "$arch"
   curl --fail --location --proto '=https' --tlsv1.2 --output "$archive" "$url"
@@ -108,6 +122,7 @@ install_proxy() {
   tar -xzf "$archive" -C "$temp_dir" cli-proxy-api
   install -m 755 "$temp_dir/cli-proxy-api" "$managed_proxy"
   rm -rf "$temp_dir"
+  trap - RETURN
 }
 
 mkdir -p "$bin_dir" "$config_dir" "$managed_bin_dir" "$auth_dir"
@@ -154,6 +169,11 @@ if [[ -r "$env_file" ]]; then
   source "$env_file"
   proxy_token="${CLAUDEX_PROXY_TOKEN:-$proxy_token}"
 fi
+if [[ -n "$caller_proxy_token_set" ]]; then proxy_token="$caller_proxy_token"; fi
+if [[ -n "$caller_proxy_url_set" ]]; then runtime_proxy_url="$caller_proxy_url"; else runtime_proxy_url="${CLAUDEX_PROXY_URL:-http://127.0.0.1:$proxy_port}"; fi
+if [[ -n "$caller_proxy_config_set" ]]; then runtime_proxy_config="$caller_proxy_config"; else runtime_proxy_config="${CLAUDEX_PROXY_CONFIG:-$proxy_config_target}"; fi
+if [[ -n "$caller_proxy_bin_set" ]]; then runtime_proxy_bin="$caller_proxy_bin"; else runtime_proxy_bin="${CLAUDEX_PROXY_BIN:-$managed_proxy}"; fi
+if [[ -n "$caller_auth_dir_set" ]]; then runtime_auth_dir="$caller_auth_dir"; else runtime_auth_dir="${CLAUDEX_CODEX_AUTH_DIR:-$auth_dir}"; fi
 if [[ -z "$proxy_token" ]]; then
   if command -v openssl >/dev/null 2>&1; then proxy_token=$(openssl rand -hex 32)
   else proxy_token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
@@ -179,10 +199,10 @@ chmod 600 "$proxy_config_target"
 env_tmp=$(mktemp "$config_dir/.env.tmp.XXXXXX")
 {
   printf 'CLAUDEX_PROXY_TOKEN=%q\n' "$proxy_token"
-  printf 'CLAUDEX_PROXY_URL=%q\n' "http://127.0.0.1:$proxy_port"
-  printf 'CLAUDEX_PROXY_CONFIG=%q\n' "$proxy_config_target"
-  printf 'CLAUDEX_PROXY_BIN=%q\n' "$managed_proxy"
-  printf 'CLAUDEX_CODEX_AUTH_DIR=%q\n' "$auth_dir"
+  printf 'CLAUDEX_PROXY_URL=%q\n' "$runtime_proxy_url"
+  printf 'CLAUDEX_PROXY_CONFIG=%q\n' "$runtime_proxy_config"
+  printf 'CLAUDEX_PROXY_BIN=%q\n' "$runtime_proxy_bin"
+  printf 'CLAUDEX_CODEX_AUTH_DIR=%q\n' "$runtime_auth_dir"
   if [[ -r "$env_file" ]]; then
     awk '!/^(CLAUDEX_PROXY_TOKEN|CLAUDEX_PROXY_URL|CLAUDEX_PROXY_CONFIG|CLAUDEX_PROXY_BIN|CLAUDEX_CODEX_AUTH_DIR)=/' "$env_file"
   fi

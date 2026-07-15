@@ -13,7 +13,7 @@ fake provider commands so it never touches a developer's real sessions.
 | `codex-session*` | Authentication bridge |
 | `usage-limit*` | Detailed and cached quota reporting |
 | `statusline*` | Stable compact footer |
-| `preload.cjs` | Managed terminal output and Solplan input transforms |
+| `preload.cjs` | Byte-preserving Solplan terminal-input alias |
 | `settings.json`, `env.example` | Reproducible configuration templates |
 | `test.zsh`, `test.ps1`, `test.sh` | Isolated cross-platform regressions |
 | `scripts/check-docs.mjs` | Community-file and local documentation link validation |

@@ -67,7 +67,7 @@ function replaceModelFooterLabels(text) {
   // when it immediately follows a model label managed by Claudex.
   for (const [, label] of modelFooterLabels) {
     filtered = filtered.replace(
-      new RegExp(`(${terminalPhrasePattern(label)})(?:\\x1b)?\\[[0-9;]*m`, 'g'),
+      new RegExp(`(${terminalPhrasePattern(label)})\\[[0-9;]*m`, 'g'),
       '$1',
     );
   }
@@ -88,118 +88,235 @@ function filterClaudexOutput(text) {
   return filtered;
 }
 
-const streamedPhrases = [
-  '· API Usage Billing',
-  'Opus Plan Mode',
-  'Opus Plan',
-  'Opus in plan mode, else Sonnet',
-  'Use Opus in plan mode, Sonnet otherwise',
-  'claude --resume',
-  'claude -resume',
-  'claude -r',
-  ...modelFooterLabels.map(([source]) => source),
-  ...rateLimitMessages.map(([source]) => source),
-];
-
-function trailingManagedPrefixStart(text) {
-  const visible = [];
-  const rawStarts = [];
-  const ansi = new RegExp(csi, 'y');
-  let incompleteAnsiStart = -1;
-  for (let index = 0; index < text.length;) {
-    ansi.lastIndex = index;
-    const match = ansi.exec(text);
-    if (match) {
-      index += match[0].length;
-      continue;
-    }
-    if (text[index] === '\x1b' && /^\x1b\[[0-?]*[ -\/]*$/.test(text.slice(index))) {
-      incompleteAnsiStart = index;
-      break;
-    }
-    rawStarts.push(index);
-    visible.push(text[index]);
-    index += 1;
-  }
-  const rendered = visible.join('');
-  let modelFooterStart = -1;
-  for (const [source] of modelFooterLabels) {
-    const malformedSgr = new RegExp(`${source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\[[0-9;]*$`).exec(rendered);
-    const suffixLength = malformedSgr ? malformedSgr[0].length : (rendered.endsWith(source) ? source.length : 0);
-    if (suffixLength > 0) {
-      const start = rawStarts[rendered.length - suffixLength];
-      modelFooterStart = modelFooterStart < 0 ? start : Math.min(modelFooterStart, start);
-    }
-  }
-  let longest = 0;
-  for (const phrase of streamedPhrases) {
-    const maximum = Math.min(rendered.length, phrase.length - 1);
-    for (let length = maximum; length >= 1; length -= 1) {
-      if (length <= longest) break;
-      if (phrase.startsWith(rendered.slice(-length))) {
-        longest = length;
-        break;
-      }
-    }
-  }
-  const phraseStart = longest > 0 ? rawStarts[rendered.length - longest] : -1;
-  const pendingStarts = [phraseStart, incompleteAnsiStart, modelFooterStart]
-    .filter((start) => start >= 0);
-  return pendingStarts.length > 0 ? Math.min(...pendingStarts) : -1;
-}
-
 // Claude Code's plan/execution switching is implemented by its built-in
 // `opusplan` selector. Expose the provider-accurate `/model solplan` spelling
-// without introducing a fake upstream model. For normal character-by-character
-// TTY input, replace only the final word just before Enter. For a pasted full
-// command, rewrite it before Claude Code sees the chunk.
-let currentInputLine = '';
-function updateModelMode(line) {
-  const match = line.trim().match(/^\/model(?:[ \t]+(.+))?$/i);
-  if (!match) return;
-  if ((match[1] || '').trim().toLowerCase() === 'solplan') process.env.CLAUDEX_MODEL_MODE = 'solplan';
-  else delete process.env.CLAUDEX_MODEL_MODE;
+// without introducing a fake upstream model. The terminal sends bytes, not
+// JavaScript characters: keep those bytes untouched and track UTF-8 only as
+// metadata so an arbitrary read boundary can never corrupt a prompt.
+const ESC = 0x1b;
+const CR = 0x0d;
+const LF = 0x0a;
+const DEL = 0x7f;
+const bracketedPasteEnd = [ESC, 0x5b, 0x32, 0x30, 0x31, 0x7e];
+
+function utf8SequenceLength(byte) {
+  if (byte >= 0xc2 && byte <= 0xdf) return 2;
+  if (byte >= 0xe0 && byte <= 0xef) return 3;
+  if (byte >= 0xf0 && byte <= 0xf4) return 4;
+  return 1;
 }
 
-function trackInputLine(text) {
-  for (const character of text) {
-    if (character === '\r' || character === '\n') {
-      updateModelMode(currentInputLine);
-      currentInputLine = '';
-    } else if (character === '\x03' || character === '\x15') currentInputLine = '';
-    else if (character === '\x7f' || character === '\b') currentInputLine = currentInputLine.slice(0, -1);
-    else if (character >= ' ' && character !== '\x7f') currentInputLine += character;
+class InputAliasRewriter {
+  constructor() {
+    this.line = [];
+    this.cursor = 0;
+    this.reliable = true;
+    this.control = null;
+    this.bracketedPaste = false;
+    this.pendingUtf8 = null;
+  }
+
+  rewrite(original) {
+    const isString = typeof original === 'string';
+    if (!isString && !Buffer.isBuffer(original) && !(original instanceof Uint8Array)) return original;
+    const input = isString
+      ? Buffer.from(original, 'utf8')
+      : Buffer.from(original.buffer, original.byteOffset, original.byteLength);
+
+    for (const unit of this.line) {
+      unit.start = null;
+      unit.end = null;
+    }
+    if (this.pendingUtf8) this.pendingUtf8.start = null;
+
+    const output = [];
+    for (const byte of input) this.processByte(byte, output);
+    const rewritten = Buffer.from(output);
+    if (isString) return rewritten.toString('utf8');
+    return rewritten.equals(input) && Buffer.isBuffer(original) ? original : rewritten;
+  }
+
+  processByte(byte, output) {
+    if (this.control) {
+      const start = output.length;
+      output.push(byte);
+      this.control.push({ byte, start, end: output.length });
+      if (this.bracketedPaste) this.continueBracketedPasteControl();
+      else this.continueControl();
+      return;
+    }
+
+    if (byte === ESC) {
+      const start = output.length;
+      output.push(byte);
+      this.control = [{ byte, start, end: output.length }];
+      return;
+    }
+
+    if (!this.bracketedPaste && (byte === CR || byte === LF)) {
+      this.submit(output, byte);
+      return;
+    }
+
+    const start = output.length;
+    output.push(byte);
+    this.consumeLogicalByte(byte, start, output.length);
+  }
+
+  continueBracketedPasteControl() {
+    const bytes = this.control.map((entry) => entry.byte);
+    const isPrefix = bytes.every((byte, index) => byte === bracketedPasteEnd[index]);
+    if (isPrefix && bytes.length < bracketedPasteEnd.length) return;
+    if (isPrefix) {
+      this.control = null;
+      this.bracketedPaste = false;
+      return;
+    }
+
+    // An ESC that is not the paste terminator is literal pasted content.
+    const literal = this.control;
+    this.control = null;
+    for (const entry of literal) this.consumeLogicalByte(entry.byte, entry.start, entry.end);
+  }
+
+  continueControl() {
+    const bytes = this.control.map((entry) => entry.byte);
+    if (bytes.length === 1) return;
+    if (bytes[1] !== 0x5b) {
+      this.control = null;
+      return;
+    }
+    const final = bytes[bytes.length - 1];
+    if (bytes.length < 3 || final < 0x40 || final > 0x7e) {
+      if (bytes.length > 64) this.control = null;
+      return;
+    }
+    this.control = null;
+    this.applyCsi(Buffer.from(bytes.slice(2, -1)).toString('ascii'), final);
+  }
+
+  applyCsi(parameters, final) {
+    const count = Math.max(1, Number.parseInt(parameters, 10) || 1);
+    if (final === 0x44) { // Cursor left.
+      if (this.reliable) this.cursor = Math.max(0, this.cursor - count);
+    } else if (final === 0x43) { // Cursor right.
+      if (this.reliable) this.cursor = Math.min(this.line.length, this.cursor + count);
+    } else if (final === 0x48 || (final === 0x7e && /^(1|7)$/.test(parameters))) {
+      if (this.reliable) this.cursor = 0;
+    } else if (final === 0x46 || (final === 0x7e && /^(4|8)$/.test(parameters))) {
+      if (this.reliable) this.cursor = this.line.length;
+    } else if (final === 0x7e && parameters === '3') { // Delete.
+      if (this.reliable && this.cursor < this.line.length) this.line.splice(this.cursor, 1);
+    } else if (final === 0x7e && parameters === '200') {
+      this.bracketedPaste = true;
+    } else if (final === 0x41 || final === 0x42) {
+      // History contents belong to Claude Code and cannot be reconstructed.
+      this.reliable = false;
+    }
+  }
+
+  consumeLogicalByte(byte, start, end) {
+    if (this.pendingUtf8) {
+      if (byte >= 0x80 && byte <= 0xbf) {
+        this.pendingUtf8.bytes.push(byte);
+        this.pendingUtf8.end = this.pendingUtf8.start == null ? null : end;
+        if (this.pendingUtf8.bytes.length === this.pendingUtf8.expected) this.commitUtf8();
+        return;
+      }
+      this.commitInvalidUtf8();
+    }
+
+    if (byte === CR || byte === LF) {
+      this.line = [];
+      this.cursor = 0;
+      this.reliable = true;
+    } else if (byte === 0x03 || byte === 0x15) { // Ctrl-C / Ctrl-U.
+      this.line = [];
+      this.cursor = 0;
+      this.reliable = true;
+    } else if (byte === 0x01) { // Ctrl-A.
+      if (this.reliable) this.cursor = 0;
+    } else if (byte === 0x05) { // Ctrl-E.
+      if (this.reliable) this.cursor = this.line.length;
+    } else if (byte === DEL || byte === 0x08) {
+      if (this.reliable && this.cursor > 0) {
+        this.line.splice(this.cursor - 1, 1);
+        this.cursor -= 1;
+      }
+    } else if (byte === 0x04) { // Ctrl-D.
+      if (this.reliable && this.cursor < this.line.length) this.line.splice(this.cursor, 1);
+    } else if (byte === 0x09) {
+      this.insertUnit('\t', start, end);
+    } else if (byte >= 0x20 && byte <= 0x7e) {
+      this.insertUnit(String.fromCharCode(byte), start, end);
+    } else if (byte >= 0x80) {
+      const expected = utf8SequenceLength(byte);
+      if (expected === 1) this.insertUnit('\ufffd', start, end);
+      else this.pendingUtf8 = { bytes: [byte], expected, start, end };
+    }
+  }
+
+  insertUnit(text, start, end) {
+    if (!this.reliable) return;
+    this.line.splice(this.cursor, 0, { text, start, end });
+    this.cursor += 1;
+  }
+
+  commitUtf8() {
+    const pending = this.pendingUtf8;
+    this.pendingUtf8 = null;
+    this.insertUnit(Buffer.from(pending.bytes).toString('utf8'), pending.start, pending.end);
+  }
+
+  commitInvalidUtf8() {
+    const pending = this.pendingUtf8;
+    this.pendingUtf8 = null;
+    for (let index = 0; index < pending.bytes.length; index += 1) {
+      this.insertUnit('\ufffd', index === 0 ? pending.start : null, index === pending.bytes.length - 1 ? pending.end : null);
+    }
+  }
+
+  submit(output, newline) {
+    if (this.pendingUtf8) this.commitInvalidUtf8();
+    const line = this.reliable ? this.line.map((unit) => unit.text).join('') : '';
+    const solplan = line.match(/^\/model[ \t]+solplan[ \t]*$/i);
+    if (solplan) {
+      const prefix = line.match(/^\/model[ \t]+/i)[0];
+      const argumentStart = [...prefix].length;
+      const replacedUnits = this.line.slice(argumentStart);
+      const first = replacedUnits[0];
+      const contiguous = first && replacedUnits.every((unit, index) => (
+        unit.start != null && unit.end != null
+        && (index === 0 || replacedUnits[index - 1].end === unit.start)
+      ));
+      if (contiguous) {
+        output.splice(first.start, replacedUnits[replacedUnits.length - 1].end - first.start,
+          ...Buffer.from('opusplan', 'ascii'));
+      } else {
+        if (this.cursor < this.line.length) output.push(ESC, 0x5b, 0x46);
+        output.push(...Array(replacedUnits.length).fill(DEL), ...Buffer.from('opusplan', 'ascii'));
+      }
+      process.env.CLAUDEX_MODEL_MODE = 'solplan';
+    } else if (/^\/model(?:[ \t]+.*)?$/i.test(line)) {
+      delete process.env.CLAUDEX_MODEL_MODE;
+    }
+    output.push(newline);
+    this.line = [];
+    this.cursor = 0;
+    this.reliable = true;
   }
 }
 
+function createInputRewriter() {
+  return new InputAliasRewriter();
+}
+
+const defaultInputRewriter = createInputRewriter();
 function rewriteSolplanInput(text) {
-  const submittedModelCommands = text.match(/(?:^|[\r\n])\/model[ \t]+[^\r\n]*(?=[\r\n])/gi) || [];
-  for (const command of submittedModelCommands) updateModelMode(command.replace(/^[\r\n]/, ''));
-  const pasted = text.replace(/(^|[\r\n])\/model[ \t]+solplan[ \t]*(?=[\r\n])/gi, '$1/model opusplan');
-  if (pasted !== text) {
-    trackInputLine(pasted);
-    process.env.CLAUDEX_MODEL_MODE = 'solplan';
-    return pasted;
-  }
-  if (/^[\r\n]+$/.test(text) && /^\/model[ \t]+solplan[ \t]*$/i.test(currentInputLine)) {
-    const replaceLength = currentInputLine.match(/solplan[ \t]*$/i)[0].length;
-    process.env.CLAUDEX_MODEL_MODE = 'solplan';
-    currentInputLine = '';
-    return `${'\x7f'.repeat(replaceLength)}opusplan${text}`;
-  }
-  trackInputLine(text);
-  return text;
+  return defaultInputRewriter.rewrite(text);
 }
 
 if (process.stdin.isTTY || process.env.CLAUDEX_TEST_TTY_INPUT === '1') {
-  const rewriteInputChunk = (original) => {
-    const encoding = Buffer.isBuffer(original) ? 'utf8' : undefined;
-    const decoded = Buffer.isBuffer(original) ? original.toString(encoding) : original;
-    if (typeof decoded !== 'string') return original;
-    const rewritten = rewriteSolplanInput(decoded);
-    return rewritten === decoded || !Buffer.isBuffer(original) ? rewritten : Buffer.from(rewritten, encoding);
-  };
-
   // Bun's native stdin implementation dispatches raw-mode input directly to
   // registered listeners instead of consistently calling the JavaScript
   // EventEmitter.emit method. Wrap the listener boundary, and the read method
@@ -207,11 +324,13 @@ if (process.stdin.isTTY || process.env.CLAUDEX_TEST_TTY_INPUT === '1') {
   // same exact-command alias.
   const listenerWrappers = new WeakMap();
   const wrappedListeners = new WeakSet();
+  let registeringOnceWrapper = false;
   const wrapDataListener = (listener) => {
     if (typeof listener !== 'function' || wrappedListeners.has(listener)) return listener;
     if (listenerWrappers.has(listener)) return listenerWrappers.get(listener);
+    const rewriter = createInputRewriter();
     const wrapped = function claudexInputListener(chunk, ...rest) {
-      return listener.call(this, rewriteInputChunk(chunk), ...rest);
+      return listener.call(this, rewriter.rewrite(chunk), ...rest);
     };
     listenerWrappers.set(listener, wrapped);
     wrappedListeners.add(wrapped);
@@ -222,7 +341,19 @@ if (process.stdin.isTTY || process.env.CLAUDEX_TEST_TTY_INPUT === '1') {
     if (typeof process.stdin[method] !== 'function') continue;
     const original = process.stdin[method];
     process.stdin[method] = function claudexInputRegistration(event, listener, ...rest) {
-      return original.call(this, event, event === 'data' ? wrapDataListener(listener) : listener, ...rest);
+      if (registeringOnceWrapper) return original.call(this, event, listener, ...rest);
+      const registered = event === 'data' ? wrapDataListener(listener) : listener;
+      if (event !== 'data' || (method !== 'once' && method !== 'prependOnceListener')) {
+        return original.call(this, event, registered, ...rest);
+      }
+      // Node implements once() through this.on(). Do not wrap its internal
+      // once-wrapper a second time after wrapping the user's listener here.
+      registeringOnceWrapper = true;
+      try {
+        return original.call(this, event, registered, ...rest);
+      } finally {
+        registeringOnceWrapper = false;
+      }
     };
   }
   for (const method of ['off', 'removeListener']) {
@@ -236,48 +367,20 @@ if (process.stdin.isTTY || process.env.CLAUDEX_TEST_TTY_INPUT === '1') {
 
   if (typeof process.stdin.read === 'function') {
     const originalRead = process.stdin.read;
+    const readableRewriter = createInputRewriter();
     process.stdin.read = function claudexInputRead(...args) {
       const chunk = originalRead.apply(this, args);
-      return chunk == null ? chunk : rewriteInputChunk(chunk);
+      // Data-mode consumers are transformed once at their listener boundary.
+      // Native stream machinery may call read() internally before emitting
+      // that same chunk, so rewriting here as well would apply edits twice.
+      if (chunk == null || this.listenerCount('data') > 0) return chunk;
+      return readableRewriter.rewrite(chunk);
     };
   }
 }
 
-function installOutputFilter(stream) {
-  const originalWrite = stream.write.bind(stream);
-  let pending = '';
-  stream.write = function claudexFilteredWrite(chunk, encoding, callback) {
-    const buffer = Buffer.isBuffer(chunk);
-    const characterEncoding = typeof encoding === 'string' ? encoding : 'utf8';
-    const decoded = buffer ? chunk.toString(characterEncoding) : chunk;
-    if (typeof decoded !== 'string') return originalWrite(chunk, encoding, callback);
+// Never rewrite process output. Fullscreen frames depend on exact byte counts,
+// while print/JSON modes treat stdout as user or machine data. The pure helper
+// remains exported for focused compatibility diagnostics only.
 
-    const combined = pending + decoded;
-    const pendingStart = trailingManagedPrefixStart(combined);
-    const ready = filterClaudexOutput(pendingStart >= 0 ? combined.slice(0, pendingStart) : combined);
-    pending = pendingStart >= 0 ? combined.slice(pendingStart) : '';
-    chunk = buffer ? Buffer.from(ready, characterEncoding) : ready;
-    return originalWrite(chunk, encoding, callback);
-  };
-
-  process.on('exit', () => {
-    if (pending) originalWrite(filterClaudexOutput(pending));
-    pending = '';
-  });
-}
-
-// Fullscreen Claude Code owns cursor placement, erase regions, and redraw
-// timing. Changing the byte length of those live frames after layout can leave
-// clipped input, duplicate cursors, or orphaned footer characters. Keep the
-// interactive TUI byte-for-byte native; model metadata and the supported
-// status-line hook already provide Claudex labels there. The filter remains
-// available for non-interactive output and focused diagnostics.
-const interactiveTui = process.env.CLAUDEX_INTERACTIVE_TUI === '1'
-  || process.env.CLAUDEX_TEST_INTERACTIVE_TUI === '1'
-  || Boolean(process.stdout.isTTY && process.stdin.isTTY);
-if (!interactiveTui) {
-  installOutputFilter(process.stdout);
-  installOutputFilter(process.stderr);
-}
-
-module.exports = { filterClaudexOutput, rewriteSolplanInput };
+module.exports = { createInputRewriter, filterClaudexOutput, rewriteSolplanInput };
