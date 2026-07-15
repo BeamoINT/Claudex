@@ -453,9 +453,9 @@ exit 1
     Assert-True (($filteredSolplan | Out-String).Contains('GPT-5.6 Solplan')) 'Solplan picker label'
     Assert-True (($filteredSolplan | Out-String).Contains('GPT-5.6 Sol in plan mode, GPT-5.6 Terra otherwise')) 'Solplan picker description'
     $env:CLAUDEX_TEST_TTY_INPUT = '1'
-    $inputAlias = & node -e 'const p=require(process.argv[1]);process.stdout.write(p.rewriteSolplanInput(process.argv[2]+String.fromCharCode(13)))' (Join-Path $root 'preload.cjs') '/model solplan'
+    $inputAlias = & node -e 'const p=require(process.argv[1]);process.stdout.write(Buffer.from(p.rewriteSolplanInput(process.argv[2]+String.fromCharCode(13))).toString("hex"))' (Join-Path $root 'preload.cjs') '/model solplan'
     Remove-Item Env:CLAUDEX_TEST_TTY_INPUT
-    Assert-True (($inputAlias | Out-String).Contains('/model opusplan')) 'Solplan slash-command alias'
+    Assert-True (($inputAlias | Out-String).Contains('2f6d6f64656c206f707573706c616e0d')) 'Solplan slash-command alias'
     $packageVersion = (& node (Join-Path $root 'bin\claudex-package.mjs') --package-version | Out-String).Trim()
     $packageManifest = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
     Assert-True ($packageVersion -eq $packageManifest.version) 'package-manager wrapper version'
