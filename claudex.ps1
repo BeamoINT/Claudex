@@ -209,7 +209,7 @@ function Ensure-Proxy {
     $lockAcquired = $false
     foreach ($attempt in 1..300) {
         try {
-            New-Item -LiteralPath $lockDir -ItemType Directory -ErrorAction Stop | Out-Null
+            New-Item -Path $lockDir -ItemType Directory -ErrorAction Stop | Out-Null
             [IO.File]::WriteAllText($ownerFile, "$PID`n", $utf8)
             $lockAcquired = $true
             break
@@ -419,7 +419,7 @@ function Start-ClaudeUpdateCheck {
             if ($lockAge.TotalHours -ge 1) { Remove-Item -LiteralPath $lock -Recurse -Force }
         } catch { return }
     }
-    try { New-Item -LiteralPath $lock -ItemType Directory -ErrorAction Stop | Out-Null } catch { return }
+    try { New-Item -Path $lock -ItemType Directory -ErrorAction Stop | Out-Null } catch { return }
     $claudePath = $script:claudeInvocation
     $log = Join-Path $updateDir 'claude-update.log'
     Start-Job -ScriptBlock {
