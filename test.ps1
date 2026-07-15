@@ -275,7 +275,15 @@ exit 1
     $resumeFrame = 'Resume this session with: claude --resume 123e4567-e89b-12d3-a456-426614174000'
     $filteredResume = $resumeFrame | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
     Assert-True (($filteredResume | Out-String).Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'resume command rewritten'
-    $filteredResumeError = & node --require (Join-Path $root 'preload.cjs') -e 'process.stderr.write(process.argv[1])' $resumeFrame 2>&1
+    $strictErrorPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5 wraps intentional native stderr as a
+        # NativeCommandError when the suite uses Stop globally.
+        $ErrorActionPreference = 'Continue'
+        $filteredResumeError = & node --require (Join-Path $root 'preload.cjs') -e 'process.stderr.write(process.argv[1])' $resumeFrame 2>&1
+    } finally {
+        $ErrorActionPreference = $strictErrorPreference
+    }
     Assert-True (($filteredResumeError | Out-String).Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'stderr resume command rewritten'
     $solplanPicker = 'Opus Plan Mode - Use Opus in plan mode, Sonnet otherwise'
     $filteredSolplan = $solplanPicker | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
