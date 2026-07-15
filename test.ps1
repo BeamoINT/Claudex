@@ -38,26 +38,22 @@ if not errorlevel 1 (
 )
 echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}
 '@, $utf8)
-        [IO.File]::WriteAllText((Join-Path $fakeBin 'claude.cmd'), @'
-@echo off
-if "%~1"=="--version" (
-  echo 2.1.210 ^(test^)
-  exit /b 0
-)
-echo AUTO=%CLAUDE_CODE_AUTO_MODE_MODEL%
-echo BG=%CLAUDE_CODE_BG_CLASSIFIER_MODEL%
-echo SUBAGENT=%CLAUDE_CODE_SUBAGENT_MODEL%
-echo CONCURRENCY=%CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY%
-echo RETRIES=%CLAUDE_CODE_MAX_RETRIES%
-echo CONTEXT=%CLAUDE_CODE_MAX_CONTEXT_TOKENS%
-echo COMPACT=%CLAUDE_CODE_AUTO_COMPACT_WINDOW%
-echo NO_FLICKER=%CLAUDE_CODE_NO_FLICKER%
-echo ACCESSIBILITY=%CLAUDE_CODE_ACCESSIBILITY%
-echo OPUS=%ANTHROPIC_DEFAULT_OPUS_MODEL%
-echo OPUS_NAME=%ANTHROPIC_DEFAULT_OPUS_MODEL_NAME%
-echo POWERSHELL_TOOL=%CLAUDE_CODE_USE_POWERSHELL_TOOL%
-echo ARGS=%*
-'@, $utf8)
+        function global:claude {
+            if ($args.Count -gt 0 -and $args[0] -eq '--version') { Write-Output '2.1.210 (test)'; return }
+            Write-Output "AUTO=$env:CLAUDE_CODE_AUTO_MODE_MODEL"
+            Write-Output "BG=$env:CLAUDE_CODE_BG_CLASSIFIER_MODEL"
+            Write-Output "SUBAGENT=$env:CLAUDE_CODE_SUBAGENT_MODEL"
+            Write-Output "CONCURRENCY=$env:CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY"
+            Write-Output "RETRIES=$env:CLAUDE_CODE_MAX_RETRIES"
+            Write-Output "CONTEXT=$env:CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+            Write-Output "COMPACT=$env:CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+            Write-Output "NO_FLICKER=$env:CLAUDE_CODE_NO_FLICKER"
+            Write-Output "ACCESSIBILITY=$env:CLAUDE_CODE_ACCESSIBILITY"
+            Write-Output "OPUS=$env:ANTHROPIC_DEFAULT_OPUS_MODEL"
+            Write-Output "OPUS_NAME=$env:ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"
+            Write-Output "POWERSHELL_TOOL=$env:CLAUDE_CODE_USE_POWERSHELL_TOOL"
+            Write-Output "ARGS=$($args -join ' ')"
+        }
         [IO.File]::WriteAllText((Join-Path $fakeBin 'cliproxyapi.cmd'), @'
 @echo off
 echo CLIProxyAPI test
@@ -222,5 +218,6 @@ exit 1
 
     [Console]::WriteLine('all Claudex Windows tests passed')
 } finally {
+    if ($isWindowsPlatform) { Remove-Item Function:\global:claude -ErrorAction SilentlyContinue }
     if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
 }

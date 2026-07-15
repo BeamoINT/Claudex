@@ -153,8 +153,13 @@ jq -e '
   and (.email | not)
   and (.access_token | not)
 ' "$tmp/home/.config/claudex/usage-cache/limits.json" >/dev/null
-cache_mode=$(stat -f '%Lp' "$tmp/home/.config/claudex/usage-cache/limits.json" 2>/dev/null || stat -c '%a' "$tmp/home/.config/claudex/usage-cache/limits.json")
-cache_dir_mode=$(stat -f '%Lp' "$tmp/home/.config/claudex/usage-cache" 2>/dev/null || stat -c '%a' "$tmp/home/.config/claudex/usage-cache")
+if [[ "$(uname -s)" == Darwin ]]; then
+  cache_mode=$(stat -f '%Lp' "$tmp/home/.config/claudex/usage-cache/limits.json")
+  cache_dir_mode=$(stat -f '%Lp' "$tmp/home/.config/claudex/usage-cache")
+else
+  cache_mode=$(stat -c '%a' "$tmp/home/.config/claudex/usage-cache/limits.json")
+  cache_dir_mode=$(stat -c '%a' "$tmp/home/.config/claudex/usage-cache")
+fi
 [[ "$cache_mode" == 600 ]]
 [[ "$cache_dir_mode" == 700 ]]
 
