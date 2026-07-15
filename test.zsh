@@ -34,6 +34,7 @@ for argument in "$@"; do
     exit
   fi
 done
+if [[ -n "${FAKE_PROXY_READY_FILE:-}" && ! -e "$FAKE_PROXY_READY_FILE" ]]; then exit 7; fi
 printf '%s\n' '{"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}'
 EOF
 cat > "$tmp/bin/claude" <<'EOF'
@@ -44,6 +45,10 @@ if [[ "${1:-}" == "--version" ]]; then
 fi
 if [[ "${1:-}" == "--help" ]]; then
   printf '%s\n' '--model --agents --append-system-prompt --permission-mode --settings --effort'
+  exit
+fi
+if [[ "${1:-}" == "auto-mode" && "${2:-}" == "defaults" ]]; then
+  printf '%s\n' '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
   exit
 fi
 if [[ "${1:-}" == "update" ]]; then
@@ -64,6 +69,16 @@ if [[ "${FAKE_CLAUDE_RESUME:-0}" == 1 ]]; then
   exit "${FAKE_CLAUDE_RESUME_EXIT:-0}"
 fi
 [[ -z "${FAKE_CLAUDE_DELAY:-}" ]] || sleep "$FAKE_CLAUDE_DELAY"
+if [[ "${FAKE_PROXY_RECOVERY:-0}" == 1 ]]; then
+  rm -f "$FAKE_PROXY_READY_FILE"
+  for attempt in {1..60}; do
+    [[ -e "$FAKE_PROXY_READY_FILE" ]] && break
+    sleep 0.1
+  done
+  if [[ -e "$FAKE_PROXY_READY_FILE" ]]; then printf '%s\n' 'PROXY_RECOVERED=1'
+  else printf '%s\n' 'PROXY_RECOVERED=0'
+  fi
+fi
 printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
 printf '%s\n' "BG=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
 printf '%s\n' "SUBAGENT=${CLAUDE_CODE_SUBAGENT_MODEL}"
@@ -79,6 +94,7 @@ printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
 printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
 printf '%s\n' "BUN=${BUN_OPTIONS:-}"
+printf '%s\n' "INTERACTIVE=${CLAUDEX_INTERACTIVE_TUI:-}"
 printf '%s\n' "ARGS=$*"
 EOF
 cat > "$tmp/bin/codex" <<'EOF'
@@ -97,6 +113,16 @@ done
 EOF
 cat > "$tmp/bin/cliproxyapi" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "-version" ]]; then
+  printf '%s\n' 'CLIProxyAPI test'
+  printf '%s\n' 'extra version detail'
+  exit 1
+fi
+if [[ -n "${FAKE_PROXY_READY_FILE:-}" ]]; then
+  : > "$FAKE_PROXY_READY_FILE"
+  [[ -z "${FAKE_PROXY_START_LOG:-}" ]] || printf '%s\n' "$$" >> "$FAKE_PROXY_START_LOG"
+  exit 0
+fi
 printf '%s\n' 'CLIProxyAPI test'
 printf '%s\n' 'extra version detail'
 exit 1
@@ -105,6 +131,7 @@ chmod +x "$tmp/bin/"*
 
 run_wrapper() {
   HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
+    CLAUDEX_SKIP_PROXY_WATCHER=1 \
     "$root/claudex" "$@"
 }
 
@@ -128,6 +155,11 @@ input_listener_output=$(printf '/model solplan\r' | CLAUDEX_TEST_TTY_INPUT=1 nod
 jq -e '
   .model == "opus"
   and .permissions.defaultMode == "auto"
+  and (.autoMode.environment | any(startswith("User-designated task boundary:")))
+  and (.autoMode.environment | any(startswith("Explicitly approved development transfer:")))
+  and (.autoMode.allow | any(startswith("Explicit Action Approval:")))
+  and (.autoMode.allow | any(contains("approve that")))
+  and (.autoMode.allow | any(startswith("Requested Agent Configuration:")))
   and .autoCompactEnabled == true
   and .autoCompactWindow == 280000
   and .precomputeCompactionEnabled == true
@@ -142,6 +174,10 @@ jq -e '
   and (.env | not)
 ' "$root/settings.json" >/dev/null
 
+jq '.autoMode.allow += ["User custom allow rule"]
+  | .autoMode.environment += ["User custom environment rule"]' \
+  "$tmp/home/.config/claudex/settings.json" > "$tmp/custom-auto-mode-settings.json"
+mv "$tmp/custom-auto-mode-settings.json" "$tmp/home/.config/claudex/settings.json"
 default_output=$(run_wrapper --terra test-prompt)
 state_file="$tmp/home/.config/claudex/.claude.json"
 jq -e '
@@ -158,11 +194,11 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
   | ($sol | length) == 1
   and $sol[0].description == "Frontier capability for planning and the hardest engineering work"' \
   "$state_file" >/dev/null
-[[ "$default_output" == *'AUTO=gpt-5.6-luna'* ]]
+[[ "$default_output" == *'AUTO=gpt-5.6-terra'* ]]
 [[ "$default_output" == *'BG=gpt-5.6-luna'* ]]
 [[ "$default_output" == *'SUBAGENT=gpt-5.6-terra'* ]]
 [[ "$default_output" == *'CONCURRENCY=3'* ]]
-[[ "$default_output" == *'RETRIES=2'* ]]
+[[ "$default_output" == *'RETRIES=4'* ]]
 [[ "$default_output" == *'CONTEXT=400000'* ]]
 [[ "$default_output" == *'COMPACT=280000'* ]]
 [[ "$default_output" == *'NO_FLICKER=1'* ]]
@@ -171,6 +207,7 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" == *'OPUS_NAME=GPT-5.6 Sol'* ]]
 [[ "$default_output" == *'BASE=http://127.0.0.1:8318'* ]]
 [[ "$default_output" == *"BUN=--preload $tmp/home/.config/claudex/preload.cjs"* ]]
+[[ "$default_output" == *$'INTERACTIVE=\n'* ]]
 [[ "$default_output" == *'--permission-mode auto'* ]]
 [[ "$default_output" == *'--model gpt-5.6-terra'* ]]
 [[ "$default_output" == *'Do not create a team, spawn or delegate to additional agents'* ]]
@@ -179,6 +216,8 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" == *'Before every final answer, call TaskList and reconcile every entry'* ]]
 [[ "$default_output" == *'Never leave stale in_progress tasks after their work is done'* ]]
 [[ "$default_output" == *'operate as a Codex coding agent inside Claude Code'* ]]
+[[ "$default_output" == *'Ask as few questions as possible'* ]]
+[[ "$default_output" == *'Never repeat a question the user already answered'* ]]
 [[ "$default_output" == *'Do not call EnterPlanMode'* ]]
 [[ "$default_output" == *'"gpt-5-6-terra"'* ]]
 [[ "$default_output" == *'"gpt-5-6-luna"'* ]]
@@ -187,6 +226,29 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" != *'"claudex-fast"'* ]]
 [[ "$default_output" == *'Sol capacity is reserved for the leader'* ]]
 [[ "$default_output" != *'"model":"gpt-5.6-sol"'* ]]
+interactive_wrapper_output=$(CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper --terra interactive-render-test)
+[[ "$interactive_wrapper_output" == *'INTERACTIVE=1'* ]]
+jq -e '
+  (.autoMode.allow | index("Default allow rule") != null)
+  and ([.autoMode.allow[] | select(. == "User custom allow rule")] | length == 1)
+  and (.autoMode.allow | any(startswith("Explicit Action Approval:")))
+  and (.autoMode.environment | index("Default environment rule") != null)
+  and ([.autoMode.environment[] | select(. == "User custom environment rule")] | length == 1)
+  and (.autoMode.environment | any(startswith("User-designated task boundary:")))
+  and (.autoMode.environment | any(startswith("Explicitly approved development transfer:")))
+' "$tmp/home/.config/claudex/settings.json" >/dev/null
+
+proxy_ready_file="$tmp/proxy-ready"
+proxy_start_log="$tmp/proxy-start.log"
+: > "$proxy_ready_file"
+proxy_recovery_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=0 \
+  CLAUDEX_TEST_PROXY_REACHABLE_FILE="$proxy_ready_file" \
+  FAKE_PROXY_READY_FILE="$proxy_ready_file" FAKE_PROXY_START_LOG="$proxy_start_log" \
+  FAKE_PROXY_RECOVERY=1 "$root/claudex" recovery-test)
+[[ "$proxy_recovery_output" == *'PROXY_RECOVERED=1'* ]]
+[[ "$(wc -l < "$proxy_start_log" | tr -d ' ')" == 1 ]]
+[[ ! -e "$tmp/home/.config/claudex/run/proxy-start.lock" ]]
 
 auto_output=$(run_wrapper --auto --luna test-prompt)
 [[ "$auto_output" == *'--permission-mode auto'* ]]
@@ -273,11 +335,12 @@ option_value_output=$(run_wrapper --append-system-prompt --manual --print test-p
 doctor_output=$(run_wrapper --doctor)
 [[ "$doctor_output" == *'CLIProxyAPI: CLIProxyAPI test'* ]]
 [[ "$doctor_output" == *'Default permission mode: auto'* ]]
-[[ "$doctor_output" == *'Auto-mode classifier: gpt-5.6-luna'* ]]
+[[ "$doctor_output" == *'Auto-mode classifier: gpt-5.6-terra'* ]]
+[[ "$doctor_output" == *'Auto-mode provider: Codex/OpenAI through the authenticated loopback bridge'* ]]
 [[ "$doctor_output" == *'Subagent model: gpt-5.6-terra (Sol is reserved for the leader)'* ]]
 [[ "$doctor_output" == *'Agent concurrency: 3'* ]]
 [[ "$doctor_output" == *'Task lifecycle: Sol-owned with final-response reconciliation'* ]]
-[[ "$doctor_output" == *'API retries: 2'* ]]
+[[ "$doctor_output" == *'API retries: 4'* ]]
 [[ "$doctor_output" == *'Context window: 400000 tokens'* ]]
 [[ "$doctor_output" == *'Auto-compact window: 280000 tokens (precompute enabled)'* ]]
 [[ "$doctor_output" == *'Context status: session-stabilized (transient zero suppressed)'* ]]
@@ -369,6 +432,11 @@ if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
   printf '%s\n' 'expected invalid permission mode to fail' >&2
   exit 1
 fi
+if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  CLAUDEX_AUTO_MODE_MODEL=claude-sonnet-5 "$root/claudex" >/dev/null 2>&1; then
+  printf '%s\n' 'expected Anthropic auto-mode classifier override to fail' >&2
+  exit 1
+fi
 
 if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
   CLAUDEX_AUTO_COMPACT_WINDOW=99999 "$root/claudex" >/dev/null 2>&1; then
@@ -396,6 +464,7 @@ status_output=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt
 [[ "$status_output" == *'xhigh effort'* ]]
 [[ "$status_output" == *'42% context'* ]]
 [[ "$status_output" == *'Codex 7d 16% left'* ]]
+[[ "$status_output" != *$'\033]0;'* ]]
 
 solplan_settings="$tmp/home/.config/claudex/settings.json"
 solplan_settings_backup="$tmp/settings-before-solplan.json"
@@ -432,6 +501,10 @@ filtered_frame=$(printf '%s' "$billing_frame" | \
 [[ "$filtered_frame" == *'GPT-5.6 Sol with high effort'* ]]
 [[ "$filtered_frame" != *'API Usage Billing'* ]]
 [[ "$filtered_frame" != *$'·\033[43GAPI'* ]]
+interactive_frame=$'\033[2;1H[Tool] Install local app\033[3;1H/model opus\033[4;1H7'
+interactive_frame_output=$(printf '%s' "$interactive_frame" | CLAUDEX_TEST_INTERACTIVE_TUI=1 \
+  node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
+[[ "$interactive_frame_output" == "$interactive_frame" ]]
 split_billing=$(node --require "$root/preload.cjs" -e '
   process.stdout.write("GPT-5.6 Solplan · API Usage Bil");
   process.stdout.write("ling");
@@ -542,6 +615,9 @@ installed_env=$(<"$install_home/.config/claudex/env")
 [[ -r "$install_home/.config/claudex/cliproxyapi.yaml" ]]
 [[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'host: "127.0.0.1"'* ]]
 [[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'port: 8318'* ]]
+[[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'request-retry: 3'* ]]
+[[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'transient-error-cooldown-seconds: 1'* ]]
+[[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'bootstrap-retries: 2'* ]]
 
 package_home="$tmp/package home"
 mkdir -p "$package_home/.codex"

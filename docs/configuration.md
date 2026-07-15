@@ -16,12 +16,12 @@ key.
 | `CLAUDEX_SETTINGS_FILE` | `<config>/settings.json` | Alternate Claude settings file |
 | `CLAUDEX_MODEL` | `gpt-5.6-sol` | Default model ID |
 | `CLAUDEX_PERMISSION_MODE` | `auto` | `manual`, `auto`, `acceptEdits`, `dontAsk`, or `plan` |
-| `CLAUDEX_AUTO_MODE_MODEL` | `gpt-5.6-luna` | Auto-mode classifier model |
+| `CLAUDEX_AUTO_MODE_MODEL` | `gpt-5.6-terra` | Auto-mode classifier model; restricted to managed Codex GPT models |
 | `CLAUDEX_BACKGROUND_MODEL` | `gpt-5.6-luna` | Background classifier model |
 | `CLAUDEX_SUBAGENT_MODEL` | `gpt-5.6-terra` | Default delegated model |
 | `CLAUDEX_MAX_TOOL_USE_CONCURRENCY` | `3` | Positive integer |
 | `CLAUDEX_MAX_AGENT_CONCURRENCY` | `3` | Positive integer |
-| `CLAUDEX_MAX_RETRIES` | `2` | Integer from 0 through 15 |
+| `CLAUDEX_MAX_RETRIES` | `4` | Integer from 0 through 15 |
 | `CLAUDEX_CONTEXT_WINDOW` | `400000` | Integer from 100000 through 1000000 |
 | `CLAUDEX_AUTO_COMPACT_WINDOW` | `280000` | Integer from 100000 through the context window |
 | `CLAUDEX_PLAN_MODE_POLICY` | `conservative` | `conservative` or `normal` |
@@ -63,6 +63,9 @@ may represent a different account.
 
 Do not point the proxy at a non-loopback address without a separate security
 review. Never share or commit `CLAUDEX_PROXY_TOKEN` or any Codex credential.
+The generated config performs three bounded retries for transient upstream 5xx
+responses plus two pre-stream bootstrap retries, with short cooldowns so a
+recovered blip does not flash as a user-facing API error.
 
 ## Updates
 

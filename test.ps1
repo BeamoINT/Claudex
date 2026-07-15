@@ -40,12 +40,17 @@ if not errorlevel 1 (
   echo {"user_id":"private-user","account_id":"private-account","email":"private@example.com","plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":82,"limit_window_seconds":604800,"reset_after_seconds":565127,"reset_at":1784666240},"secondary_window":null},"code_review_rate_limit":null,"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","metered_feature":"codex_bengalfox","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":1784705933},"secondary_window":null}}],"credits":{"has_credits":false,"unlimited":false,"overage_limit_reached":false,"balance":"0"},"spend_control":{"reached":false,"individual_limit":null},"rate_limit_reached_type":null,"rate_limit_reset_credits":{"available_count":1}}
   exit /b 0
 )
+if not "%FAKE_PROXY_READY_FILE%"=="" if not exist "%FAKE_PROXY_READY_FILE%" exit /b 7
 echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}
 '@, $utf8)
         function global:claude {
             $firstArgument = if ($args) { [string] $args[0] } else { '' }
             if ($firstArgument -eq '--version') { Write-Output '2.1.210 (test)'; return }
             if ($firstArgument -eq '--help') { Write-Output '--model --agents --append-system-prompt --permission-mode --settings --effort'; return }
+            if ($firstArgument -eq 'auto-mode' -and $args.Count -gt 1 -and $args[1] -eq 'defaults') {
+                Write-Output '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
+                return
+            }
             if ($firstArgument -eq 'update') { return }
             if ($env:FAKE_CLAUDE_RESUME -eq '1') {
                 $projectKey = [regex]::Replace((Get-Location).Path, '[^A-Za-z0-9]', '-')
@@ -78,15 +83,38 @@ echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]
             Write-Output "MODE=$env:CLAUDEX_SESSION_MODE"
             Write-Output "BASE=$env:ANTHROPIC_BASE_URL"
             Write-Output "BUN=$env:BUN_OPTIONS"
+            Write-Output "INTERACTIVE=$env:CLAUDEX_INTERACTIVE_TUI"
             Write-Output "CONFIG=$env:CLAUDE_CONFIG_DIR"
             Write-Output "ARGS=$($args -join ' ')"
         }
-        [IO.File]::WriteAllText((Join-Path $fakeBin 'cliproxyapi.cmd'), @'
-@echo off
-echo CLIProxyAPI test
-echo extra version detail
-exit /b 1
-'@, $utf8)
+        Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+
+public static class ClaudexTestProxy
+{
+    public static int Main(string[] args)
+    {
+        if (args.Length > 0 && args[0] == "-version")
+        {
+            Console.WriteLine("CLIProxyAPI test");
+            Console.WriteLine("extra version detail");
+            return 1;
+        }
+        string ready = Environment.GetEnvironmentVariable("FAKE_PROXY_READY_FILE");
+        if (!String.IsNullOrEmpty(ready))
+        {
+            File.WriteAllText(ready, String.Empty);
+            string log = Environment.GetEnvironmentVariable("FAKE_PROXY_START_LOG");
+            if (!String.IsNullOrEmpty(log)) File.AppendAllText(log, "started" + Environment.NewLine);
+            return 0;
+        }
+        Console.WriteLine("CLIProxyAPI test");
+        Console.WriteLine("extra version detail");
+        return 1;
+    }
+}
+'@ -OutputAssembly (Join-Path $fakeBin 'cliproxyapi.exe') -OutputType ConsoleApplication
         [IO.File]::WriteAllText((Join-Path $fakeBin 'codex.cmd'), @'
 @echo off
 if "%1"=="app-server" (
@@ -123,6 +151,10 @@ if [ "${1:-}" = "--help" ]; then
   printf '%s\n' '--model --agents --append-system-prompt --permission-mode --settings --effort'
   exit 0
 fi
+if [ "${1:-}" = "auto-mode" ] && [ "${2:-}" = "defaults" ]; then
+  printf '%s\n' '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
+  exit 0
+fi
 if [ "${1:-}" = "update" ]; then exit 0; fi
 printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
 printf '%s\n' "BG=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
@@ -139,6 +171,7 @@ printf '%s\n' "POWERSHELL_TOOL=${CLAUDE_CODE_USE_POWERSHELL_TOOL}"
 printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
 printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
 printf '%s\n' "BUN=${BUN_OPTIONS:-}"
+printf '%s\n' "INTERACTIVE=${CLAUDEX_INTERACTIVE_TUI:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
 printf 'ARGS='; printf ' %s' "$@"; printf '\n'
 '@, $utf8)
@@ -165,16 +198,29 @@ exit 1
     $env:CLAUDEX_CURL_BIN = $fakeCurl
     $env:PATH = "$fakeBin$([IO.Path]::PathSeparator)$env:PATH"
     $env:CLAUDEX_SKIP_AUTO_UPDATE = '1'
+    $env:CLAUDEX_SKIP_PROXY_WATCHER = '1'
     Remove-Item Env:CLAUDEX_PERMISSION_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:CLAUDEX_AUTO_COMPACT_WINDOW -ErrorAction SilentlyContinue
     Remove-Item Env:CLAUDEX_MOUSE_POINTER_SHAPE -ErrorAction SilentlyContinue
 
+    $sourceSettings = Get-Content -LiteralPath (Join-Path $root 'settings.json') -Raw | ConvertFrom-Json
+    Assert-True (@($sourceSettings.autoMode.environment | Where-Object { $_.StartsWith('User-designated task boundary:') }).Count -eq 1) 'auto-mode task boundary'
+    Assert-True (@($sourceSettings.autoMode.environment | Where-Object { $_.StartsWith('Explicitly approved development transfer:') }).Count -eq 1) 'auto-mode approved development transfer'
+    Assert-True (@($sourceSettings.autoMode.allow | Where-Object { $_.StartsWith('Explicit Action Approval:') }).Count -eq 1) 'auto-mode explicit approval'
+    Assert-True (@($sourceSettings.autoMode.allow | Where-Object { $_.Contains('approve that') }).Count -eq 1) 'auto-mode approval by reference'
+    Assert-True (@($sourceSettings.autoMode.allow | Where-Object { $_.StartsWith('Requested Agent Configuration:') }).Count -eq 1) 'auto-mode requested configuration'
+
+    $seedSettings = Get-Content -LiteralPath (Join-Path $testConfig 'settings.json') -Raw | ConvertFrom-Json
+    $seedSettings.autoMode.allow = @($seedSettings.autoMode.allow) + @('User custom allow rule')
+    $seedSettings.autoMode.environment = @($seedSettings.autoMode.environment) + @('User custom environment rule')
+    [IO.File]::WriteAllText((Join-Path $testConfig 'settings.json'), ($seedSettings | ConvertTo-Json -Depth 100), $utf8)
+
     $output = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
-    Assert-True ($output.Contains('AUTO=gpt-5.6-luna')) 'auto classifier'
+    Assert-True ($output.Contains('AUTO=gpt-5.6-terra')) 'auto classifier'
     Assert-True ($output.Contains('BG=gpt-5.6-luna')) 'background classifier'
     Assert-True ($output.Contains('SUBAGENT=gpt-5.6-terra')) 'subagent model'
     Assert-True ($output.Contains('CONCURRENCY=3')) 'tool concurrency'
-    Assert-True ($output.Contains('RETRIES=2')) 'bounded retries'
+    Assert-True ($output.Contains('RETRIES=4')) 'bounded retries'
     Assert-True ($output.Contains('CONTEXT=400000')) 'context window'
     Assert-True ($output.Contains('COMPACT=280000')) 'compaction window'
     Assert-True ($output.Contains('NO_FLICKER=1')) 'no-flicker rendering'
@@ -182,6 +228,7 @@ exit 1
     Assert-True ($output.Contains('OPUS=gpt-5.6-sol')) 'single Sol alias'
     Assert-True ($output.Contains('OPUS_NAME=GPT-5.6 Sol')) 'friendly name'
     Assert-True ($output.Contains('BUN=--preload')) 'proxied session preload'
+    Assert-True ($output.Contains('INTERACTIVE=') -and -not $output.Contains('INTERACTIVE=1')) 'non-interactive output filter remains available'
     Assert-True ($output.Contains('POWERSHELL_TOOL=1')) 'native PowerShell tool'
     Assert-True ($output.Contains('--permission-mode auto')) 'auto permissions'
     Assert-True ($output.Contains('--model gpt-5.6-terra')) 'startup model'
@@ -190,6 +237,8 @@ exit 1
     Assert-True ($output.Contains('Before every final answer, call TaskList and reconcile every entry')) 'leader task reconciliation'
     Assert-True ($output.Contains('Never leave stale in_progress tasks after their work is done')) 'stale task guard'
     Assert-True ($output.Contains('operate as a Codex coding agent inside Claude Code')) 'Codex tuning guard'
+    Assert-True ($output.Contains('Ask as few questions as possible')) 'low-question autonomy guard'
+    Assert-True ($output.Contains('Never repeat a question the user already answered')) 'no-repeat question guard'
     Assert-True ($output.Contains('Do not call EnterPlanMode')) 'conservative plan mode guard'
     Assert-True ($output.Contains('"gpt-5-6-terra"')) 'transparent Terra agent name'
     Assert-True ($output.Contains('"gpt-5-6-luna"')) 'transparent Luna agent name'
@@ -197,6 +246,63 @@ exit 1
     Assert-True (-not $output.Contains('"claudex-builder"')) 'legacy builder alias removed'
     Assert-True (-not $output.Contains('"claudex-fast"')) 'legacy fast alias removed'
     Assert-True (-not $output.Contains('"model":"gpt-5.6-sol"')) 'leader model is not delegated'
+    $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
+    try { $interactiveWrapperOutput = (& (Join-Path $root 'claudex.ps1') --terra interactive-render-test | Out-String) }
+    finally { Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT -ErrorAction SilentlyContinue }
+    Assert-True ($interactiveWrapperOutput.Contains('INTERACTIVE=1')) 'interactive wrapper disables TUI output rewriting'
+    $composedSettings = Get-Content -LiteralPath (Join-Path $testConfig 'settings.json') -Raw | ConvertFrom-Json
+    Assert-True (@($composedSettings.autoMode.allow | Where-Object { $_ -eq 'Default allow rule' }).Count -eq 1) 'upstream auto-mode allow rule preserved'
+    Assert-True (@($composedSettings.autoMode.allow | Where-Object { $_ -eq 'User custom allow rule' }).Count -eq 1) 'user auto-mode allow rule preserved'
+    Assert-True (@($composedSettings.autoMode.allow | Where-Object { $_.StartsWith('Explicit Action Approval:') }).Count -eq 1) 'Claudex auto-mode allow rule composed'
+    Assert-True (@($composedSettings.autoMode.environment | Where-Object { $_ -eq 'Default environment rule' }).Count -eq 1) 'upstream auto-mode environment preserved'
+    Assert-True (@($composedSettings.autoMode.environment | Where-Object { $_ -eq 'User custom environment rule' }).Count -eq 1) 'user auto-mode environment rule preserved'
+    Assert-True (@($composedSettings.autoMode.environment | Where-Object { $_.StartsWith('Explicitly approved development transfer:') }).Count -eq 1) 'approved development transfer composed'
+
+    if ($isWindowsPlatform) {
+        $proxyReady = Join-Path $temporary 'windows-proxy-ready'
+        $proxyStartLog = Join-Path $temporary 'windows-proxy-start.log'
+        $env:FAKE_PROXY_READY_FILE = $proxyReady
+        $env:FAKE_PROXY_START_LOG = $proxyStartLog
+        $env:CLAUDEX_TEST_PROXY_REACHABLE_FILE = $proxyReady
+        $watcherErrorLog = Join-Path $temporary 'windows-proxy-watcher-errors.log'
+        $env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE = $watcherErrorLog
+        $stateHashBefore = (Get-FileHash -LiteralPath (Join-Path $testConfig '.claude.json') -Algorithm SHA256).Hash
+        $shellPath = (Get-Process -Id $PID).Path
+        $parentCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('Start-Sleep -Seconds 15'))
+        $dummyParent = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-EncodedCommand', $parentCommand) -PassThru
+        $quotedLauncher = '"' + (Join-Path $root 'claudex.ps1') + '"'
+        $watchArguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedLauncher,
+            '-ClaudexInternalProxyWatchParentProcessId', [string] $dummyParent.Id)
+        $watcher = Start-Process -FilePath $shellPath -ArgumentList $watchArguments -PassThru -WindowStyle Hidden
+        try {
+            foreach ($attempt in 1..100) {
+                if (Test-Path -LiteralPath $proxyReady -PathType Leaf) { break }
+                Start-Sleep -Milliseconds 100
+            }
+            if (-not (Test-Path -LiteralPath $proxyReady -PathType Leaf)) {
+                $watcher.Refresh()
+                $watchErrors = if (Test-Path -LiteralPath $watcherErrorLog) { Get-Content -LiteralPath $watcherErrorLog -Raw } else { '' }
+                throw "assertion failed: Windows proxy watcher recovered a refused connection; watcherExited=$($watcher.HasExited); watcherErrors=$watchErrors"
+            }
+            Start-Sleep -Milliseconds 300
+            $watcher.Refresh()
+            Assert-True (-not $watcher.HasExited) 'Windows proxy watcher survives after recovery'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $testConfig 'run\proxy-start.lock'))) 'Windows proxy recovery lock released'
+            $stateHashAfter = (Get-FileHash -LiteralPath (Join-Path $testConfig '.claude.json') -Algorithm SHA256).Hash
+            Assert-True ($stateHashAfter -eq $stateHashBefore) 'internal proxy watcher does not mutate model state'
+            Assert-True (@(Get-Content -LiteralPath $proxyStartLog).Count -eq 1) 'Windows proxy watcher starts one recovery process'
+            Stop-Process -Id $dummyParent.Id -Force -ErrorAction SilentlyContinue
+            $dummyParent = $null
+            Assert-True ($watcher.WaitForExit(5000)) 'Windows proxy watcher exits after its parent'
+        } finally {
+            if ($dummyParent) { Stop-Process -Id $dummyParent.Id -Force -ErrorAction SilentlyContinue }
+            if (-not $watcher.HasExited -and -not $watcher.WaitForExit(5000)) { Stop-Process -Id $watcher.Id -Force -ErrorAction SilentlyContinue }
+            Remove-Item Env:FAKE_PROXY_READY_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:FAKE_PROXY_START_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDEX_TEST_PROXY_REACHABLE_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE -ErrorAction SilentlyContinue
+        }
+    }
 
     $env:BUN_OPTIONS = ''
     $directChrome = (& (Join-Path $root 'claudex.ps1') --claude-chrome test-prompt | Out-String)
@@ -405,6 +511,7 @@ exit 1
     Assert-True ($status.Contains('xhigh effort')) 'status effort'
     Assert-True ($status.Contains('42% context')) 'status context'
     Assert-True ($status.Contains('Codex 7d 18% left')) 'status usage limits'
+    Assert-True (-not $status.Contains("$([char]27)]0;")) 'status line excludes terminal-title control sequence'
 
     $env:CLAUDEX_MODEL_MODE = 'solplan'
     $solplanStatus = ($statusJson | & (Join-Path $root 'statusline.ps1') | Out-String)
@@ -428,6 +535,11 @@ exit 1
     $filteredFrame = $billingFrame | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
     Assert-True (($filteredFrame | Out-String).Contains('GPT-5.6 Sol with high effort')) 'banner retained'
     Assert-True (-not ($filteredFrame | Out-String).Contains('API Usage Billing')) 'billing label removed'
+    $interactiveFrame = "$([char]27)[2;1H[Tool] Install local app$([char]27)[3;1H/model opus$([char]27)[4;1H7"
+    $env:CLAUDEX_TEST_INTERACTIVE_TUI = '1'
+    try { $interactiveFrameOutput = $interactiveFrame | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)' }
+    finally { Remove-Item Env:CLAUDEX_TEST_INTERACTIVE_TUI -ErrorAction SilentlyContinue }
+    Assert-True (($interactiveFrameOutput | Out-String).TrimEnd() -eq $interactiveFrame) 'interactive fullscreen output remains byte-for-byte native'
     $modelFooter = '2% until auto-compact - /model opus[1m'
     $filteredModelFooter = $modelFooter | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
     Assert-True (($filteredModelFooter | Out-String).Contains('/model GPT-5.6 Sol')) 'footer model uses friendly name'
@@ -487,6 +599,10 @@ exit 1
     Assert-True ($installedEnv.Contains('CLAUDEX_PROXY_CONFIG=')) 'managed proxy config path'
     Assert-True ($installedEnv.Contains('CLAUDEX_PROXY_URL=http://127.0.0.1:8318')) 'dedicated proxy port'
     Assert-True ($installedEnv.Contains('CLAUDEX_CODEX_AUTH_DIR=')) 'managed Codex auth directory'
+    $installedProxyConfig = Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'cliproxyapi.yaml') -Raw
+    Assert-True ($installedProxyConfig.Contains('request-retry: 3')) 'proxy retries transient upstream failures before surfacing an API error'
+    Assert-True ($installedProxyConfig.Contains('transient-error-cooldown-seconds: 1')) 'proxy transient cooldown stays bounded'
+    Assert-True ($installedProxyConfig.Contains('bootstrap-retries: 2')) 'proxy retries pre-stream failures'
 
     & node (Join-Path $root 'scripts\check-docs.mjs')
     Assert-True ($LASTEXITCODE -eq 0) 'community and documentation checks'

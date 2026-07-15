@@ -83,6 +83,11 @@ directories, and avoids racing explicit update commands. At every launch,
 Claudex reads `claude --help` and injects optional switches only when supported.
 Unknown arguments are forwarded exactly.
 
+For the lifetime of each proxied session, a lightweight watcher checks the
+loopback listener without generating API traffic. If CLIProxyAPI exits, one
+session acquires a shared startup lock and restores it while other open tabs
+wait for the same healthy listener instead of launching competing processes.
+
 The compatibility binary is pinned by version and SHA-256 for every supported
 operating-system and architecture pair. Changing that pin requires verifying
 all asset digests and running the full platform matrix.

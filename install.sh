@@ -170,7 +170,9 @@ umask 077
   printf 'auth-dir: %s\n' "$json_auth_dir"
   printf 'api-keys:\n  - %s\n' "$json_token"
   printf 'debug: false\nlogging-to-file: false\nlogs-max-total-size-mb: 100\n'
-  printf 'usage-statistics-enabled: false\nrequest-retry: 1\nmax-retry-credentials: 1\n'
+  printf 'usage-statistics-enabled: false\nrequest-retry: 3\nmax-retry-credentials: 1\n'
+  printf 'max-retry-interval: 5\ntransient-error-cooldown-seconds: 1\n'
+  printf 'streaming:\n  keepalive-seconds: 15\n  bootstrap-retries: 2\n'
 } > "$proxy_config_target"
 chmod 600 "$proxy_config_target"
 

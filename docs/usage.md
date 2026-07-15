@@ -28,6 +28,23 @@ claudex --terra --print "Explain this repository"
 or `--settings` arguments cannot be combined with either shortcut because they
 could silently override the selected mode.
 
+Auto mode uses GPT-5.6 Terra through the authenticated Codex bridge for its
+safety classifier. It recognizes an explicit user approval for the named
+action and target without demanding a duplicate confirmation; hard security
+boundaries and actions outside that scope remain blocked. Classifier overrides
+accept managed Codex GPT model IDs only.
+
+An approval may clearly refer to the immediately preceding denial (for example,
+"I approve that" or "go ahead") without restating the full command. An exact,
+approved source transfer between a named repository and named build/deploy host
+is treated as in-boundary for that transfer; public destinations, credentials,
+unrelated files, and broader transfers remain blocked.
+
+The Sol leader is tuned to inspect context and make safe, reasonable assumptions
+instead of asking for routine confirmations. It asks only when an answer cannot
+be discovered and would materially change the result, expand scope, or precede
+an irreversible action, and it does not repeat questions already answered.
+
 ## Model picker
 
 Inside Claudex, use `/model` to choose a model. Claudex maintains exactly one

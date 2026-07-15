@@ -36,12 +36,20 @@ again. Claudex will not silently map an unavailable model to a different one.
 
 Temporary provider outages and cooldowns are upstream conditions. Claudex
 bounds retries and agent concurrency to avoid turning them into retry storms.
+The managed bridge retries transient upstream 500/502/503/504 responses before
+Claude Code sees them, including failures before the first stream byte. A red
+API error that remains after those bounded retries is a persistent failure and
+is intentionally still shown.
 When Codex reports an exhausted model quota, Claudex labels it as a rate limit
 and points to `/usage-limit`. If you sign into another account in Codex Desktop
 or the Codex CLI, the running Claudex session follows that account
 automatically; press Continue after the new sign-in completes.
 
 ## Local proxy does not become healthy
+
+An open Claudex session automatically restarts a proxy that exits unexpectedly.
+The recovery is shared across tabs and normally completes within the client's
+bounded retry window. If `ConnectionRefused` persists:
 
 1. Confirm no unrelated process is using port 8318.
 2. Rerun the installer so the pinned compatibility binary and config are
@@ -93,6 +101,11 @@ Confirm that the terminal supports alternate-screen/fullscreen applications
 and that accessibility or reduced-motion settings are not forcing a different
 rendering mode. Run the latest Claude Code and Claudex releases. Include the
 terminal name and version in a sanitized bug report.
+
+Claudex leaves interactive fullscreen cursor and redraw frames byte-for-byte
+native. If the bottom input or status area is clipped after upgrading, close
+the older running session and start a new `claudex` session so the updated
+preload is active.
 
 ## Windows script execution is blocked
 

@@ -45,12 +45,12 @@ fi
 : "${CLAUDEX_PROXY_URL:=http://127.0.0.1:8318}"
 : "${CLAUDEX_MODEL:=gpt-5.6-sol}"
 : "${CLAUDEX_PERMISSION_MODE:=auto}"
-: "${CLAUDEX_AUTO_MODE_MODEL:=gpt-5.6-luna}"
+: "${CLAUDEX_AUTO_MODE_MODEL:=gpt-5.6-terra}"
 : "${CLAUDEX_BACKGROUND_MODEL:=gpt-5.6-luna}"
 : "${CLAUDEX_SUBAGENT_MODEL:=gpt-5.6-terra}"
 : "${CLAUDEX_MAX_TOOL_USE_CONCURRENCY:=3}"
 : "${CLAUDEX_MAX_AGENT_CONCURRENCY:=3}"
-: "${CLAUDEX_MAX_RETRIES:=2}"
+: "${CLAUDEX_MAX_RETRIES:=4}"
 : "${CLAUDEX_CONTEXT_WINDOW:=400000}"
 : "${CLAUDEX_AUTO_COMPACT_WINDOW:=280000}"
 : "${CLAUDEX_MOUSE_POINTER_SHAPE:=pointer}"
@@ -79,6 +79,17 @@ case "$CLAUDEX_PERMISSION_MODE" in
     exit 2
     ;;
 esac
+
+for codex_model_setting in CLAUDEX_AUTO_MODE_MODEL CLAUDEX_BACKGROUND_MODEL CLAUDEX_SUBAGENT_MODEL; do
+  codex_model_value="${!codex_model_setting}"
+  case "$codex_model_value" in
+    gpt-5.6-sol|gpt-5.6-terra|gpt-5.6-luna) ;;
+    *)
+      printf 'claudex: %s must be a managed Codex model (gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna).\n' "$codex_model_setting" >&2
+      exit 2
+      ;;
+  esac
+done
 
 if [[ ! "$CLAUDEX_MAX_TOOL_USE_CONCURRENCY" =~ ^[0-9]+$ ]] || (( CLAUDEX_MAX_TOOL_USE_CONCURRENCY < 1 )); then
   printf '%s\n' "claudex: CLAUDEX_MAX_TOOL_USE_CONCURRENCY must be a positive integer." >&2
@@ -220,6 +231,21 @@ proxy_ready() {
   fetch_models 2>/dev/null | models_are_valid
 }
 
+proxy_reachable() {
+  if [[ -n "${CLAUDEX_TEST_PROXY_REACHABLE_FILE:-}" ]]; then
+    [[ -e "$CLAUDEX_TEST_PROXY_REACHABLE_FILE" ]]
+    return
+  fi
+  local authority host port
+  authority="${CLAUDEX_PROXY_URL#*://}"
+  authority="${authority%%/*}"
+  host="${authority%:*}"
+  port="${authority##*:}"
+  [[ "$host" == 127.0.0.1 || "$host" == localhost ]] || { proxy_ready; return; }
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  (exec 9<>"/dev/tcp/$host/$port") 2>/dev/null
+}
+
 proxy_executable() {
   if [[ -n "${CLAUDEX_PROXY_BIN:-}" && -x "$CLAUDEX_PROXY_BIN" ]]; then
     printf '%s\n' "$CLAUDEX_PROXY_BIN"
@@ -240,6 +266,19 @@ start_auth_watcher() {
   auth_watcher_pid=$!
 }
 
+start_proxy_watcher() {
+  [[ "${CLAUDEX_SKIP_PROXY_WATCHER:-0}" != 1 ]] || return 0
+  local parent_pid=$$
+  (
+    while kill -0 "$parent_pid" 2>/dev/null; do
+      sleep 1
+      kill -0 "$parent_pid" 2>/dev/null || break
+      if ! proxy_reachable; then ensure_proxy >/dev/null 2>&1 || true; fi
+    done
+  ) &
+  proxy_watcher_pid=$!
+}
+
 ensure_proxy() {
   if [[ ! -x "$codex_session_helper" ]]; then
     printf '%s\n' "claudex: authentication helper is missing: $codex_session_helper" >&2
@@ -252,38 +291,86 @@ ensure_proxy() {
     return 0
   fi
 
-  printf '%s\n' "claudex: starting the local CLIProxyAPI service..." >&2
-  local proxy_config homebrew_proxy_config=""
-  proxy_config="${CLAUDEX_PROXY_CONFIG:-$CLAUDE_CONFIG_DIR/cliproxyapi.yaml}"
-  if command -v brew >/dev/null 2>&1; then
-    homebrew_proxy_config="$(brew --prefix)/etc/cliproxyapi.conf"
-  fi
-  if command -v brew >/dev/null 2>&1 \
-      && brew list --formula cliproxyapi >/dev/null 2>&1 \
-      && { [[ ! -r "$proxy_config" ]] || [[ "$proxy_config" == "$homebrew_proxy_config" ]]; }; then
-    brew services start cliproxyapi >/dev/null
-  else
-    local proxy_bin log_dir
-    proxy_bin=$(proxy_executable) || {
-      printf '%s\n' "claudex: CLIProxyAPI is not reachable and no proxy executable was found." >&2
-      return 1
-    }
-    log_dir="$CLAUDE_CONFIG_DIR/logs"
-    mkdir -p "$log_dir"
-    if [[ -r "$proxy_config" ]]; then
-      nohup "$proxy_bin" -config "$proxy_config" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
-    else
-      nohup "$proxy_bin" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
+  # Concurrent Claudex tabs can notice a stopped bridge at the same time.
+  # Serialize startup so only one process can bind the loopback port.
+  local run_dir="$CLAUDE_CONFIG_DIR/run" lock_dir owner_file attempt lock_owner=""
+  local lock_mtime=0 now=0
+  local lock_acquired=0
+  lock_dir="$run_dir/proxy-start.lock"
+  owner_file="$lock_dir/owner-pid"
+  mkdir -p "$run_dir"
+  for attempt in {1..300}; do
+    if mkdir "$lock_dir" 2>/dev/null; then
+      if ! printf '%s\n' "$$" > "$owner_file"; then
+        rmdir "$lock_dir" 2>/dev/null || true
+        return 1
+      fi
+      lock_acquired=1
+      break
     fi
-  fi
-
-  local attempt
-  for attempt in {1..50}; do
-    if proxy_ready; then
-      return 0
+    if proxy_ready; then return 0; fi
+    lock_owner=""
+    if [[ -r "$owner_file" ]]; then read -r lock_owner < "$owner_file" || lock_owner=""; fi
+    if [[ "$lock_owner" =~ ^[0-9]+$ ]] && ! kill -0 "$lock_owner" 2>/dev/null; then
+      rm -f "$owner_file" 2>/dev/null || true
+      rmdir "$lock_dir" 2>/dev/null || true
+    elif [[ ! "$lock_owner" =~ ^[0-9]+$ ]]; then
+      # The creator writes owner-pid immediately after mkdir. Give that write a
+      # short grace period, then recover a lock left by a crash in that gap.
+      if stat -f '%m' "$lock_dir" >/dev/null 2>&1; then
+        lock_mtime=$(stat -f '%m' "$lock_dir")
+      else
+        lock_mtime=$(stat -c '%Y' "$lock_dir" 2>/dev/null || printf 0)
+      fi
+      now=$(date +%s)
+      if [[ "$lock_mtime" =~ ^[0-9]+$ ]] && (( now - lock_mtime >= 2 )); then
+        rm -f "$owner_file" 2>/dev/null || true
+        rmdir "$lock_dir" 2>/dev/null || true
+      fi
     fi
     sleep 0.1
   done
+  if (( ! lock_acquired )); then
+    printf '%s\n' "claudex: timed out waiting for another session to start the local proxy." >&2
+    return 1
+  fi
+
+  if (
+    trap 'rm -f "$owner_file" 2>/dev/null || true; rmdir "$lock_dir" 2>/dev/null || true' EXIT
+    if proxy_ready; then exit 0; fi
+
+    printf '%s\n' "claudex: starting the local CLIProxyAPI service..." >&2
+    proxy_config="${CLAUDEX_PROXY_CONFIG:-$CLAUDE_CONFIG_DIR/cliproxyapi.yaml}"
+    homebrew_proxy_config=""
+    if command -v brew >/dev/null 2>&1; then
+      homebrew_proxy_config="$(brew --prefix)/etc/cliproxyapi.conf"
+    fi
+    if command -v brew >/dev/null 2>&1 \
+        && brew list --formula cliproxyapi >/dev/null 2>&1 \
+        && { [[ ! -r "$proxy_config" ]] || [[ "$proxy_config" == "$homebrew_proxy_config" ]]; }; then
+      brew services start cliproxyapi >/dev/null
+    else
+      proxy_bin=$(proxy_executable) || {
+        printf '%s\n' "claudex: CLIProxyAPI is not reachable and no proxy executable was found." >&2
+        exit 1
+      }
+      log_dir="$CLAUDE_CONFIG_DIR/logs"
+      mkdir -p "$log_dir"
+      if [[ -r "$proxy_config" ]]; then
+        nohup "$proxy_bin" -config "$proxy_config" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
+      else
+        nohup "$proxy_bin" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
+      fi
+    fi
+
+    for attempt in {1..100}; do
+      if proxy_ready; then exit 0; fi
+      sleep 0.1
+    done
+    exit 1
+  ); then
+    return 0
+  fi
 
   printf '%s\n' "claudex: local proxy did not become healthy. Run: claudex --doctor" >&2
   return 1
@@ -350,6 +437,49 @@ load_claude_capabilities() {
   fi
 }
 
+ensure_auto_mode_rules() {
+  # Claude Code replaces an autoMode array when settings provide that key.
+  # Recompose from the current binary's defaults so Claudex's scoped additions
+  # never discard new or existing upstream safety rules after an update.
+  [[ "$settings_file" == "$claudex_config_dir/settings.json" ]] || return 0
+  local defaults_json tmp_file
+  defaults_json=$(claude auto-mode defaults 2>/dev/null) || return 0
+  printf '%s\n' "$defaults_json" | jq -e '
+    (.allow | type == "array") and
+    (.environment | type == "array") and
+    (.soft_deny | type == "array") and
+    (.hard_deny | type == "array")
+  ' >/dev/null 2>&1 || return 0
+
+  tmp_file=$(mktemp "$claudex_config_dir/settings.json.tmp.XXXXXX")
+  if jq --argjson defaults "$defaults_json" \
+      --arg approval 'Explicit Action Approval: A user message that explicitly approves a specific action and target, including reissuing it after a denial or unambiguously referring to the immediately preceding blocked action with language such as approve that, go ahead, or proceed, satisfies named-and-specific consent for matching SOFT BLOCK rules. Do not force the user to restate the command, ask for duplicate confirmation, or treat the prior denial as permanent. This does not override HARD BLOCK rules or authorize a broader action.' \
+      --arg requested_config 'Requested Agent Configuration: Editing agent configuration is routine when the user explicitly asks for that specific configuration or permission change. Treat that edit as user-requested rather than Self-Modification; unrelated permission widening remains blocked.' \
+      --arg task_boundary 'User-designated task boundary: A repository, cloud project, host, bucket, service, or destination that the user explicitly identifies in their own message as owned or controlled infrastructure and as the intended target is trusted for the specifically requested operation and data flow only. Merely naming a target does not establish trust; do not infer trust for agent-selected destinations, unrelated resources, or broader scopes.' \
+      --arg approved_transfer 'Explicitly approved development transfer: When the user explicitly approves an exact source transfer between a named repository and a named build, deployment, or cloud host, treat that named source and destination as inside the task trust boundary for that transfer. Approval may unambiguously refer to the immediately preceding blocked command without repeating it. This never covers a public destination, credentials or secrets, unrelated files, a broader source tree, or a different host.' '
+        def stable_unique:
+          reduce .[] as $item ([]; if index($item) == null then . + [$item] else . end);
+        .autoMode = (.autoMode // {})
+        | ((.autoMode.allow // []) | map(select(
+            (startswith("Explicit Action Approval:") or startswith("Requested Agent Configuration:")) | not
+          ))) as $custom_allow
+        | ((.autoMode.environment // []) | map(select(
+            (startswith("User-designated task boundary:") or startswith("Explicitly approved development transfer:")) | not
+          ))) as $custom_environment
+        | .autoMode.allow = (($defaults.allow + $custom_allow + [$approval, $requested_config]) | stable_unique)
+        | .autoMode.environment = (($defaults.environment + $custom_environment + [$task_boundary, $approved_transfer]) | stable_unique)
+      ' "$settings_file" > "$tmp_file"; then
+    if cmp -s "$tmp_file" "$settings_file"; then
+      rm -f "$tmp_file"
+    else
+      chmod 600 "$tmp_file" 2>/dev/null || true
+      mv -f "$tmp_file" "$settings_file"
+    fi
+  else
+    rm -f "$tmp_file"
+  fi
+}
+
 model_name() {
   case "$1" in
     opusplan|solplan) printf '%s\n' "GPT-5.6 Solplan" ;;
@@ -362,6 +492,7 @@ model_name() {
 
 doctor() {
   load_claude_capabilities
+  ensure_auto_mode_rules
   ensure_proxy
 
   local saved_model models proxy_version missing=0 model
@@ -384,6 +515,7 @@ doctor() {
   printf '%s\n' "Saved model: $(model_name "$saved_model") (${saved_model})"
   printf '%s\n' "Default permission mode: ${CLAUDEX_PERMISSION_MODE}"
   printf '%s\n' "Auto-mode classifier: ${CLAUDEX_AUTO_MODE_MODEL} (only used when auto mode is selected)"
+  printf '%s\n' "Auto-mode provider: Codex/OpenAI through the authenticated loopback bridge"
   printf '%s\n' "Subagent model: ${CLAUDEX_SUBAGENT_MODEL} (Sol is reserved for the leader)"
   printf '%s\n' "Tool concurrency: ${CLAUDEX_MAX_TOOL_USE_CONCURRENCY}"
   printf '%s\n' "Agent concurrency: ${CLAUDEX_MAX_AGENT_CONCURRENCY}"
@@ -551,15 +683,19 @@ if (( direct_chrome )); then
   forwarded_args=(--chrome ${forwarded_args[@]+"${forwarded_args[@]}"})
 fi
 
-# The preload intentionally rewrites GPT-backed Claudex UI. Never inject it
-# into first-party Claude/Chrome or maintenance commands.
+# The preload provides GPT-specific input aliases and non-interactive cleanup.
+# Never inject it into first-party Claude/Chrome or maintenance commands.
 readonly claudex_preload="$claudex_config_dir/preload.cjs"
 if (( use_proxy )) && [[ -r "$claudex_preload" ]]; then
   readonly escaped_claudex_preload="${claudex_preload// /\\ }"
   export BUN_OPTIONS="--preload $escaped_claudex_preload ${BUN_OPTIONS:-}"
+  if { [[ -t 0 && -t 1 ]] || [[ "${CLAUDEX_TEST_TTY_OUTPUT:-0}" == 1 ]]; }; then export CLAUDEX_INTERACTIVE_TUI=1
+  else unset CLAUDEX_INTERACTIVE_TUI
+  fi
 fi
 
 load_claude_capabilities
+if (( use_proxy )) || [[ "${forwarded_args[0]:-}" == auto-mode ]]; then ensure_auto_mode_rules; fi
 case "${forwarded_args[0]:-}" in
   update|upgrade) ;;
   *) maybe_update_claude ;;
@@ -568,7 +704,9 @@ esac
 if (( use_proxy )); then
   ensure_proxy
   auth_watcher_pid=""
+  proxy_watcher_pid=""
   start_auth_watcher
+  start_proxy_watcher
 
   export ANTHROPIC_BASE_URL="$CLAUDEX_PROXY_URL"
   export ANTHROPIC_AUTH_TOKEN="$CLAUDEX_PROXY_TOKEN"
@@ -619,7 +757,7 @@ readonly no_nested_agents="Do not create a team, spawn or delegate to additional
 readonly claudex_agents="{\"gpt-5-6-terra\":{\"description\":\"GPT-5.6 Terra for delegated architecture, debugging, implementation, testing, security review, and other substantial engineering work.\",\"prompt\":\"You are GPT-5.6 Terra. Investigate thoroughly, make robust focused progress, verify the result, and return concise evidence-backed findings. ${no_nested_agents}\",\"model\":\"gpt-5.6-terra\",\"effort\":\"high\"},\"gpt-5-6-luna\":{\"description\":\"GPT-5.6 Luna for delegated search, triage, inventory, and bounded mechanical tasks.\",\"prompt\":\"You are GPT-5.6 Luna. Complete the scoped task efficiently and report only relevant verified findings. ${no_nested_agents}\",\"model\":\"gpt-5.6-luna\",\"effort\":\"medium\"}}"
 readonly claudex_capacity_guard="Claudex capacity rule: keep at most ${CLAUDEX_MAX_AGENT_CONCURRENCY} Agent tasks active at once. Launch no more than ${CLAUDEX_MAX_AGENT_CONCURRENCY} agents in a wave, wait for one to finish before starting another, and never create an agent team. Sol capacity is reserved for the leader; use the configured Terra or Luna agents for delegated work. If a model reports a 429 or cooldown, do not launch replacement agents or create a retry storm; continue useful local work and retry at most once after active agents settle."
 readonly claudex_task_guard="Claudex task lifecycle rule: the Sol leader is the sole owner of the shared task list. Keep it compact and create only tasks that represent real remaining deliverables, not duplicate discovery lanes or speculative work. Mark a task in_progress only while the leader or a currently active agent is working on it; queued or blocked work stays pending. After every agent result, immediately reconcile its parent task and mark it completed once its outcome is integrated and verified. Before every final answer, call TaskList and reconcile every entry: completed work must be completed, inactive work must not remain in_progress, and genuinely unfinished pending work must be explicitly reported instead of being hidden behind a completion claim. Never leave stale in_progress tasks after their work is done."
-readonly claudex_codex_guard="Claudex Codex-model rule: operate as a Codex coding agent inside Claude Code's interface. Treat the available Claude Code tools and their schemas as the authoritative execution protocol. Prefer direct implementation and verification for concrete change requests. Do not invent unsupported provider behavior, do not expose raw internal tool protocol, and keep progress updates concise and evidence-based."
+readonly claudex_codex_guard="Claudex Codex-model rule: operate as a Codex coding agent inside Claude Code's interface. Treat the available Claude Code tools and their schemas as the authoritative execution protocol. Prefer direct implementation and verification for concrete change requests. Ask as few questions as possible: inspect available context first, make safe reasonable assumptions, and continue without confirmation for routine, reversible, in-scope work. Never repeat a question the user already answered. Ask only when the missing answer cannot be discovered and would materially change the result, authorize a meaningful scope expansion, or precede an irreversible action. Treat the user's explicit approval as decisive for the specifically named action and target: after a soft auto-mode denial, ask for precise consent only when it is missing, then retry once when the user grants it instead of claiming the denial is permanent. Hard-deny security boundaries still apply. Do not invent unsupported provider behavior, do not expose raw internal tool protocol, and keep progress updates concise and evidence-based."
 if [[ "$CLAUDEX_PLAN_MODE_POLICY" == conservative ]]; then
   readonly claudex_plan_guard="Claudex plan-mode rule: remain in the current execution mode by default. Do not call EnterPlanMode or switch into plan permission mode merely because work is large, multi-step, unfamiliar, or benefits from private reasoning. Enter plan mode only when the user explicitly asks for a plan/design-only response, when a required user decision would materially change the implementation, or when the requested action is irreversible and needs approval before execution. For ordinary bug fixes and implementation requests, inspect, implement, test, and report directly."
 else
@@ -692,6 +830,10 @@ cleanup_session() {
   if [[ -n "${auth_watcher_pid:-}" ]]; then
     kill "$auth_watcher_pid" 2>/dev/null || true
     wait "$auth_watcher_pid" 2>/dev/null || true
+  fi
+  if [[ -n "${proxy_watcher_pid:-}" ]]; then
+    kill "$proxy_watcher_pid" 2>/dev/null || true
+    wait "$proxy_watcher_pid" 2>/dev/null || true
   fi
 }
 trap cleanup_session EXIT
