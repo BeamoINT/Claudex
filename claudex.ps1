@@ -45,6 +45,7 @@ function Env-OrDefault([string] $Name, [string] $Default) {
 
 $proxyToken = Env-OrDefault 'CLAUDEX_PROXY_TOKEN' ''
 if (-not $proxyToken) { Fail 'CLAUDEX_PROXY_TOKEN is not configured' }
+if ($proxyToken.Contains("`r") -or $proxyToken.Contains("`n")) { Fail 'CLAUDEX_PROXY_TOKEN contains an unsupported newline.' 2 }
 $proxyUrl = Env-OrDefault 'CLAUDEX_PROXY_URL' 'http://127.0.0.1:8317'
 $model = Env-OrDefault 'CLAUDEX_MODEL' 'gpt-5.6-sol'
 $permissionMode = Env-OrDefault 'CLAUDEX_PERMISSION_MODE' 'auto'
@@ -57,6 +58,10 @@ $maxRetries = Env-OrDefault 'CLAUDEX_MAX_RETRIES' '2'
 $contextWindow = Env-OrDefault 'CLAUDEX_CONTEXT_WINDOW' '400000'
 $compactWindow = Env-OrDefault 'CLAUDEX_AUTO_COMPACT_WINDOW' '280000'
 $mousePointer = Env-OrDefault 'CLAUDEX_MOUSE_POINTER_SHAPE' 'pointer'
+$usageDisplay = Env-OrDefault 'CLAUDEX_USAGE_DISPLAY' 'on'
+$usageRefresh = Env-OrDefault 'CLAUDEX_USAGE_REFRESH_SECONDS' '300'
+$usageTimeout = Env-OrDefault 'CLAUDEX_USAGE_TIMEOUT_SECONDS' '8'
+$usageMaxStale = Env-OrDefault 'CLAUDEX_USAGE_MAX_STALE_SECONDS' '86400'
 
 if ($permissionMode -notin @('manual', 'auto', 'acceptEdits', 'dontAsk', 'plan')) {
     Fail "invalid CLAUDEX_PERMISSION_MODE '$permissionMode'; expected manual, auto, acceptEdits, dontAsk, or plan." 2
@@ -75,9 +80,13 @@ $agentConcurrencyNumber = Require-Integer 'CLAUDEX_MAX_AGENT_CONCURRENCY' $agent
 $maxRetriesNumber = Require-Integer 'CLAUDEX_MAX_RETRIES' $maxRetries 0 15
 $contextWindowNumber = Require-Integer 'CLAUDEX_CONTEXT_WINDOW' $contextWindow 100000 1000000
 $compactWindowNumber = Require-Integer 'CLAUDEX_AUTO_COMPACT_WINDOW' $compactWindow 100000 $contextWindowNumber
+$usageRefreshNumber = Require-Integer 'CLAUDEX_USAGE_REFRESH_SECONDS' $usageRefresh 60 3600
+$usageTimeoutNumber = Require-Integer 'CLAUDEX_USAGE_TIMEOUT_SECONDS' $usageTimeout 1 30
+$usageMaxStaleNumber = Require-Integer 'CLAUDEX_USAGE_MAX_STALE_SECONDS' $usageMaxStale $usageRefreshNumber 604800
 if ($mousePointer -notin @('pointer', 'default', 'off')) {
     Fail 'CLAUDEX_MOUSE_POINTER_SHAPE must be pointer, default, or off.' 2
 }
+if ($usageDisplay -notin @('on', 'off')) { Fail 'CLAUDEX_USAGE_DISPLAY must be on or off.' 2 }
 
 $env:CLAUDE_CONFIG_DIR = $configDir
 $stateFile = Join-Path $configDir '.claude.json'
@@ -116,8 +125,8 @@ if (Test-Path -LiteralPath $preload -PathType Leaf) {
 }
 
 function Fetch-Models {
-    $output = & $curlCommand --silent --show-error --fail --max-time 5 `
-        -H "Authorization: Bearer $proxyToken" "$proxyUrl/v1/models" 2>$null
+    $output = "Authorization: Bearer $proxyToken" | & $curlCommand --silent --show-error --fail --max-time 5 `
+        --header '@-' "$proxyUrl/v1/models" 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'proxy request failed' }
     return ($output | Out-String | ConvertFrom-Json)
 }
@@ -193,6 +202,8 @@ function Invoke-Doctor {
     Write-Output "Context window: $contextWindowNumber tokens"
     Write-Output "Auto-compact window: $compactWindowNumber tokens (precompute enabled)"
     Write-Output 'Context status: session-stabilized (transient zero suppressed)'
+    Write-Output "Codex usage: status-line refresh every ${usageRefreshNumber}s; inspect with /usage-limit or claudex --usage-limit"
+    Write-Output 'Rendering: no-flicker mode with native terminal cursor'
     Write-Output 'Terminal UI: fullscreen (launch command hidden while Claudex is open)'
     Write-Output 'Header model name: GPT-5.6 Sol'
     Write-Output "Mouse pointer: $mousePointer"
@@ -209,6 +220,15 @@ function Invoke-Doctor {
 if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '--doctor') {
     Invoke-Doctor
     exit 0
+}
+
+if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '--usage-limit') {
+    $usageHelper = Join-Path $configDir 'usage-limit.ps1'
+    if (-not (Test-Path -LiteralPath $usageHelper -PathType Leaf)) { Fail 'usage-limit helper is missing; reinstall Claudex.' }
+    $usageArguments = if ($ClaudeArguments.Count -gt 1) { @($ClaudeArguments[1..($ClaudeArguments.Count - 1)]) } else { @() }
+    & $usageHelper @usageArguments
+    if ($?) { exit 0 }
+    exit 1
 }
 
 Ensure-Proxy
@@ -237,6 +257,12 @@ $env:CLAUDE_CODE_MAX_RETRIES = [string] $maxRetriesNumber
 $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = [string] $contextWindowNumber
 $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = [string] $compactWindowNumber
 $env:CLAUDE_CODE_USE_POWERSHELL_TOOL = '1'
+$env:CLAUDEX_USAGE_DISPLAY = $usageDisplay
+$env:CLAUDEX_USAGE_REFRESH_SECONDS = [string] $usageRefreshNumber
+$env:CLAUDEX_USAGE_TIMEOUT_SECONDS = [string] $usageTimeoutNumber
+$env:CLAUDEX_USAGE_MAX_STALE_SECONDS = [string] $usageMaxStaleNumber
+$env:CLAUDE_CODE_NO_FLICKER = '1'
+$env:CLAUDE_CODE_ACCESSIBILITY = '1'
 
 $noNestedAgents = "Do not create a team, spawn or delegate to additional agents, or send intermediate progress messages to the parent. Do not create, claim, or update entries in the shared task list; the Sol leader owns task lifecycle. Complete the assigned task yourself and return one final result through the normal agent result channel. If the provider reports a 429 or model cooldown, do not launch a replacement agent or start a retry loop."
 $agents = [ordered]@{

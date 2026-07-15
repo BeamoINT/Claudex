@@ -11,6 +11,8 @@ $configDir = if ($env:CLAUDEX_CONFIG_DIR) { $env:CLAUDEX_CONFIG_DIR } else { Joi
 $envFile = Join-Path $configDir 'env'
 $settingsTarget = Join-Path $configDir 'settings.json'
 $statuslineTarget = Join-Path $configDir 'statusline.ps1'
+$usageLimitTarget = Join-Path $configDir 'usage-limit.ps1'
+$usageSkillTarget = Join-Path $configDir 'skills\usage-limit\SKILL.md'
 $preloadTarget = Join-Path $configDir 'preload.cjs'
 $proxyConfigTarget = Join-Path $configDir 'cliproxyapi.yaml'
 $selectedProxyConfig = if ($env:CLAUDEX_PROXY_CONFIG -and (Test-Path -LiteralPath $env:CLAUDEX_PROXY_CONFIG -PathType Leaf)) { $env:CLAUDEX_PROXY_CONFIG } else { $proxyConfigTarget }
@@ -26,7 +28,7 @@ function Fail([string] $Message) {
     exit 1
 }
 
-foreach ($sourceFile in @('claudex.ps1', 'claudex.cmd', 'statusline.ps1', 'preload.cjs', 'settings.json')) {
+foreach ($sourceFile in @('claudex.ps1', 'claudex.cmd', 'statusline.ps1', 'usage-limit.ps1', 'preload.cjs', 'settings.json', 'skills\usage-limit\SKILL.md')) {
     if (-not (Test-Path -LiteralPath (Join-Path $root $sourceFile) -PathType Leaf)) {
         Fail "missing repository file: $sourceFile"
     }
@@ -158,7 +160,7 @@ if ($Login) {
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $backupDir = Join-Path $configDir "backups\install-$timestamp"
 $backedUp = $false
-foreach ($managedFile in @($launcherTarget, $cmdTarget, $settingsTarget, $statuslineTarget, $preloadTarget)) {
+foreach ($managedFile in @($launcherTarget, $cmdTarget, $settingsTarget, $statuslineTarget, $usageLimitTarget, $preloadTarget, $usageSkillTarget)) {
     if (Test-Path -LiteralPath $managedFile) {
         [IO.Directory]::CreateDirectory($backupDir) | Out-Null
         Copy-Item -LiteralPath $managedFile -Destination (Join-Path $backupDir (Split-Path $managedFile -Leaf)) -Force
@@ -170,7 +172,10 @@ if ($backedUp) { [Console]::WriteLine("Backed up the previous managed files to $
 Copy-Item -LiteralPath (Join-Path $root 'claudex.ps1') -Destination $launcherTarget -Force
 Copy-Item -LiteralPath (Join-Path $root 'claudex.cmd') -Destination $cmdTarget -Force
 Copy-Item -LiteralPath (Join-Path $root 'statusline.ps1') -Destination $statuslineTarget -Force
+Copy-Item -LiteralPath (Join-Path $root 'usage-limit.ps1') -Destination $usageLimitTarget -Force
 Copy-Item -LiteralPath (Join-Path $root 'preload.cjs') -Destination $preloadTarget -Force
+[IO.Directory]::CreateDirectory((Split-Path $usageSkillTarget -Parent)) | Out-Null
+Copy-Item -LiteralPath (Join-Path $root 'skills\usage-limit\SKILL.md') -Destination $usageSkillTarget -Force
 
 $settings = Get-Content -LiteralPath (Join-Path $root 'settings.json') -Raw | ConvertFrom-Json
 $statuslineCommand = 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $statuslineTarget + '"'

@@ -36,6 +36,17 @@ source "$config_file"
 : "${CLAUDEX_CONTEXT_WINDOW:=400000}"
 : "${CLAUDEX_AUTO_COMPACT_WINDOW:=280000}"
 : "${CLAUDEX_MOUSE_POINTER_SHAPE:=pointer}"
+: "${CLAUDEX_USAGE_DISPLAY:=on}"
+: "${CLAUDEX_USAGE_REFRESH_SECONDS:=300}"
+: "${CLAUDEX_USAGE_TIMEOUT_SECONDS:=8}"
+: "${CLAUDEX_USAGE_MAX_STALE_SECONDS:=86400}"
+
+case "$CLAUDEX_PROXY_TOKEN" in
+  *$'\n'*|*$'\r'*)
+    printf '%s\n' "claudex: CLAUDEX_PROXY_TOKEN contains an unsupported newline." >&2
+    exit 2
+    ;;
+esac
 
 case "$CLAUDEX_PERMISSION_MODE" in
   manual|auto|acceptEdits|dontAsk|plan) ;;
@@ -78,6 +89,29 @@ case "$CLAUDEX_MOUSE_POINTER_SHAPE" in
     exit 2
     ;;
 esac
+
+case "$CLAUDEX_USAGE_DISPLAY" in
+  on|off) ;;
+  *)
+    printf '%s\n' "claudex: CLAUDEX_USAGE_DISPLAY must be on or off." >&2
+    exit 2
+    ;;
+esac
+
+if [[ ! "$CLAUDEX_USAGE_REFRESH_SECONDS" =~ ^[0-9]+$ ]] || (( CLAUDEX_USAGE_REFRESH_SECONDS < 60 || CLAUDEX_USAGE_REFRESH_SECONDS > 3600 )); then
+  printf '%s\n' "claudex: CLAUDEX_USAGE_REFRESH_SECONDS must be an integer from 60 to 3600." >&2
+  exit 2
+fi
+
+if [[ ! "$CLAUDEX_USAGE_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || (( CLAUDEX_USAGE_TIMEOUT_SECONDS < 1 || CLAUDEX_USAGE_TIMEOUT_SECONDS > 30 )); then
+  printf '%s\n' "claudex: CLAUDEX_USAGE_TIMEOUT_SECONDS must be an integer from 1 to 30." >&2
+  exit 2
+fi
+
+if [[ ! "$CLAUDEX_USAGE_MAX_STALE_SECONDS" =~ ^[0-9]+$ ]] || (( CLAUDEX_USAGE_MAX_STALE_SECONDS < CLAUDEX_USAGE_REFRESH_SECONDS || CLAUDEX_USAGE_MAX_STALE_SECONDS > 604800 )); then
+  printf '%s\n' "claudex: CLAUDEX_USAGE_MAX_STALE_SECONDS must be between the refresh interval and 604800." >&2
+  exit 2
+fi
 
 # Keep Claudex model choices, sessions, and preferences isolated from normal Claude Code.
 export CLAUDE_CONFIG_DIR="$claudex_config_dir"
@@ -130,8 +164,8 @@ if [[ -r "$claudex_preload" ]]; then
 fi
 
 fetch_models() {
-  "$curl_bin" --silent --show-error --fail --max-time 5 \
-    -H "Authorization: Bearer ${CLAUDEX_PROXY_TOKEN}" \
+  printf 'Authorization: Bearer %s\n' "$CLAUDEX_PROXY_TOKEN" | \
+    "$curl_bin" --silent --show-error --fail --max-time 5 --header @- \
     "${CLAUDEX_PROXY_URL}/v1/models"
 }
 
@@ -236,6 +270,8 @@ doctor() {
   printf '%s\n' "Context window: ${CLAUDEX_CONTEXT_WINDOW} tokens"
   printf '%s\n' "Auto-compact window: ${CLAUDEX_AUTO_COMPACT_WINDOW} tokens (precompute enabled)"
   printf '%s\n' "Context status: session-stabilized (transient zero suppressed)"
+  printf '%s\n' "Codex usage: status-line refresh every ${CLAUDEX_USAGE_REFRESH_SECONDS}s; inspect with /usage-limit or claudex --usage-limit"
+  printf '%s\n' "Rendering: no-flicker mode with native terminal cursor"
   printf '%s\n' "Terminal UI: fullscreen (launch command hidden while Claudex is open)"
   printf '%s\n' "Header model name: GPT-5.6 Sol"
   printf '%s\n' "Mouse pointer: ${CLAUDEX_MOUSE_POINTER_SHAPE}"
@@ -257,6 +293,16 @@ doctor() {
 if [[ "${1:-}" == "--doctor" ]]; then
   doctor
   exit
+fi
+
+if [[ "${1:-}" == "--usage-limit" ]]; then
+  shift
+  usage_helper="$CLAUDE_CONFIG_DIR/usage-limit"
+  [[ -x "$usage_helper" ]] || {
+    printf '%s\n' "claudex: usage-limit helper is missing; reinstall Claudex." >&2
+    exit 1
+  }
+  exec "$usage_helper" "$@"
 fi
 
 ensure_proxy
@@ -289,6 +335,9 @@ export CLAUDE_CODE_SUBAGENT_MODEL="$CLAUDEX_SUBAGENT_MODEL"
 export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1
 export CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY="$CLAUDEX_MAX_TOOL_USE_CONCURRENCY"
 export CLAUDE_CODE_MAX_RETRIES="$CLAUDEX_MAX_RETRIES"
+export CLAUDEX_USAGE_DISPLAY CLAUDEX_USAGE_REFRESH_SECONDS CLAUDEX_USAGE_TIMEOUT_SECONDS CLAUDEX_USAGE_MAX_STALE_SECONDS
+export CLAUDE_CODE_NO_FLICKER=1
+export CLAUDE_CODE_ACCESSIBILITY=1
 
 # Claude Code assumes unknown custom models have a 200k context window. Claudex's
 # GPT-5.6 backend supports a larger window, so make the meter accurate and force
