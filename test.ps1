@@ -200,9 +200,13 @@ exit 1
 
     $env:FAKE_CLAUDE_RESUME = '1'
     $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
-    $resumeFooter = (& (Join-Path $root 'claudex.ps1') | Out-String)
+    $resumeCapture = Join-Path $temporary 'resume-footer.txt'
+    $env:CLAUDEX_TEST_RESUME_CAPTURE_FILE = $resumeCapture
+    & (Join-Path $root 'claudex.ps1') | Out-Null
+    $resumeFooter = [IO.File]::ReadAllText($resumeCapture)
     Remove-Item Env:FAKE_CLAUDE_RESUME
     Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT
+    Remove-Item Env:CLAUDEX_TEST_RESUME_CAPTURE_FILE
     Assert-True ($resumeFooter.Contains("$([char]27)[2A$([char]27)[JResume this session with:")) 'resume footer rows replaced'
     Assert-True ($resumeFooter.Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'Claudex resume command'
 

@@ -517,7 +517,11 @@ function Update-ResumeFooter([string] $Marker) {
     $sessionId = [IO.Path]::GetFileNameWithoutExtension($latest.Name)
     if ($sessionId -notmatch '^[0-9a-fA-F-]{36}$') { return }
     $escape = [char]27
-    [Console]::Out.Write("$escape[2A$escape[JResume this session with:`nclaudex --resume $sessionId`n")
+    $footer = "$escape[2A$escape[JResume this session with:`nclaudex --resume $sessionId`n"
+    if ($env:CLAUDEX_TEST_RESUME_CAPTURE_FILE) {
+        [IO.File]::WriteAllText($env:CLAUDEX_TEST_RESUME_CAPTURE_FILE, $footer, $utf8)
+    }
+    [Console]::Out.Write($footer)
 }
 
 try {
