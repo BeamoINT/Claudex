@@ -87,8 +87,12 @@ jq -e '
 [[ "$default_output" == *'keep at most 3 Agent tasks active at once'* ]]
 [[ "$default_output" == *'Before every final answer, call TaskList and reconcile every entry'* ]]
 [[ "$default_output" == *'Never leave stale in_progress tasks after their work is done'* ]]
-[[ "$default_output" == *'"claudex-deep"'* ]]
-[[ "$default_output" == *"without consuming the leader's Sol capacity"* ]]
+[[ "$default_output" == *'"gpt-5-6-terra"'* ]]
+[[ "$default_output" == *'"gpt-5-6-luna"'* ]]
+[[ "$default_output" != *'"claudex-deep"'* ]]
+[[ "$default_output" != *'"claudex-builder"'* ]]
+[[ "$default_output" != *'"claudex-fast"'* ]]
+[[ "$default_output" == *'Sol capacity is reserved for the leader'* ]]
 [[ "$default_output" != *'"model":"gpt-5.6-sol"'* ]]
 
 auto_output=$(run_wrapper --auto --luna test-prompt)

@@ -109,6 +109,11 @@ exit 1
     Assert-True ($output.Contains('Do not create, claim, or update entries in the shared task list')) 'subagent task ownership'
     Assert-True ($output.Contains('Before every final answer, call TaskList and reconcile every entry')) 'leader task reconciliation'
     Assert-True ($output.Contains('Never leave stale in_progress tasks after their work is done')) 'stale task guard'
+    Assert-True ($output.Contains('"gpt-5-6-terra"')) 'transparent Terra agent name'
+    Assert-True ($output.Contains('"gpt-5-6-luna"')) 'transparent Luna agent name'
+    Assert-True (-not $output.Contains('"claudex-deep"')) 'legacy deep alias removed'
+    Assert-True (-not $output.Contains('"claudex-builder"')) 'legacy builder alias removed'
+    Assert-True (-not $output.Contains('"claudex-fast"')) 'legacy fast alias removed'
     Assert-True (-not $output.Contains('"model":"gpt-5.6-sol"')) 'leader model is not delegated'
 
     $state = Get-Content -LiteralPath (Join-Path $testConfig '.claude.json') -Raw | ConvertFrom-Json

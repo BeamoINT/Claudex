@@ -10,6 +10,7 @@ Private, portable setup for running Claude Code through a local CLIProxyAPI-back
 - a clean `/model` picker with exactly one Sol, Terra, and Luna entry
 - auto mode enabled by default
 - three concurrent tools and a guarded maximum of three active agents
+- transparent delegated-agent names that match the real model: `gpt-5-6-terra` and `gpt-5-6-luna`
 - Sol-owned task lifecycle with immediate agent-result reconciliation and no stale `in_progress` entries at final handoff
 - bounded retries to prevent 429 retry storms
 - 400k context accounting with automatic compaction around 280k tokens
