@@ -19,7 +19,9 @@ $summaryFile = Join-Path $cacheDir 'summary'
 $lastAttemptFile = Join-Path $cacheDir 'last-attempt'
 $lastSuccessFile = Join-Path $cacheDir 'last-success'
 $refreshLock = Join-Path $cacheDir 'refresh.lock'
+$refreshOwnerFile = Join-Path $refreshLock 'owner-pid'
 $accountSelectionFile = Join-Path $configDir 'codex-usage-account'
+$usageGenerationFile = Join-Path $configDir 'usage-generation'
 $curlCommand = if ($env:CLAUDEX_CURL_BIN) { $env:CLAUDEX_CURL_BIN } else { 'curl.exe' }
 $usageUrl = if ($env:CLAUDEX_USAGE_URL) { $env:CLAUDEX_USAGE_URL } else { 'https://chatgpt.com/backend-api/wham/usage' }
 
@@ -39,6 +41,7 @@ $maxStaleSeconds = Get-IntegerSetting 'CLAUDEX_USAGE_MAX_STALE_SECONDS' 86400 $r
 $alertPercent = Get-IntegerSetting 'CLAUDEX_USAGE_ALERT_PERCENT' 20 0 100
 $usageSource = if ($env:CLAUDEX_USAGE_SOURCE) { $env:CLAUDEX_USAGE_SOURCE } else { 'auto' }
 if ($usageSource -notin @('auto', 'web', 'app-server')) { throw 'CLAUDEX_USAGE_SOURCE must be auto, web, or app-server.' }
+$ownsRefreshLock = $false
 
 function Get-Property($Object, [string] $Name, $Default = $null) {
     if ($Object -is [Collections.IDictionary]) {
@@ -55,7 +58,57 @@ function Clear-UsageCache {
     foreach ($path in @($cacheFile, $summaryFile, $lastAttemptFile, $lastSuccessFile)) {
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
+    [IO.Directory]::CreateDirectory($configDir) | Out-Null
+    $temporary = Join-Path $configDir ('.usage-generation-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    [IO.File]::WriteAllText($temporary, ([guid]::NewGuid().ToString('N') + "`n"), $utf8)
+    Move-Item -LiteralPath $temporary -Destination $usageGenerationFile -Force
+}
+
+function Get-UsageGeneration {
+    if (-not (Test-Path -LiteralPath $usageGenerationFile -PathType Leaf)) { return 'missing' }
+    try { return [IO.File]::ReadAllText($usageGenerationFile).Trim() } catch { return 'missing' }
+}
+
+function Acquire-RefreshLock {
+    if ($LockHeld) {
+        # The status line created this lock specifically for this child. The
+        # owner file is written immediately after Start-Process returns and is
+        # rechecked before cleanup so a transferred/replaced lock is preserved.
+        $script:ownsRefreshLock = $true
+        return
+    }
+    [IO.Directory]::CreateDirectory($cacheDir) | Out-Null
+    $created = $false
+    if (Test-Path -LiteralPath $refreshLock -PathType Container) {
+        $owner = 0
+        if (Test-Path -LiteralPath $refreshOwnerFile -PathType Leaf) {
+            [int]::TryParse(([IO.File]::ReadAllText($refreshOwnerFile).Trim()), [ref] $owner) | Out-Null
+        }
+        $ownerIsDead = $owner -gt 0 -and -not (Get-Process -Id $owner -ErrorAction SilentlyContinue)
+        $ownerlessIsStale = $false
+        if ($owner -le 0) {
+            try {
+                $lockAge = ([DateTime]::UtcNow - (Get-Item -LiteralPath $refreshLock).LastWriteTimeUtc).TotalSeconds
+                $ownerlessIsStale = $lockAge -ge 2
+            } catch { $ownerlessIsStale = $false }
+        }
+        if ($ownerIsDead -or $ownerlessIsStale) {
+            Remove-Item -LiteralPath $refreshOwnerFile -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
+        }
+    }
+    try {
+        New-Item -Path $refreshLock -ItemType Directory -ErrorAction Stop | Out-Null
+        $created = $true
+        [IO.File]::WriteAllText($refreshOwnerFile, "$PID`n", $utf8)
+        $script:ownsRefreshLock = $true
+    } catch {
+        if ($created) {
+            Remove-Item -LiteralPath $refreshOwnerFile -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
+        }
+        throw 'another usage refresh is already in progress.'
+    }
 }
 
 function Test-UsableCodexCredential($Credential) {
@@ -103,6 +156,14 @@ function Find-CodexAuthFile {
         } catch { }
     }
     throw 'no CLIProxyAPI Codex OAuth credential was found; run the installer with -Login.'
+}
+
+function Get-UsageAuthBinding {
+    try {
+        $path = Find-CodexAuthFile
+        $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        return "$path`t$digest"
+    } catch { return '' }
 }
 
 function Get-CodexAuthFiles {
@@ -165,7 +226,7 @@ function Convert-Window($Window) {
     if ($null -eq $Window) { return $null }
     $windowMinutes = [double] (Get-Property $Window 'windowDurationMins' 0)
     return [ordered]@{
-        used_percent = [double] (Get-Property $Window 'used_percent' (Get-Property $Window 'usedPercent' 0))
+        used_percent = [double] (Get-Property $Window 'used_percent' (Get-Property $Window 'usedPercent' ([double]::NaN)))
         limit_window_seconds = [long] (Get-Property $Window 'limit_window_seconds' ($windowMinutes * 60))
         reset_after_seconds = [long] (Get-Property $Window 'reset_after_seconds' 0)
         reset_at = [long] (Get-Property $Window 'reset_at' (Get-Property $Window 'resetsAt' 0))
@@ -180,6 +241,26 @@ function Convert-Limit($Limit) {
         primary_window = Convert-Window (Get-Property $Limit 'primary_window' (Get-Property $Limit 'primary' $null))
         secondary_window = Convert-Window (Get-Property $Limit 'secondary_window' (Get-Property $Limit 'secondary' $null))
     }
+}
+
+function Test-UsageWindow($Window) {
+    if ($null -eq $Window) { return $false }
+    try {
+        $used = [double] (Get-Property $Window 'used_percent' ([double]::NaN))
+        $duration = [long] (Get-Property $Window 'limit_window_seconds' 0)
+        return -not [double]::IsNaN($used) -and -not [double]::IsInfinity($used) -and
+            $used -ge 0 -and $used -le 100 -and $duration -gt 0
+    } catch { return $false }
+}
+
+function Test-UsageLimit($Limit) {
+    if ($null -eq $Limit) { return $false }
+    $primary = Get-Property $Limit 'primary_window' $null
+    $secondary = Get-Property $Limit 'secondary_window' $null
+    if ($null -eq $primary -and $null -eq $secondary) { return $false }
+    if ($null -ne $primary -and -not (Test-UsageWindow $primary)) { return $false }
+    if ($null -ne $secondary -and -not (Test-UsageWindow $secondary)) { return $false }
+    return $true
 }
 
 function Get-RemainingPercent($Window) {
@@ -219,12 +300,33 @@ function Get-CompactSummary($Snapshot) {
             }
         }
     }
+    $otherLimits = @()
+    $codeReview = Get-Property $Snapshot 'code_review_rate_limit' $null
+    if ($codeReview) { $otherLimits += [pscustomobject]@{ Name = 'Review'; Limit = $codeReview } }
+    foreach ($entry in @(Get-Property $Snapshot 'additional_rate_limits' @())) {
+        $otherLimits += [pscustomobject]@{ Name = [string] (Get-Property $entry 'limit_name' 'Additional'); Limit = Get-Property $entry 'rate_limit' $null }
+    }
+    foreach ($entry in $otherLimits) {
+        if (-not $entry.Limit) { continue }
+        $reached = [bool] (Get-Property $entry.Limit 'limit_reached' $false)
+        foreach ($windowName in @('primary_window', 'secondary_window')) {
+            $window = Get-Property $entry.Limit $windowName $null
+            if (-not $window) { continue }
+            $remaining = Get-RemainingPercent $window
+            $remainingValues.Add($remaining)
+            if ($reached -or ($alertPercent -gt 0 -and $remaining -le $alertPercent)) {
+                $parts.Add("$($entry.Name) $(Get-ShortWindowLabel ([long] $window.limit_window_seconds)) $remaining% left")
+            }
+        }
+    }
+    $anyReached = ($limit -and [bool] (Get-Property $limit 'limit_reached' $false)) -or
+        ($otherLimits | Where-Object { $_.Limit -and [bool] (Get-Property $_.Limit 'limit_reached' $false) } | Select-Object -First 1) -or
+        (Get-Property $Snapshot 'rate_limit_reached_type' $null)
     if ($parts.Count -gt 0) {
-        $prefix = if ($alertPercent -gt 0 -and ($remainingValues | Measure-Object -Minimum).Minimum -le $alertPercent) { '⚠ Codex ' } else { 'Codex ' }
+        $prefix = if ($anyReached -or ($alertPercent -gt 0 -and ($remainingValues | Measure-Object -Minimum).Minimum -le $alertPercent)) { '⚠ Codex ' } else { 'Codex ' }
         return $prefix + ($parts -join ' · ')
     }
-    if ($limit -and [bool] (Get-Property $limit 'limit_reached' $false)) { return 'Codex limit reached' }
-    if (Get-Property $Snapshot 'rate_limit_reached_type' $null) { return 'Codex limit reached' }
+    if ($anyReached) { return 'Codex limit reached' }
     return ''
 }
 
@@ -332,6 +434,8 @@ function Get-AppServerUsageResponse {
 function Refresh-UsageCache {
     [IO.Directory]::CreateDirectory($cacheDir) | Out-Null
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $generationAtStart = Get-UsageGeneration
+    $authBindingAtStart = Get-UsageAuthBinding
     Write-AtomicText $lastAttemptFile "$now`n"
     $source = ''
     if ($usageSource -eq 'web') {
@@ -344,7 +448,7 @@ function Refresh-UsageCache {
         try {
             $response = Get-WebUsageResponse
             $candidateLimit = Convert-Limit (Get-Property $response 'rate_limit' $null)
-            if ($null -eq $candidateLimit -or ($null -eq $candidateLimit.primary_window -and $null -eq $candidateLimit.secondary_window)) {
+            if (-not (Test-UsageLimit $candidateLimit)) {
                 throw 'OpenAI returned no recognized Codex rate-limit window.'
             }
             $source = 'web'
@@ -406,8 +510,12 @@ function Refresh-UsageCache {
         $reachedType = Get-Property $response 'rate_limit_reached_type' $null
         $resetCredits = Get-Property (Get-Property $response 'rate_limit_reset_credits' $null) 'available_count' 0
     }
-    if ($null -eq $rateLimit -or ($null -eq $rateLimit.primary_window -and $null -eq $rateLimit.secondary_window)) {
+    if (-not (Test-UsageLimit $rateLimit)) {
         throw 'OpenAI returned no Codex rate-limit window.'
+    }
+    if ($codeReviewLimit -and -not (Test-UsageLimit $codeReviewLimit)) { throw 'OpenAI returned an invalid code-review rate-limit window.' }
+    foreach ($entry in $additional) {
+        if (-not (Test-UsageLimit (Get-Property $entry 'rate_limit' $null))) { throw 'OpenAI returned an invalid additional rate-limit window.' }
     }
     $snapshot = [ordered]@{
         version = 1
@@ -422,8 +530,18 @@ function Refresh-UsageCache {
         rate_limit_reached_type = $reachedType
         reset_credits_available = [int] $resetCredits
     }
+    if ((Get-UsageGeneration) -ne $generationAtStart) { throw 'the selected Codex usage account changed during refresh; discarded the obsolete snapshot.' }
+    if ($source -eq 'web' -and (Get-UsageAuthBinding) -ne $authBindingAtStart) { throw 'the selected Codex usage credential changed during refresh; discarded the obsolete snapshot.' }
     Write-AtomicText $cacheFile (($snapshot | ConvertTo-Json -Depth 20 -Compress) + "`n")
     Write-AtomicText $summaryFile ((Get-CompactSummary $snapshot) + "`n")
+    if ((Get-UsageGeneration) -ne $generationAtStart) {
+        Remove-Item -LiteralPath $cacheFile, $summaryFile -Force -ErrorAction SilentlyContinue
+        throw 'the selected Codex usage account changed during refresh; discarded the obsolete snapshot.'
+    }
+    if ($source -eq 'web' -and (Get-UsageAuthBinding) -ne $authBindingAtStart) {
+        Remove-Item -LiteralPath $cacheFile, $summaryFile -Force -ErrorAction SilentlyContinue
+        throw 'the selected Codex usage credential changed during refresh; discarded the obsolete snapshot.'
+    }
     Write-AtomicText $lastSuccessFile "$now`n"
 }
 
@@ -453,11 +571,14 @@ function Write-Detail($Snapshot) {
         Write-LimitRows ([string] $entry.limit_name) (Get-Property $entry 'rate_limit' $null)
     }
     $remainingValues = @()
-    $mainForAlert = Get-Property $Snapshot 'rate_limit' $null
-    if ($mainForAlert) {
-        foreach ($windowName in @('primary_window', 'secondary_window')) {
-            $window = Get-Property $mainForAlert $windowName $null
-            if ($window) { $remainingValues += Get-RemainingPercent $window }
+    $limitsForAlert = @((Get-Property $Snapshot 'rate_limit' $null), (Get-Property $Snapshot 'code_review_rate_limit' $null))
+    foreach ($entry in @(Get-Property $Snapshot 'additional_rate_limits' @())) { $limitsForAlert += Get-Property $entry 'rate_limit' $null }
+    foreach ($limitForAlert in $limitsForAlert) {
+        if ($limitForAlert) {
+            foreach ($windowName in @('primary_window', 'secondary_window')) {
+                $window = Get-Property $limitForAlert $windowName $null
+                if ($window) { $remainingValues += Get-RemainingPercent $window }
+            }
         }
     }
     if ($alertPercent -gt 0 -and $remainingValues.Count -gt 0 -and ($remainingValues | Measure-Object -Minimum).Minimum -le $alertPercent) {
@@ -465,8 +586,11 @@ function Write-Detail($Snapshot) {
     }
     $resetCredits = [int] (Get-Property $Snapshot 'reset_credits_available' 0)
     if ($resetCredits -gt 0) { Write-Output "Rate-limit reset credits: $resetCredits" }
-    $mainLimit = Get-Property $Snapshot 'rate_limit' $null
-    if (($mainLimit -and [bool] (Get-Property $mainLimit 'limit_reached' $false)) -or (Get-Property $Snapshot 'rate_limit_reached_type' $null)) {
+    $anyLimitReached = $false
+    foreach ($limitForAlert in $limitsForAlert) {
+        if ($limitForAlert -and [bool] (Get-Property $limitForAlert 'limit_reached' $false)) { $anyLimitReached = $true; break }
+    }
+    if ($anyLimitReached -or (Get-Property $Snapshot 'rate_limit_reached_type' $null)) {
         Write-Output 'Status: usage limit reached'
     }
     $fetched = [long] (Get-Property $Snapshot 'fetched_at' 0)
@@ -480,13 +604,23 @@ if (-not [string]::IsNullOrWhiteSpace($Account)) { Select-CodexAccount $Account;
 
 $refreshFailed = $false
 try {
-    if (-not $Cached -and -not $Statusline) { Refresh-UsageCache }
+    if (-not $Cached -and -not $Statusline) {
+        Acquire-RefreshLock
+        Refresh-UsageCache
+    }
 } catch {
     $refreshFailed = $true
     if ($RefreshCache) { [Console]::Error.WriteLine("usage-limit: $($_.Exception.Message)") }
 } finally {
-    if ($LockHeld -and (Test-Path -LiteralPath $refreshLock -PathType Container)) {
-        Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
+    if ($ownsRefreshLock -and (Test-Path -LiteralPath $refreshLock -PathType Container)) {
+        $currentOwner = 0
+        if (Test-Path -LiteralPath $refreshOwnerFile -PathType Leaf) {
+            [int]::TryParse(([IO.File]::ReadAllText($refreshOwnerFile).Trim()), [ref] $currentOwner) | Out-Null
+        }
+        if ($currentOwner -le 0 -or $currentOwner -eq $PID) {
+            Remove-Item -LiteralPath $refreshOwnerFile -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -497,7 +631,18 @@ if ($null -eq $snapshot) {
     else { [Console]::Error.WriteLine('usage-limit: no cached usage snapshot is available.') }
     exit 1
 }
-if ($refreshFailed) { [Console]::Error.WriteLine('usage-limit: live refresh failed; showing the last cached snapshot.') }
+if ($refreshFailed) {
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $lastSuccess = 0L
+    if (Test-Path -LiteralPath $lastSuccessFile -PathType Leaf) {
+        [long]::TryParse(([IO.File]::ReadAllText($lastSuccessFile).Trim()), [ref] $lastSuccess) | Out-Null
+    }
+    if ($lastSuccess -le 0 -or $lastSuccess -gt $now -or $now - $lastSuccess -gt $maxStaleSeconds) {
+        [Console]::Error.WriteLine('usage-limit: live refresh failed and the cached snapshot is older than the configured maximum age.')
+        exit 1
+    }
+    [Console]::Error.WriteLine('usage-limit: live refresh failed; showing the last cached snapshot.')
+}
 
 if ($Json) {
     Get-Content -LiteralPath $cacheFile -Raw

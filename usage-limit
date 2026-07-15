@@ -8,7 +8,9 @@ readonly summary_file="$cache_dir/summary"
 readonly last_attempt_file="$cache_dir/last-attempt"
 readonly last_success_file="$cache_dir/last-success"
 readonly refresh_lock="$cache_dir/refresh.lock"
+readonly refresh_owner_file="$refresh_lock/owner-pid"
 readonly account_selection_file="$config_dir/codex-usage-account"
+readonly usage_generation_file="$config_dir/usage-generation"
 readonly curl_bin="${CLAUDEX_CURL_BIN:-curl}"
 readonly usage_url="${CLAUDEX_USAGE_URL:-https://chatgpt.com/backend-api/wham/usage}"
 readonly refresh_seconds="${CLAUDEX_USAGE_REFRESH_SECONDS:-300}"
@@ -34,7 +36,43 @@ fail() {
 
 invalidate_usage_cache() {
   rm -f "$cache_file" "$summary_file" "$last_attempt_file" "$last_success_file"
-  rmdir "$refresh_lock" 2>/dev/null || true
+  mkdir -p "$config_dir"
+  local temporary_generation
+  temporary_generation=$(mktemp "$config_dir/.usage-generation.tmp.XXXXXX") || return 1
+  (umask 077; printf '%s-%s-%s\n' "$(date +%s)" "$$" "${RANDOM:-0}" > "$temporary_generation")
+  chmod 600 "$temporary_generation" 2>/dev/null || true
+  mv -f "$temporary_generation" "$usage_generation_file"
+}
+
+read_usage_generation() {
+  local generation="missing"
+  if [[ -r "$usage_generation_file" ]]; then
+    IFS= read -r generation < "$usage_generation_file" || generation=missing
+  fi
+  printf '%s\n' "$generation"
+}
+
+acquire_refresh_lock() {
+  local refresh_owner=""
+  (( lock_held == 0 )) || return 0
+  mkdir -p "$cache_dir"
+  chmod 700 "$cache_dir" 2>/dev/null || true
+  if ! mkdir "$refresh_lock" 2>/dev/null; then
+    if [[ -r "$refresh_owner_file" ]]; then IFS= read -r refresh_owner < "$refresh_owner_file" || refresh_owner=""; fi
+    if [[ "$refresh_owner" =~ ^[0-9]+$ ]] && ! kill -0 "$refresh_owner" 2>/dev/null; then
+      rm -f "$refresh_owner_file"
+      rmdir "$refresh_lock" 2>/dev/null || true
+      mkdir "$refresh_lock" 2>/dev/null || {
+        fail 'another usage refresh is already in progress.'
+        return 1
+      }
+    else
+      fail 'another usage refresh is already in progress.'
+      return 1
+    fi
+  fi
+  lock_held=1
+  (umask 077; printf '%s\n' "$$" > "$refresh_owner_file")
 }
 
 usage() {
@@ -93,6 +131,7 @@ cleanup() {
   fi
   [[ -z "$temporary_appserver_dir" ]] || rm -rf "$temporary_appserver_dir"
   if (( lock_held )); then
+    rm -f "$refresh_owner_file"
     rmdir "$refresh_lock" 2>/dev/null || true
   fi
 }
@@ -173,6 +212,19 @@ find_auth_file() {
   done < <(find "$auth_dir" -maxdepth 1 -type f -name 'codex*.json' -print0 2>/dev/null)
   [[ -n "$newest" ]] || return 1
   printf '%s\n' "$newest"
+}
+
+usage_auth_binding() {
+  local auth_file digest
+  auth_file=$(find_auth_file) || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(shasum -a 256 "$auth_file" | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum "$auth_file" | awk '{print $1}')
+  else
+    digest=$(cksum "$auth_file" | awk '{print $1 ":" $2}')
+  fi
+  printf '%s\t%s\n' "$auth_file" "$digest"
 }
 
 list_accounts() {
@@ -264,6 +316,19 @@ fetch_web_usage() {
   printf '%s' "$raw"
 }
 
+valid_raw_usage_response() {
+  jq -e '
+    def valid_window:
+      type == "object"
+      and ((.used_percent // .usedPercent) | type) == "number"
+      and ((.used_percent // .usedPercent) >= 0)
+      and ((.used_percent // .usedPercent) <= 100)
+      and ((.limit_window_seconds // ((.windowDurationMins // 0) * 60)) | type) == "number"
+      and ((.limit_window_seconds // ((.windowDurationMins // 0) * 60)) > 0);
+    ((.rate_limit.primary_window // .rate_limit.secondary_window) | valid_window)
+  ' >/dev/null 2>&1
+}
+
 fetch_appserver_usage() {
   command -v codex >/dev/null 2>&1 || { fail 'Codex CLI is unavailable for the app-server fallback.'; return 1; }
   if [[ -n "${CLAUDEX_CODEX_AUTH_FILE:-}" || -r "$account_selection_file" ]]; then
@@ -308,7 +373,11 @@ fetch_appserver_usage() {
 
   printf '%s' "$response" | jq '
     def window:
-      if type == "object" then {
+      if type == "object"
+          and (.usedPercent | type) == "number"
+          and (.usedPercent >= 0 and .usedPercent <= 100)
+          and (.windowDurationMins | type) == "number"
+          and (.windowDurationMins > 0) then {
         used_percent: (.usedPercent // 0),
         limit_window_seconds: ((.windowDurationMins // 0) * 60),
         reset_after_seconds: 0,
@@ -386,33 +455,41 @@ format_epoch() {
 }
 
 compact_summary() {
-  local row seconds remaining label output="" separator=""
-  while IFS=$'\t' read -r seconds remaining; do
+  local name seconds remaining reached label part output="" separator="" any_alert=0
+  while IFS=$'\t' read -r name seconds remaining reached; do
     [[ "$seconds" =~ ^[0-9]+$ && "$remaining" =~ ^[0-9]+$ ]] || continue
     label=$(window_label_short "$seconds")
-    output+="${separator}${label} ${remaining}% left"
+    if [[ "$name" == Codex ]]; then part="${label} ${remaining}% left"
+    else part="${name} ${label} ${remaining}% left"
+    fi
+    output+="${separator}${part}"
     separator=' · '
+    if [[ "$reached" == true ]] || (( alert_percent > 0 && remaining <= alert_percent )); then any_alert=1; fi
   done < <(jq -r '
     def remaining: (100 - ((.used_percent // 0) | floor)) | if . < 0 then 0 elif . > 100 then 100 else . end;
-    [.rate_limit.primary_window, .rate_limit.secondary_window][]?
-    | select(type == "object")
-    | [(.limit_window_seconds // 0), remaining] | @tsv
-  ' "$cache_file" 2>/dev/null)
+    def rows($name; $limit; $always; $alert):
+      [$limit.primary_window, $limit.secondary_window][]?
+      | select(type == "object")
+      | [remaining, ($limit.limit_reached == true)] as $state
+      | select($always or $state[1] or ($alert > 0 and $state[0] <= $alert))
+      | [$name, (.limit_window_seconds // 0), $state[0], $state[1]] | @tsv;
+    rows("Codex"; .rate_limit; true; $alert),
+    rows("Review"; .code_review_rate_limit; false; $alert),
+    (.additional_rate_limits[]? | rows((.limit_name // "Additional"); .rate_limit; false; $alert))
+  ' --argjson alert "$alert_percent" "$cache_file" 2>/dev/null)
 
   if [[ -n "$output" ]]; then
-    local lowest_remaining
-    lowest_remaining=$(jq -r '
-      [[.rate_limit.primary_window, .rate_limit.secondary_window][]?
-        | select(type == "object")
-        | (100 - ((.used_percent // 0) | floor))
-        | if . < 0 then 0 elif . > 100 then 100 else . end] | min // 101
-    ' "$cache_file" 2>/dev/null)
-    if (( alert_percent > 0 )) && [[ "$lowest_remaining" =~ ^[0-9]+$ ]] && (( lowest_remaining <= alert_percent )); then
+    if (( any_alert )); then
       printf '⚠ Codex %s\n' "$output"
     else
       printf 'Codex %s\n' "$output"
     fi
-  elif jq -e '.rate_limit.limit_reached == true or .rate_limit_reached_type != null' \
+  elif jq -e '
+      .rate_limit.limit_reached == true
+      or .code_review_rate_limit.limit_reached == true
+      or any(.additional_rate_limits[]?; .rate_limit.limit_reached == true)
+      or .rate_limit_reached_type != null
+    ' \
     "$cache_file" >/dev/null 2>&1; then
     printf '%s\n' 'Codex limit reached'
   fi
@@ -442,12 +519,14 @@ write_summary() {
 }
 
 refresh_cache() {
-  local raw now refresh_source=""
+  local raw now refresh_source="" generation_at_start auth_binding_at_start=""
   mkdir -p "$cache_dir" 2>/dev/null || {
     fail "cannot create the private cache directory: $cache_dir"
     return 1
   }
   chmod 700 "$cache_dir" 2>/dev/null || true
+  generation_at_start=$(read_usage_generation)
+  auth_binding_at_start=$(usage_auth_binding 2>/dev/null || true)
   now=$(date +%s)
   printf '%s\n' "$now" > "$last_attempt_file" || {
     fail 'cannot record the usage refresh attempt.'
@@ -463,13 +542,16 @@ refresh_cache() {
 
   if [[ "$usage_source" != app-server ]]; then
     if [[ "$usage_source" == auto ]]; then
-      if raw=$(fetch_web_usage 2>/dev/null) && printf '%s' "$raw" | jq -e '
-        ((.rate_limit.primary_window // .rate_limit.secondary_window) | type) == "object"
-      ' >/dev/null 2>&1; then
+      if raw=$(fetch_web_usage 2>/dev/null) && printf '%s' "$raw" | valid_raw_usage_response; then
         refresh_source=web
       fi
     elif raw=$(fetch_web_usage); then
-      refresh_source=web
+      if printf '%s' "$raw" | valid_raw_usage_response; then
+        refresh_source=web
+      else
+        fail 'OpenAI returned no Codex rate-limit window.'
+        return 1
+      fi
     fi
     if [[ -z "$refresh_source" && "$usage_source" == web ]]; then
       return 1
@@ -523,7 +605,20 @@ refresh_cache() {
     fail 'OpenAI returned an unrecognized usage response.'
     return 1
   }
-  jq -e '.fetched_at > 0 and ((.rate_limit.primary_window // .rate_limit.secondary_window) | type == "object")' \
+  jq -e '
+    def valid_window:
+      type == "object"
+      and (.used_percent | type) == "number"
+      and (.used_percent >= 0 and .used_percent <= 100)
+      and (.limit_window_seconds | type) == "number"
+      and (.limit_window_seconds > 0);
+    .fetched_at > 0
+    and ((.rate_limit.primary_window // .rate_limit.secondary_window) | valid_window)
+    and ([.code_review_rate_limit.primary_window?, .code_review_rate_limit.secondary_window?,
+          .additional_rate_limits[]?.rate_limit.primary_window?,
+          .additional_rate_limits[]?.rate_limit.secondary_window?]
+         | all(. == null or valid_window))
+  ' \
     "$temporary_limits_file" >/dev/null || {
       rm -f "$temporary_limits_file"
       temporary_limits_file=""
@@ -531,18 +626,41 @@ refresh_cache() {
       return 1
     }
 
+  if [[ "$(read_usage_generation)" != "$generation_at_start" ]]; then
+    rm -f "$temporary_limits_file"
+    temporary_limits_file=""
+    fail 'the selected Codex usage account changed during refresh; discarded the obsolete snapshot.'
+    return 1
+  fi
+  if [[ "$refresh_source" == web && "$(usage_auth_binding 2>/dev/null || true)" != "$auth_binding_at_start" ]]; then
+    rm -f "$temporary_limits_file"
+    temporary_limits_file=""
+    fail 'the selected Codex usage credential changed during refresh; discarded the obsolete snapshot.'
+    return 1
+  fi
+
   chmod 600 "$temporary_limits_file" 2>/dev/null || true
   mv -f "$temporary_limits_file" "$cache_file" || {
     fail 'could not publish the usage snapshot.'
     return 1
   }
   temporary_limits_file=""
+  write_summary || return 1
+  if [[ "$(read_usage_generation)" != "$generation_at_start" ]]; then
+    rm -f "$cache_file" "$summary_file"
+    fail 'the selected Codex usage account changed during refresh; discarded the obsolete snapshot.'
+    return 1
+  fi
+  if [[ "$refresh_source" == web && "$(usage_auth_binding 2>/dev/null || true)" != "$auth_binding_at_start" ]]; then
+    rm -f "$cache_file" "$summary_file"
+    fail 'the selected Codex usage credential changed during refresh; discarded the obsolete snapshot.'
+    return 1
+  fi
   printf '%s\n' "$now" > "$last_success_file" || {
     fail 'cannot record the successful usage refresh.'
     return 1
   }
   chmod 600 "$last_success_file" 2>/dev/null || true
-  write_summary || return 1
 }
 
 render_detail() {
@@ -576,7 +694,10 @@ render_detail() {
 
   local lowest_remaining source
   lowest_remaining=$(jq -r '
-    [[.rate_limit.primary_window, .rate_limit.secondary_window][]?
+    [[.rate_limit.primary_window, .rate_limit.secondary_window,
+      .code_review_rate_limit.primary_window, .code_review_rate_limit.secondary_window,
+      .additional_rate_limits[]?.rate_limit.primary_window,
+      .additional_rate_limits[]?.rate_limit.secondary_window][]?
       | select(type == "object")
       | (100 - ((.used_percent // 0) | floor))
       | if . < 0 then 0 elif . > 100 then 100 else . end] | min // 101
@@ -590,7 +711,12 @@ render_detail() {
   if [[ "$reset_credits" =~ ^[0-9]+$ ]] && (( reset_credits > 0 )); then
     printf 'Rate-limit reset credits: %s\n' "$reset_credits"
   fi
-  if jq -e '.rate_limit.limit_reached == true or .rate_limit_reached_type != null' \
+  if jq -e '
+      .rate_limit.limit_reached == true
+      or .code_review_rate_limit.limit_reached == true
+      or any(.additional_rate_limits[]?; .rate_limit.limit_reached == true)
+      or .rate_limit_reached_type != null
+    ' \
     "$cache_file" >/dev/null 2>&1; then
     printf '%s\n' 'Status: usage limit reached'
   fi
@@ -603,7 +729,11 @@ render_detail() {
 
 refresh_failed=0
 if (( refresh )); then
-  refresh_cache || refresh_failed=1
+  if acquire_refresh_lock; then
+    refresh_cache || refresh_failed=1
+  else
+    refresh_failed=1
+  fi
 fi
 
 if [[ "$mode" == refresh-cache ]]; then
@@ -616,6 +746,15 @@ if [[ ! -r "$cache_file" ]]; then
 fi
 
 if (( refresh_failed )); then
+  now=$(date +%s)
+  last_success=0
+  if [[ -r "$last_success_file" ]]; then
+    IFS= read -r last_success < "$last_success_file" || last_success=0
+  fi
+  if [[ ! "$last_success" =~ ^[0-9]+$ ]] || (( last_success > now || now - last_success > max_stale_seconds )); then
+    fail 'live refresh failed and the cached snapshot is older than the configured maximum age.'
+    exit 1
+  fi
   printf '%s\n' 'usage-limit: live refresh failed; showing the last cached snapshot.' >&2
 fi
 

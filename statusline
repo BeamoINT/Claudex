@@ -77,9 +77,10 @@ load_usage_summary() {
   local last_attempt_file="$cache_dir/last-attempt"
   local last_success_file="$cache_dir/last-success"
   local refresh_lock="$cache_dir/refresh.lock"
+  local refresh_owner_file="$refresh_lock/owner-pid"
   local refresh_seconds="${CLAUDEX_USAGE_REFRESH_SECONDS:-300}"
   local max_stale_seconds="${CLAUDEX_USAGE_MAX_STALE_SECONDS:-86400}"
-  local now last_attempt=0 last_success=0
+  local now last_attempt=0 last_success=0 refresh_pid="" refresh_owner=""
 
   [[ "$display" != off && -x "$helper" ]] || return 0
   if [[ ! "$refresh_seconds" =~ ^[0-9]+$ ]] || (( refresh_seconds < 60 || refresh_seconds > 3600 )); then
@@ -99,8 +100,14 @@ load_usage_summary() {
       printf '%s\n' "$now" > "$last_attempt_file"
       chmod 600 "$last_attempt_file" 2>/dev/null || true
       nohup "$helper" --refresh-cache --lock-held >/dev/null 2>&1 </dev/null &
+      refresh_pid=$!
+      (umask 077; printf '%s\n' "$refresh_pid" > "$refresh_owner_file") 2>/dev/null || true
     elif (( now - last_attempt >= refresh_seconds * 2 )); then
-      rmdir "$refresh_lock" 2>/dev/null || true
+      if [[ -r "$refresh_owner_file" ]]; then IFS= read -r refresh_owner < "$refresh_owner_file" || refresh_owner=""; fi
+      if [[ ! "$refresh_owner" =~ ^[0-9]+$ ]] || ! kill -0 "$refresh_owner" 2>/dev/null; then
+        rm -f "$refresh_owner_file"
+        rmdir "$refresh_lock" 2>/dev/null || true
+      fi
     fi
   fi
 

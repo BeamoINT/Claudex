@@ -5,6 +5,46 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-15
+
+### Changed
+
+- Made `CLAUDEX_MODEL` the actual default launch route, while keeping explicit
+  Sol, Terra, Luna, and Solplan selectors authoritative and rejecting non-Codex
+  model IDs before proxy recovery.
+- Reconciled auto-mode rules against a private snapshot of Claude Code's prior
+  defaults, so upstream permission changes no longer leave obsolete rules
+  behind while user-authored rules remain intact.
+- Upgraded the verified CLIProxyAPI dependency to 7.2.80 and preserved explicit
+  or persisted custom proxy, configuration, and account-directory locations
+  during installer repairs.
+- Kept terminal and structured output byte-for-byte native. The preload now
+  handles only the `/model solplan` input alias and supports split UTF-8,
+  bracketed paste, cursor editing, Unicode deletion, and multiple listeners.
+
+### Fixed
+
+- Replaced TCP-only bridge checks with authenticated semantic model-catalog
+  checks, hard wall-clock deadlines, safe stale-lock recovery, managed-process
+  restart, and bounded diagnostic logs. Hung or unrelated listeners can no
+  longer masquerade as a healthy Codex bridge or stretch recovery into minutes.
+- Prevented stale quota data from crossing logout or account-switch boundaries,
+  stopped obsolete in-flight refreshes from publishing, made refresh locks
+  owner-aware, enforced maximum cache age and complete schemas, and included
+  code-review and model-specific limits in warnings.
+- Removed terminal-output rewriting that could corrupt split UTF-8, JSON,
+  stream-JSON, ANSI resets, callback ordering, and the bottom rows of the
+  fullscreen interface.
+- Made resume guidance append-only and ambiguity-safe, preventing cursor-up row
+  erasure and avoiding attribution to another same-directory session.
+- Preserved empty, quoted, whitespace-containing, and trailing-backslash native
+  arguments on Windows PowerShell 5 launch paths.
+- Serialized package-manager first-run repair, recovered abandoned setup locks,
+  repaired missing managed files, and avoided overwriting a package manager's
+  own command shim.
+- Versioned the managed Windows proxy executable so an upgrade does not replace
+  a binary that is still running.
+
 ## [1.2.0] - 2026-07-15
 
 ### Changed
@@ -78,7 +118,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first-party profile support.
 - Cross-platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/BeamoINT/Claudex/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/BeamoINT/Claudex/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/BeamoINT/Claudex/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/BeamoINT/Claudex/compare/v1.0.0...v1.1.0

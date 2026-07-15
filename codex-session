@@ -8,6 +8,7 @@ readonly bridge_auth_dir="${CLAUDEX_CODEX_AUTH_DIR:-$config_dir/codex-accounts}"
 readonly bridge_auth_file="$bridge_auth_dir/codex-claudex-managed.json"
 readonly usage_cache_dir="$config_dir/usage-cache"
 readonly usage_account_file="$config_dir/codex-usage-account"
+readonly usage_generation_file="$config_dir/usage-generation"
 
 fail() {
   printf 'claudex: %s\n' "$*" >&2
@@ -23,8 +24,13 @@ clear_account_scoped_state() {
     "$usage_cache_dir/summary" \
     "$usage_cache_dir/last-attempt" \
     "$usage_cache_dir/last-success"
-  rmdir "$usage_cache_dir/refresh.lock" 2>/dev/null || true
   rmdir "$usage_cache_dir" 2>/dev/null || true
+  mkdir -p "$config_dir"
+  local generation_tmp
+  generation_tmp=$(mktemp "$config_dir/.usage-generation.tmp.XXXXXX") || return 1
+  (umask 077; printf '%s-%s-%s\n' "$(date +%s)" "$$" "${RANDOM:-0}" > "$generation_tmp")
+  chmod 600 "$generation_tmp" 2>/dev/null || true
+  mv -f "$generation_tmp" "$usage_generation_file"
 }
 
 codex_is_logged_in() {
@@ -34,20 +40,25 @@ codex_is_logged_in() {
 sync_session() {
   command -v codex >/dev/null 2>&1 || {
     clear_bridge_session
+    clear_account_scoped_state
     fail 'Codex CLI was not found. Install Codex, run `codex login`, and retry.'
     return 10
   }
   if ! codex_is_logged_in; then
     clear_bridge_session
+    clear_account_scoped_state
     fail 'Codex is logged out. Run `codex login` (or `claudex --login`) and retry.'
     return 11
   fi
   command -v jq >/dev/null 2>&1 || {
+    clear_bridge_session
+    clear_account_scoped_state
     fail 'jq is required for secure local Codex session synchronization.'
     return 12
   }
   if [[ ! -r "$codex_auth_file" ]]; then
     clear_bridge_session
+    clear_account_scoped_state
     fail 'Codex is logged in, but its credentials are stored in the OS keyring.'
     fail 'Run `claudex --login` once so Codex can create a reusable file-backed local session.'
     return 13
@@ -59,6 +70,7 @@ sync_session() {
     and (.tokens.account_id | type == "string" and length > 0)
   ' "$codex_auth_file" >/dev/null 2>&1; then
     clear_bridge_session
+    clear_account_scoped_state
     fail 'Claudex requires Codex ChatGPT sign-in. Run `claudex --login` and choose ChatGPT.'
     return 14
   fi
@@ -100,7 +112,7 @@ sync_session() {
       expired: false
     }' "$codex_auth_file" > "$temporary"
     chmod 600 "$temporary"
-    if [[ -n "$previous_account" && "$previous_account" != "$source_account" ]]; then
+    if [[ -z "$previous_account" || "$previous_account" != "$source_account" ]]; then
       clear_account_scoped_state
     fi
     mv -f "$temporary" "$bridge_auth_file"
@@ -129,6 +141,10 @@ watch_session() {
     fail 'CLAUDEX_AUTH_WATCH_SECONDS must be an integer from 1 to 60.'
     return 2
   }
+  # Reconcile once before establishing the baseline. Otherwise an account
+  # change between launcher startup and watcher initialization can be missed
+  # until auth.json changes a second time.
+  sync_session >/dev/null 2>&1 || true
   fingerprint=$(auth_fingerprint)
   if [[ -n "${CLAUDEX_AUTH_WATCH_READY_FILE:-}" ]]; then
     (umask 077; printf '%s\n' ready > "$CLAUDEX_AUTH_WATCH_READY_FILE")
@@ -160,12 +176,14 @@ login() {
 logout() {
   command -v codex >/dev/null 2>&1 || {
     clear_bridge_session
+    clear_account_scoped_state
     fail 'Codex CLI was not found; the local Claudex bridge session was cleared.'
     return 10
   }
   local logout_status=0
   codex logout || logout_status=$?
   clear_bridge_session
+  clear_account_scoped_state
   if (( logout_status != 0 )); then
     fail 'Codex logout failed, but the local Claudex bridge session was cleared.'
     return "$logout_status"

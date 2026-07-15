@@ -48,7 +48,11 @@ if [[ "${1:-}" == "--help" ]]; then
   exit
 fi
 if [[ "${1:-}" == "auto-mode" && "${2:-}" == "defaults" ]]; then
-  printf '%s\n' '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
+  if [[ "${FAKE_AUTO_MODE_DEFAULT_VERSION:-1}" == 2 ]]; then
+    printf '%s\n' '{"allow":["Updated default allow rule"],"environment":["Updated default environment rule"],"soft_deny":["Updated soft deny"],"hard_deny":["Updated hard deny"]}'
+  else
+    printf '%s\n' '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
+  fi
   exit
 fi
 if [[ "${1:-}" == "update" ]]; then
@@ -63,6 +67,10 @@ if [[ "${FAKE_CLAUDE_RESUME:-0}" == 1 ]]; then
   if [[ "${FAKE_FOREIGN_RESUME:-0}" == 1 ]]; then
     sleep 0.1
     printf '%s\n' '{"sessionId":"223e4567-e89b-12d3-a456-426614174000","cwd":"/foreign/project","isSidechain":false}' > "$project_dir/223e4567-e89b-12d3-a456-426614174000.jsonl"
+  fi
+  if [[ "${FAKE_SAME_CWD_RESUME:-0}" == 1 ]]; then
+    sleep 0.1
+    printf '{"sessionId":"323e4567-e89b-12d3-a456-426614174000","cwd":"%s","isSidechain":false}\n' "$PWD" > "$project_dir/323e4567-e89b-12d3-a456-426614174000.jsonl"
   fi
   printf '%s\n' 'Resume this session with:'
   printf '%s\n' 'claude --resume 123e4567-e89b-12d3-a456-426614174000'
@@ -237,6 +245,15 @@ jq -e '
   and (.autoMode.environment | any(startswith("User-designated task boundary:")))
   and (.autoMode.environment | any(startswith("Explicitly approved development transfer:")))
 ' "$tmp/home/.config/claudex/settings.json" >/dev/null
+FAKE_AUTO_MODE_DEFAULT_VERSION=2 run_wrapper --terra test-prompt >/dev/null
+jq -e '
+  (.autoMode.allow | index("Default allow rule") == null)
+  and (.autoMode.allow | index("Updated default allow rule") != null)
+  and ([.autoMode.allow[] | select(. == "User custom allow rule")] | length == 1)
+  and (.autoMode.environment | index("Default environment rule") == null)
+  and (.autoMode.environment | index("Updated default environment rule") != null)
+  and ([.autoMode.environment[] | select(. == "User custom environment rule")] | length == 1)
+' "$tmp/home/.config/claudex/settings.json" >/dev/null
 
 proxy_ready_file="$tmp/proxy-ready"
 proxy_start_log="$tmp/proxy-start.log"
@@ -253,6 +270,14 @@ proxy_recovery_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN=
 auto_output=$(run_wrapper --auto --luna test-prompt)
 [[ "$auto_output" == *'--permission-mode auto'* ]]
 [[ "$auto_output" == *'--model gpt-5.6-luna'* ]]
+configured_model_output=$(CLAUDEX_MODEL=gpt-5.6-luna run_wrapper test-prompt)
+[[ "$configured_model_output" == *'--model gpt-5.6-luna'* ]]
+configured_model_override=$(CLAUDEX_MODEL=gpt-5.6-luna run_wrapper --terra test-prompt)
+[[ "$configured_model_override" == *'--model gpt-5.6-terra'* ]]
+if CLAUDEX_MODEL=claude-sonnet-5 run_wrapper test-prompt >/dev/null 2>&1; then
+  printf '%s\n' 'expected invalid default model to fail before proxy startup' >&2
+  exit 1
+fi
 
 ultracode_output=$(run_wrapper --ultracode --sol test-prompt)
 [[ "$ultracode_output" == *'MODE=ultracode'* ]]
@@ -270,8 +295,8 @@ solplan_output=$(run_wrapper --solplan test-prompt)
 [[ "$solplan_output" == *'SUBAGENT=gpt-5.6-terra'* ]]
 
 resume_footer_output=$(FAKE_CLAUDE_RESUME=1 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper)
-[[ "$resume_footer_output" == *$'\033[2A\033[JResume this session with:'* ]]
-[[ "$resume_footer_output" == *'claudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
+[[ "$resume_footer_output" != *$'\033[2A'* ]]
+[[ "$resume_footer_output" == *$'Resume this session with Claudex:\nclaudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
 
 if interrupted_resume_output=$(FAKE_CLAUDE_RESUME=1 FAKE_CLAUDE_RESUME_EXIT=130 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper); then
   interrupted_resume_exit=0
@@ -279,8 +304,8 @@ else
   interrupted_resume_exit=$?
 fi
 [[ "$interrupted_resume_exit" == 130 ]]
-[[ "$interrupted_resume_output" == *$'\033[2A\033[JResume this session with:'* ]]
-[[ "$interrupted_resume_output" == *'claudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
+[[ "$interrupted_resume_output" != *$'\033[2A'* ]]
+[[ "$interrupted_resume_output" == *$'Resume this session with Claudex:\nclaudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
 
 bare_output=$(run_wrapper --bare --print test-prompt)
 [[ "$bare_output" != *'--agents'* ]]
@@ -325,6 +350,8 @@ chrome_output=$(run_wrapper --claude-chrome --print chrome-test)
 [[ "$chrome_output" == *'ARGS=--chrome --print chrome-test'* ]]
 [[ "$chrome_output" == *$'CONFIG=\n'* ]]
 [[ "$chrome_output" == *$'BUN=\n'* ]]
+chrome_configured_model=$(CLAUDEX_MODEL=gpt-5.6-luna run_wrapper --claude-chrome --print chrome-test)
+[[ "$chrome_configured_model" != *'--model gpt-5.6-luna'* ]]
 
 prompt_flag_output=$(run_wrapper --print --terra)
 [[ "$prompt_flag_output" == *' --print --terra'* ]]
@@ -495,69 +522,7 @@ small_status=$(printf '%s\n' '{"session_id":"small-session","model":{"id":"gpt-5
 invalid_status=$(printf '%s\n' 'not-json' | CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
 [[ "$invalid_status" == *'Unknown model'* ]]
 
-billing_frame=$'GPT-5.6 Sol with high effort\033[41G·\033[43GAPI\033[47GUsage\033[53GBilling\r'
-filtered_frame=$(printf '%s' "$billing_frame" | \
-  node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
-[[ "$filtered_frame" == *'GPT-5.6 Sol with high effort'* ]]
-[[ "$filtered_frame" != *'API Usage Billing'* ]]
-[[ "$filtered_frame" != *$'·\033[43GAPI'* ]]
-interactive_frame=$'\033[2;1H[Tool] Install local app\033[3;1H/model opus\033[4;1H7'
-interactive_frame_output=$(printf '%s' "$interactive_frame" | CLAUDEX_TEST_INTERACTIVE_TUI=1 \
-  node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
-[[ "$interactive_frame_output" == "$interactive_frame" ]]
-split_billing=$(node --require "$root/preload.cjs" -e '
-  process.stdout.write("GPT-5.6 Solplan · API Usage Bil");
-  process.stdout.write("ling");
-')
-[[ "$split_billing" == *'GPT-5.6 Solplan'* ]]
-[[ "$split_billing" != *'API Usage Billing'* ]]
-
-resume_frame='Resume this session with: claude --resume 123e4567-e89b-12d3-a456-426614174000'
-filtered_resume=$(printf '%s' "$resume_frame" | node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
-[[ "$filtered_resume" == *'claudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
-[[ "$filtered_resume" != *'claude --resume'* ]]
-filtered_resume_stderr=$(node --require "$root/preload.cjs" -e 'process.stderr.write(process.argv[1])' "$resume_frame" 2>&1)
-[[ "$filtered_resume_stderr" == *'claudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
-
-node - "$root/preload.cjs" <<'NODE'
-const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
-const preload = process.argv[2];
-for (const [source, expected] of [
-  ['Opus Plan Mode', 'GPT-5.6 Solplan'],
-  ['Opus Plan', 'GPT-5.6 Solplan'],
-  ['· API Usage Billing', ''],
-  ['claude --resume abc', 'claudex --resume abc'],
-  ['/model opus', '/model GPT-5.6 Sol'],
-  ['/model opus[1m', '/model GPT-5.6 Sol'],
-  ['/model opusplan[1m', '/model GPT-5.6 Solplan'],
-  ['/model gpt-5.6-terra[22m', '/model GPT-5.6 Terra'],
-  [
-    'API Error: Request rejected (429) · All credentials for model gpt-5.6-sol are cooling down',
-    'Your Codex rate limit for GPT-5.6 Sol is exhausted. Run /usage-limit to check when it resets, or sign in to another Codex account.',
-  ],
-  [
-    '429 All credentials for model gpt-5.6-terra are cooling down',
-    'Your Codex rate limit for GPT-5.6 Terra is exhausted. Run /usage-limit to check when it resets, or sign in to another Codex account.',
-  ],
-]) {
-  for (let split = 1; split < source.length; split += 1) {
-    const code = `const s=${JSON.stringify(source)},n=${split};process.stdout.write(s.slice(0,n));process.stdout.write(s.slice(n));`;
-    const result = spawnSync(process.execPath, ['--require', preload, '-e', code], { encoding: 'utf8' });
-    assert.equal(result.status, 0);
-    assert.equal(result.stdout, expected, `${source} split at ${split}`);
-  }
-}
-const ansiCode = 'process.stdout.write("Opus\\x1b[");process.stdout.write("5G Plan Mode")';
-const ansi = spawnSync(process.execPath, ['--require', preload, '-e', ansiCode], { encoding: 'utf8' });
-assert.equal(ansi.stdout.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, ''), 'GPT-5.6 Solplan');
-const footerCode = 'process.stdout.write("2% until auto-compact · /model op");process.stdout.write("us[1m")';
-const footer = spawnSync(process.execPath, ['--require', preload, '-e', footerCode], { encoding: 'utf8' });
-assert.equal(footer.stdout, '2% until auto-compact · /model GPT-5.6 Sol');
-const rateLimitCode = 'process.stderr.write("API Error: Request rejected (429) · All credentials for model gpt-5.6-");process.stderr.write("sol are cooling down")';
-const rateLimit = spawnSync(process.execPath, ['--require', preload, '-e', rateLimitCode], { encoding: 'utf8' });
-assert.equal(rateLimit.stderr, 'Your Codex rate limit for GPT-5.6 Sol is exhausted. Run /usage-limit to check when it resets, or sign in to another Codex account.');
-NODE
+node "$root/scripts/check-preload.mjs"
 
 solplan_input_regression=$(CLAUDEX_TEST_TTY_INPUT=1 node - "$root/preload.cjs" <<'NODE'
 const assert = require('node:assert/strict');
@@ -574,16 +539,6 @@ NODE
 )
 [[ "$solplan_input_regression" == ok ]]
 
-solplan_picker='Opus Plan Mode · Use Opus in plan mode, Sonnet otherwise'
-filtered_solplan=$(printf '%s' "$solplan_picker" | node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
-[[ "$filtered_solplan" == *'GPT-5.6 Solplan'* ]]
-[[ "$filtered_solplan" == *'GPT-5.6 Sol in plan mode, GPT-5.6 Terra otherwise'* ]]
-ansi_solplan_picker=$'Opus\033[5G Plan · Opus\033[20G in plan mode, else Sonnet · API\033[70G Usage Billing'
-filtered_ansi_solplan=$(printf '%s' "$ansi_solplan_picker" | node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
-plain_ansi_solplan=$(printf '%s' "$filtered_ansi_solplan" | sed $'s/\033\\[[0-9;?]*[ -\\/]*[@-~]//g')
-[[ "$plain_ansi_solplan" == *'GPT-5.6 Solplan'* ]]
-[[ "$plain_ansi_solplan" != *'Opus in plan mode, else Sonnet'* ]]
-[[ "$plain_ansi_solplan" != *'API Usage Billing'* ]]
 [[ "$(node "$root/bin/claudex-package.mjs" --package-version)" == "$(node -p "require('$root/package.json').version")" ]]
 
 install_home="$tmp/install home"
@@ -619,6 +574,44 @@ installed_env=$(<"$install_home/.config/claudex/env")
 [[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'transient-error-cooldown-seconds: 1'* ]]
 [[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'bootstrap-retries: 2'* ]]
 
+custom_proxy_config="$tmp/custom-claudex-proxy.yaml"
+custom_proxy_bin="$tmp/custom-claudex-proxy"
+custom_auth_dir="$tmp/custom-claudex-auth"
+awk -v proxy_config="$custom_proxy_config" -v proxy_bin="$custom_proxy_bin" -v auth_dir="$custom_auth_dir" '
+  /^CLAUDEX_PROXY_URL=/ { print "CLAUDEX_PROXY_URL=http://127.0.0.1:9123"; next }
+  /^CLAUDEX_PROXY_CONFIG=/ { print "CLAUDEX_PROXY_CONFIG=" proxy_config; next }
+  /^CLAUDEX_PROXY_BIN=/ { print "CLAUDEX_PROXY_BIN=" proxy_bin; next }
+  /^CLAUDEX_CODEX_AUTH_DIR=/ { print "CLAUDEX_CODEX_AUTH_DIR=" auth_dir; next }
+  { print }
+' "$install_home/.config/claudex/env" > "$tmp/installer-custom-env"
+mv "$tmp/installer-custom-env" "$install_home/.config/claudex/env"
+HOME="$install_home" PATH="$tmp/bin:$PATH" CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 CLAUDEX_SKIP_SERVICE_START=1 \
+  "$root/install.sh" >/dev/null
+custom_installed_env=$(<"$install_home/.config/claudex/env")
+[[ "$custom_installed_env" == *'CLAUDEX_PROXY_URL=http://127.0.0.1:9123'* ]]
+[[ "$custom_installed_env" == *"CLAUDEX_PROXY_CONFIG=$custom_proxy_config"* ]]
+[[ "$custom_installed_env" == *"CLAUDEX_PROXY_BIN=$custom_proxy_bin"* ]]
+[[ "$custom_installed_env" == *"CLAUDEX_CODEX_AUTH_DIR=$custom_auth_dir"* ]]
+invocation_proxy_config="$tmp/invocation-claudex-proxy.yaml"
+invocation_proxy_bin="$tmp/invocation-claudex-proxy"
+invocation_auth_dir="$tmp/invocation-claudex-auth"
+HOME="$install_home" PATH="$tmp/bin:$PATH" \
+  CLAUDEX_PROXY_TOKEN='invocation-test-token' CLAUDEX_PROXY_URL='http://127.0.0.1:9234' \
+  CLAUDEX_PROXY_CONFIG="$invocation_proxy_config" CLAUDEX_PROXY_BIN="$invocation_proxy_bin" \
+  CLAUDEX_CODEX_AUTH_DIR="$invocation_auth_dir" CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 \
+  CLAUDEX_SKIP_SERVICE_START=1 "$root/install.sh" >/dev/null
+invocation_installed_env=$(<"$install_home/.config/claudex/env")
+[[ "$invocation_installed_env" == *'CLAUDEX_PROXY_TOKEN=invocation-test-token'* ]]
+[[ "$invocation_installed_env" == *'CLAUDEX_PROXY_URL=http://127.0.0.1:9234'* ]]
+[[ "$invocation_installed_env" == *"CLAUDEX_PROXY_CONFIG=$invocation_proxy_config"* ]]
+[[ "$invocation_installed_env" == *"CLAUDEX_PROXY_BIN=$invocation_proxy_bin"* ]]
+[[ "$invocation_installed_env" == *"CLAUDEX_CODEX_AUTH_DIR=$invocation_auth_dir"* ]]
+if HOME="$install_home" PATH="$tmp/bin:$PATH" CLAUDEX_PROXY_PORT='invalid-port' \
+  CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 CLAUDEX_SKIP_SERVICE_START=1 "$root/install.sh" >/dev/null 2>&1; then
+  printf '%s\n' 'expected invalid installer proxy port to fail' >&2
+  exit 1
+fi
+
 package_home="$tmp/package home"
 mkdir -p "$package_home/.codex"
 cp "$tmp/home/.codex/auth.json" "$package_home/.codex/auth.json"
@@ -629,6 +622,22 @@ jq -e --arg version "$(node -p "require('$root/package.json').version")" \
   '.package == "claudex-codex" and .version == $version' \
   "$package_home/.config/claudex/package-manager.json" >/dev/null
 [[ -x "$package_home/.local/bin/claudex" ]]
+rm -f "$package_home/.config/claudex/preload.cjs"
+HOME="$package_home" PATH="$tmp/bin:$PATH" \
+  CLAUDEX_PROXY_TOKEN='package-test-token' CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 \
+  CLAUDEX_SKIP_SERVICE_START=1 node "$root/bin/claudex-package.mjs" --version >/dev/null
+[[ -r "$package_home/.config/claudex/preload.cjs" ]]
+
+package_conflict_home="$tmp/package conflict home"
+package_conflict_bin="$tmp/package-manager-bin"
+mkdir -p "$package_conflict_home/.codex" "$package_conflict_bin"
+cp "$tmp/home/.codex/auth.json" "$package_conflict_home/.codex/auth.json"
+ln -s "$root/bin/claudex-package.mjs" "$package_conflict_bin/claudex"
+HOME="$package_conflict_home" PATH="$tmp/bin:$PATH" CLAUDEX_BIN_DIR="$package_conflict_bin" \
+  CLAUDEX_PROXY_TOKEN='package-conflict-token' CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 \
+  CLAUDEX_SKIP_SERVICE_START=1 node "$root/bin/claudex-package.mjs" --package-setup >/dev/null
+[[ "$(readlink "$package_conflict_bin/claudex")" == "$root/bin/claudex-package.mjs" ]]
+[[ -x "$package_conflict_home/.config/claudex/package-bin/claudex" ]]
 
 auth_status=$(run_wrapper --auth-status)
 [[ "$auth_status" == *'Codex authentication: ready (shared ChatGPT session)'* ]]
@@ -706,6 +715,9 @@ fi
 foreign_resume_output=$(FAKE_CLAUDE_RESUME=1 FAKE_FOREIGN_RESUME=1 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper)
 [[ "$foreign_resume_output" == *'claudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
 [[ "$foreign_resume_output" != *'claudex --resume 223e4567-e89b-12d3-a456-426614174000'* ]]
+ambiguous_resume_output=$(FAKE_CLAUDE_RESUME=1 FAKE_SAME_CWD_RESUME=1 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper)
+[[ "$ambiguous_resume_output" != *'Resume this session with Claudex:'* ]]
+[[ "$ambiguous_resume_output" != *'claudex --resume 323e4567-e89b-12d3-a456-426614174000'* ]]
 
 direct_resume_output=$(FAKE_CLAUDE_RESUME=1 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper --claude-chrome)
 [[ "$direct_resume_output" == *'claudex --claude-chrome --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
@@ -738,6 +750,7 @@ HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUD
   "$root/claudex" update >/dev/null
 [[ "$(wc -l < "$update_log" | tr -d ' ')" == 1 ]]
 
+"$root/tests/auth-usage-regressions.sh"
 node "$root/scripts/check-docs.mjs"
 
 printf '%s\n' 'all Claudex tests passed'
