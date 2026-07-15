@@ -18,7 +18,7 @@ jobs:
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Run isolated Bash tests
         run: ./test.sh
 
@@ -26,7 +26,7 @@ jobs:
     name: windows-latest
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Run isolated PowerShell tests
         shell: powershell
         run: .\test.ps1
