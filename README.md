@@ -1,49 +1,84 @@
 # Claudex setup
 
-Private, portable backup of the Claudex launcher used to run Claude Code through a local CLIProxyAPI-backed GPT-5.6 model family.
+Private, portable setup for running Claude Code through a local CLIProxyAPI-backed GPT-5.6 model family on macOS, Linux, and Windows.
 
 ## What this config provides
 
 - GPT-5.6 Sol as the leader and default model
 - GPT-5.6 Terra for implementation and deep subagents
 - GPT-5.6 Luna for auto-mode safety classification, background work, and fast subagents
+- a clean `/model` picker with exactly one Sol, Terra, and Luna entry
 - auto mode enabled by default
 - three concurrent tools and a guarded maximum of three active agents
 - bounded retries to prevent 429 retry storms
 - 400k context accounting with automatic compaction around 280k tokens
-- full-screen terminal rendering, friendly model names, a normal mouse pointer, and a compact status line
+- full-screen rendering that hides the shell launch command while Claudex is open
+- friendly model names, a normal mouse pointer, and a compact status line
+- removal of Claude Code's hardcoded `API Usage Billing` welcome label without modifying the signed Claude binary
 - a separate `~/.config/claudex` state directory that does not modify normal Claude Code settings
 
-## New Mac installation
+## Supported platforms
 
-Prerequisites are macOS, Homebrew, GitHub CLI access to this private repository, and Claude Code's `claude` command.
+| Platform | Launcher | Installer | Status |
+| --- | --- | --- | --- |
+| macOS 13+ (Intel and Apple silicon) | Bash | `install.sh` | Fully supported |
+| Ubuntu 20.04+, Debian 10+, and compatible Linux (x64/ARM64) | Bash | `install.sh` | Fully supported |
+| Windows 10 1809+, Windows 11, and Windows Server 2019+ (x64/ARM64) | PowerShell | `install.ps1` | Fully supported |
+| WSL 1/2 | Bash | `install.sh` | Supported as Linux |
 
-```zsh
+The model UI, status line, auto mode, compaction, agent policy, banner cleanup, and local proxy behavior are shared across platforms. Claude Code itself currently supports sandboxing on macOS, Linux, and WSL2; its native Windows build does not currently provide sandboxing. That upstream difference is not something Claudex can safely emulate.
+
+## New macOS or Linux installation
+
+```bash
 git clone https://github.com/BeamoINT/claudex-setup.git
 cd claudex-setup
-./install.zsh --login
+./install.sh --login
 ```
 
-The installer adds missing `jq` and `cliproxyapi` Homebrew packages, performs the Codex OAuth login when `--login` is supplied, discovers the local CLIProxyAPI key without printing it, installs the launcher, starts the proxy service, and runs `claudex --doctor`.
+The installer adds `jq` with a supported package manager if needed, installs Claude Code with Anthropic's native installer when it is absent, and installs a checksum-verified CLIProxyAPI v7.2.77 binary when no existing proxy is available. Existing Homebrew CLIProxyAPI installs continue to use their current service and configuration.
 
-If `~/.local/bin` is not already on `PATH`, add this to `~/.zshrc`:
+If `~/.local/bin` is not already on `PATH`, add it to your Bash or Zsh profile:
 
-```zsh
+```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Updating an existing machine
+## New Windows installation
 
-```zsh
-git pull --ff-only
-./install.zsh
+Run PowerShell from the cloned repository:
+
+```powershell
+git clone https://github.com/BeamoINT/claudex-setup.git
+Set-Location claudex-setup
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Login
 ```
 
-Existing private `~/.config/claudex/env` credentials are preserved. Replaced launcher and settings files are backed up under `~/.config/claudex/backups/`.
+The native Windows installer adds `~\.local\bin` to the user `PATH`, installs Claude Code when needed, downloads the checksum-verified x64 or ARM64 CLIProxyAPI release, creates a private local-only proxy configuration, performs Codex OAuth login, and runs the same doctor checks as macOS/Linux. Claudex explicitly selects Claude Code's PowerShell tool integration on native Windows; Git Bash is not required.
+
+## Updating an existing machine
+
+macOS or Linux:
+
+```bash
+git pull --ff-only
+./install.sh
+```
+
+Windows:
+
+```powershell
+git pull --ff-only
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Existing private credentials are preserved. Replaced launchers and settings are backed up under `~/.config/claudex/backups/` on every platform. The old `./install.zsh` entry point remains as a compatibility shim on macOS.
 
 ## Usage
 
-```zsh
+The commands are the same in Bash, Zsh, PowerShell, and Command Prompt:
+
+```text
 claudex                 # Sol leader, auto mode
 claudex --terra         # start on Terra
 claudex --luna          # start on Luna
@@ -53,12 +88,22 @@ claudex --doctor        # verify proxy, models, and configuration
 
 ## Testing
 
-```zsh
-./test.zsh
+macOS and Linux:
+
+```bash
+./test.sh
 ```
 
-The test suite uses an isolated temporary home and fake proxy commands. It does not access or alter live credentials or Claude sessions.
+Windows:
+
+```powershell
+.\test.ps1
+```
+
+GitHub Actions runs the isolated suite on `macos-latest`, `ubuntu-latest`, and `windows-latest`. Tests use temporary homes and fake proxy commands; they do not access live credentials or Claude sessions.
 
 ## Security and backup boundary
 
-This repository intentionally excludes API keys, OAuth credentials, sessions, prompts, history, telemetry, usage data, caches, and machine-generated Claude state. Those files should never be committed, even to a private repository. Only reproducible configuration and installer code belong here.
+This repository intentionally excludes API keys, OAuth credentials, sessions, prompts, history, telemetry, usage data, caches, and machine-generated Claude state. Fresh installs generate a random 256-bit local proxy key and bind the proxy to `127.0.0.1`. Downloaded proxy binaries are pinned to release v7.2.77 and checked against upstream SHA-256 digests before installation.
+
+Never commit a real token, even to this private repository. Only reproducible configuration and installer code belong here.

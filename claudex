@@ -1,22 +1,23 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
-readonly config_file="$HOME/.config/claudex/env"
-readonly settings_file="${CLAUDEX_SETTINGS_FILE:-$HOME/.config/claudex/settings.json}"
-readonly curl_bin="${CLAUDEX_CURL_BIN:-/usr/bin/curl}"
+readonly claudex_config_dir="${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}"
+readonly config_file="$claudex_config_dir/env"
+readonly settings_file="${CLAUDEX_SETTINGS_FILE:-$claudex_config_dir/settings.json}"
+readonly curl_bin="${CLAUDEX_CURL_BIN:-curl}"
 
 if [[ ! -r "$config_file" ]]; then
-  print -u2 "claudex: missing $config_file; reinstall or restore the Claudex configuration."
+  printf '%s\n' "claudex: missing $config_file; reinstall or restore the Claudex configuration." >&2
   exit 1
 fi
 
 if [[ ! -r "$settings_file" ]]; then
-  print -u2 "claudex: missing $settings_file; reinstall or restore the Claudex settings."
+  printf '%s\n' "claudex: missing $settings_file; reinstall or restore the Claudex settings." >&2
   exit 1
 fi
 
 if ! command -v jq >/dev/null 2>&1; then
-  print -u2 "claudex: jq is required but was not found in PATH."
+  printf '%s\n' "claudex: jq is required but was not found in PATH." >&2
   exit 1
 fi
 
@@ -39,47 +40,47 @@ source "$config_file"
 case "$CLAUDEX_PERMISSION_MODE" in
   manual|auto|acceptEdits|dontAsk|plan) ;;
   *)
-    print -u2 "claudex: invalid CLAUDEX_PERMISSION_MODE '$CLAUDEX_PERMISSION_MODE'."
-    print -u2 "claudex: expected manual, auto, acceptEdits, dontAsk, or plan."
+    printf '%s\n' "claudex: invalid CLAUDEX_PERMISSION_MODE '$CLAUDEX_PERMISSION_MODE'." >&2
+    printf '%s\n' "claudex: expected manual, auto, acceptEdits, dontAsk, or plan." >&2
     exit 2
     ;;
 esac
 
-if [[ "$CLAUDEX_MAX_TOOL_USE_CONCURRENCY" != <-> || "$CLAUDEX_MAX_TOOL_USE_CONCURRENCY" -lt 1 ]]; then
-  print -u2 "claudex: CLAUDEX_MAX_TOOL_USE_CONCURRENCY must be a positive integer."
+if [[ ! "$CLAUDEX_MAX_TOOL_USE_CONCURRENCY" =~ ^[0-9]+$ ]] || (( CLAUDEX_MAX_TOOL_USE_CONCURRENCY < 1 )); then
+  printf '%s\n' "claudex: CLAUDEX_MAX_TOOL_USE_CONCURRENCY must be a positive integer." >&2
   exit 2
 fi
 
-if [[ "$CLAUDEX_MAX_AGENT_CONCURRENCY" != <-> || "$CLAUDEX_MAX_AGENT_CONCURRENCY" -lt 1 ]]; then
-  print -u2 "claudex: CLAUDEX_MAX_AGENT_CONCURRENCY must be a positive integer."
+if [[ ! "$CLAUDEX_MAX_AGENT_CONCURRENCY" =~ ^[0-9]+$ ]] || (( CLAUDEX_MAX_AGENT_CONCURRENCY < 1 )); then
+  printf '%s\n' "claudex: CLAUDEX_MAX_AGENT_CONCURRENCY must be a positive integer." >&2
   exit 2
 fi
 
-if [[ "$CLAUDEX_MAX_RETRIES" != <-> || "$CLAUDEX_MAX_RETRIES" -gt 15 ]]; then
-  print -u2 "claudex: CLAUDEX_MAX_RETRIES must be an integer from 0 to 15."
+if [[ ! "$CLAUDEX_MAX_RETRIES" =~ ^[0-9]+$ ]] || (( CLAUDEX_MAX_RETRIES > 15 )); then
+  printf '%s\n' "claudex: CLAUDEX_MAX_RETRIES must be an integer from 0 to 15." >&2
   exit 2
 fi
 
-if [[ "$CLAUDEX_CONTEXT_WINDOW" != <-> || "$CLAUDEX_CONTEXT_WINDOW" -lt 100000 || "$CLAUDEX_CONTEXT_WINDOW" -gt 1000000 ]]; then
-  print -u2 "claudex: CLAUDEX_CONTEXT_WINDOW must be an integer from 100000 to 1000000."
+if [[ ! "$CLAUDEX_CONTEXT_WINDOW" =~ ^[0-9]+$ ]] || (( CLAUDEX_CONTEXT_WINDOW < 100000 || CLAUDEX_CONTEXT_WINDOW > 1000000 )); then
+  printf '%s\n' "claudex: CLAUDEX_CONTEXT_WINDOW must be an integer from 100000 to 1000000." >&2
   exit 2
 fi
 
-if [[ "$CLAUDEX_AUTO_COMPACT_WINDOW" != <-> || "$CLAUDEX_AUTO_COMPACT_WINDOW" -lt 100000 || "$CLAUDEX_AUTO_COMPACT_WINDOW" -gt "$CLAUDEX_CONTEXT_WINDOW" ]]; then
-  print -u2 "claudex: CLAUDEX_AUTO_COMPACT_WINDOW must be an integer from 100000 through CLAUDEX_CONTEXT_WINDOW."
+if [[ ! "$CLAUDEX_AUTO_COMPACT_WINDOW" =~ ^[0-9]+$ ]] || (( CLAUDEX_AUTO_COMPACT_WINDOW < 100000 || CLAUDEX_AUTO_COMPACT_WINDOW > CLAUDEX_CONTEXT_WINDOW )); then
+  printf '%s\n' "claudex: CLAUDEX_AUTO_COMPACT_WINDOW must be an integer from 100000 through CLAUDEX_CONTEXT_WINDOW." >&2
   exit 2
 fi
 
 case "$CLAUDEX_MOUSE_POINTER_SHAPE" in
   pointer|default|off) ;;
   *)
-    print -u2 "claudex: CLAUDEX_MOUSE_POINTER_SHAPE must be pointer, default, or off."
+    printf '%s\n' "claudex: CLAUDEX_MOUSE_POINTER_SHAPE must be pointer, default, or off." >&2
     exit 2
     ;;
 esac
 
 # Keep Claudex model choices, sessions, and preferences isolated from normal Claude Code.
-export CLAUDE_CONFIG_DIR="${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}"
+export CLAUDE_CONFIG_DIR="$claudex_config_dir"
 
 # Claude Code's welcome banner does not use ANTHROPIC_CUSTOM_MODEL_OPTION_NAME.
 # Seed its isolated model-option cache so custom GPT IDs have friendly names in
@@ -122,6 +123,12 @@ ensure_model_display_names() {
 
 ensure_model_display_names
 
+readonly claudex_preload="$CLAUDE_CONFIG_DIR/preload.cjs"
+if [[ -r "$claudex_preload" ]]; then
+  readonly escaped_claudex_preload="${claudex_preload// /\\ }"
+  export BUN_OPTIONS="--preload $escaped_claudex_preload ${BUN_OPTIONS:-}"
+fi
+
 fetch_models() {
   "$curl_bin" --silent --show-error --fail --max-time 5 \
     -H "Authorization: Bearer ${CLAUDEX_PROXY_TOKEN}" \
@@ -139,18 +146,45 @@ proxy_ready() {
   fetch_models 2>/dev/null | models_are_valid
 }
 
+proxy_executable() {
+  if command -v cliproxyapi >/dev/null 2>&1; then
+    command -v cliproxyapi
+  elif command -v cli-proxy-api >/dev/null 2>&1; then
+    command -v cli-proxy-api
+  else
+    return 1
+  fi
+}
+
 ensure_proxy() {
   if proxy_ready; then
     return 0
   fi
 
-  if ! command -v brew >/dev/null 2>&1; then
-    print -u2 "claudex: CLIProxyAPI is not reachable and Homebrew is unavailable."
-    return 1
+  printf '%s\n' "claudex: starting the local CLIProxyAPI service..." >&2
+  local proxy_config homebrew_proxy_config=""
+  proxy_config="${CLAUDEX_PROXY_CONFIG:-$CLAUDE_CONFIG_DIR/cliproxyapi.yaml}"
+  if command -v brew >/dev/null 2>&1; then
+    homebrew_proxy_config="$(brew --prefix)/etc/cliproxyapi.conf"
   fi
-
-  print -u2 "claudex: starting the local CLIProxyAPI service..."
-  brew services start cliproxyapi >/dev/null
+  if command -v brew >/dev/null 2>&1 \
+      && brew list --formula cliproxyapi >/dev/null 2>&1 \
+      && { [[ ! -r "$proxy_config" ]] || [[ "$proxy_config" == "$homebrew_proxy_config" ]]; }; then
+    brew services start cliproxyapi >/dev/null
+  else
+    local proxy_bin log_dir
+    proxy_bin=$(proxy_executable) || {
+      printf '%s\n' "claudex: CLIProxyAPI is not reachable and no proxy executable was found." >&2
+      return 1
+    }
+    log_dir="$CLAUDE_CONFIG_DIR/logs"
+    mkdir -p "$log_dir"
+    if [[ -r "$proxy_config" ]]; then
+      nohup "$proxy_bin" -config "$proxy_config" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
+    else
+      nohup "$proxy_bin" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
+    fi
+  fi
 
   local attempt
   for attempt in {1..50}; do
@@ -160,15 +194,15 @@ ensure_proxy() {
     sleep 0.1
   done
 
-  print -u2 "claudex: local proxy did not become healthy. Run: claudex --doctor"
+  printf '%s\n' "claudex: local proxy did not become healthy. Run: claudex --doctor" >&2
   return 1
 }
 
 model_name() {
   case "$1" in
-    gpt-5.6-terra|sonnet) print "GPT-5.6 Terra" ;;
-    gpt-5.6-luna|haiku) print "GPT-5.6 Luna" ;;
-    *) print "GPT-5.6 Sol" ;;
+    gpt-5.6-terra|sonnet) printf '%s\n' "GPT-5.6 Terra" ;;
+    gpt-5.6-luna|haiku) printf '%s\n' "GPT-5.6 Luna" ;;
+    *) printf '%s\n' "GPT-5.6 Sol" ;;
   esac
 }
 
@@ -178,33 +212,39 @@ doctor() {
   local saved_model models proxy_version missing=0 model
   saved_model=$(jq -r '.model // "gpt-5.6-sol"' "$settings_file")
   models=$(fetch_models)
-  proxy_version=$(cliproxyapi -version 2>&1) || true
+  local proxy_bin
+  proxy_bin=$(proxy_executable) || proxy_bin=""
+  if [[ -n "$proxy_bin" ]]; then
+    proxy_version=$("$proxy_bin" -version 2>&1) || true
+  else
+    proxy_version=""
+  fi
   proxy_version="${proxy_version%%$'\n'*}"
   [[ -n "$proxy_version" ]] || proxy_version="unavailable"
 
-  print "Claude Code: $(claude --version 2>/dev/null || print unavailable)"
-  print "CLIProxyAPI: ${proxy_version}"
-  print "Proxy: healthy at ${CLAUDEX_PROXY_URL}"
-  print "Saved model: $(model_name "$saved_model") (${saved_model})"
-  print "Default permission mode: ${CLAUDEX_PERMISSION_MODE}"
-  print "Auto-mode classifier: ${CLAUDEX_AUTO_MODE_MODEL} (only used when auto mode is selected)"
-  print "Subagent model: ${CLAUDEX_SUBAGENT_MODEL} (Sol is reserved for the leader)"
-  print "Tool concurrency: ${CLAUDEX_MAX_TOOL_USE_CONCURRENCY}"
-  print "Agent concurrency: ${CLAUDEX_MAX_AGENT_CONCURRENCY}"
-  print "API retries: ${CLAUDEX_MAX_RETRIES}"
-  print "Context window: ${CLAUDEX_CONTEXT_WINDOW} tokens"
-  print "Auto-compact window: ${CLAUDEX_AUTO_COMPACT_WINDOW} tokens (precompute enabled)"
-  print "Terminal UI: fullscreen (launch command hidden while Claudex is open)"
-  print "Header model name: GPT-5.6 Sol"
-  print "Mouse pointer: ${CLAUDEX_MOUSE_POINTER_SHAPE}"
-  print "Isolation: Claudex config at ${CLAUDE_CONFIG_DIR}; normal Claude config is untouched"
+  printf '%s\n' "Claude Code: $(claude --version 2>/dev/null || printf unavailable)"
+  printf '%s\n' "CLIProxyAPI: ${proxy_version}"
+  printf '%s\n' "Proxy: healthy at ${CLAUDEX_PROXY_URL}"
+  printf '%s\n' "Saved model: $(model_name "$saved_model") (${saved_model})"
+  printf '%s\n' "Default permission mode: ${CLAUDEX_PERMISSION_MODE}"
+  printf '%s\n' "Auto-mode classifier: ${CLAUDEX_AUTO_MODE_MODEL} (only used when auto mode is selected)"
+  printf '%s\n' "Subagent model: ${CLAUDEX_SUBAGENT_MODEL} (Sol is reserved for the leader)"
+  printf '%s\n' "Tool concurrency: ${CLAUDEX_MAX_TOOL_USE_CONCURRENCY}"
+  printf '%s\n' "Agent concurrency: ${CLAUDEX_MAX_AGENT_CONCURRENCY}"
+  printf '%s\n' "API retries: ${CLAUDEX_MAX_RETRIES}"
+  printf '%s\n' "Context window: ${CLAUDEX_CONTEXT_WINDOW} tokens"
+  printf '%s\n' "Auto-compact window: ${CLAUDEX_AUTO_COMPACT_WINDOW} tokens (precompute enabled)"
+  printf '%s\n' "Terminal UI: fullscreen (launch command hidden while Claudex is open)"
+  printf '%s\n' "Header model name: GPT-5.6 Sol"
+  printf '%s\n' "Mouse pointer: ${CLAUDEX_MOUSE_POINTER_SHAPE}"
+  printf '%s\n' "Isolation: Claudex config at ${CLAUDE_CONFIG_DIR}; normal Claude config is untouched"
 
   for model in gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna; do
-    if print -r -- "$models" | jq -e --arg model "$model" \
+    if printf '%s\n' "$models" | jq -e --arg model "$model" \
       'any(.data[]?; .id == $model)' >/dev/null 2>&1; then
-      print "${model}: advertised"
+      printf '%s\n' "${model}: advertised"
     else
-      print -u2 "${model}: not advertised by the authenticated Codex account"
+      printf '%s\n' "${model}: not advertised by the authenticated Codex account" >&2
       missing=1
     fi
   done
@@ -222,29 +262,22 @@ ensure_proxy
 export ANTHROPIC_BASE_URL="$CLAUDEX_PROXY_URL"
 export ANTHROPIC_AUTH_TOKEN="$CLAUDEX_PROXY_TOKEN"
 
-# Map Claude Code's visible selector aliases onto the GPT-5.6 family.
-export ANTHROPIC_DEFAULT_FABLE_MODEL="gpt-5.6-sol"
+# Map one Claude Code selector alias onto each GPT-5.6 model. Registering the
+# same model through Fable, Opus, and the custom slot creates duplicate rows.
 export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.6-sol"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="gpt-5.6-terra"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-5.6-luna"
-export ANTHROPIC_DEFAULT_FABLE_MODEL_NAME="GPT-5.6 Sol"
 export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="GPT-5.6 Sol"
 export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="GPT-5.6 Terra"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="GPT-5.6 Luna"
-export ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION="Frontier capability for planning and the hardest engineering work"
 export ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION="Frontier capability for planning and the hardest engineering work"
 export ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION="Balanced intelligence, speed, and cost for everyday coding"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION="Fast, efficient model for search, triage, and mechanical tasks"
 
 readonly gpt56_capabilities="effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
-export ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
 export ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
 export ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
-export ANTHROPIC_CUSTOM_MODEL_OPTION="gpt-5.6-sol"
-export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="GPT-5.6 Sol"
-export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="Frontier capability for planning and the hardest engineering work"
-export ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
 
 # Claude Code otherwise chooses Sonnet 5 for an external-provider auto-mode classifier,
 # which Claudex maps to Terra. Pinning the classifier prevents misleading Terra outages.
