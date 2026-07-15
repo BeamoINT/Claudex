@@ -5,12 +5,31 @@ readonly claudex_config_dir="${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}"
 readonly config_file="$claudex_config_dir/env"
 readonly settings_file="${CLAUDEX_SETTINGS_FILE:-$claudex_config_dir/settings.json}"
 readonly curl_bin="${CLAUDEX_CURL_BIN:-curl}"
-readonly codex_session_helper="${CLAUDEX_CODEX_SESSION_HELPER:-$claudex_config_dir/codex-session}"
 
 if [[ ! -r "$config_file" ]]; then
   printf '%s\n' "claudex: missing $config_file; reinstall or restore the Claudex configuration." >&2
   exit 1
 fi
+
+source "$config_file"
+readonly codex_session_helper="${CLAUDEX_CODEX_SESSION_HELPER:-$claudex_config_dir/codex-session}"
+export CLAUDEX_CODEX_AUTH_DIR CLAUDEX_CODEX_SOURCE_AUTH_FILE CLAUDEX_CODEX_AUTH_FILE
+
+# Authentication recovery must keep working even when the main settings or jq
+# installation is damaged. The helper performs its own action-specific checks.
+case "${1:-}" in
+  --login|--logout|--auth-status)
+    [[ -x "$codex_session_helper" ]] || {
+      printf '%s\n' 'claudex: authentication helper is missing; reinstall Claudex.' >&2
+      exit 1
+    }
+    case "$1" in
+      --login) exec "$codex_session_helper" login ;;
+      --logout) exec "$codex_session_helper" logout ;;
+      --auth-status) exec "$codex_session_helper" status ;;
+    esac
+    ;;
+esac
 
 if [[ ! -r "$settings_file" ]]; then
   printf '%s\n' "claudex: missing $settings_file; reinstall or restore the Claudex settings." >&2
@@ -22,10 +41,8 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-source "$config_file"
-
 : "${CLAUDEX_PROXY_TOKEN:?CLAUDEX_PROXY_TOKEN is not configured}"
-: "${CLAUDEX_PROXY_URL:=http://127.0.0.1:8317}"
+: "${CLAUDEX_PROXY_URL:=http://127.0.0.1:8318}"
 : "${CLAUDEX_MODEL:=gpt-5.6-sol}"
 : "${CLAUDEX_PERMISSION_MODE:=auto}"
 : "${CLAUDEX_AUTO_MODE_MODEL:=gpt-5.6-luna}"
@@ -157,9 +174,11 @@ ensure_model_display_names() {
 
   if [[ -s "$state_file" ]] && jq -e --argjson managed "$managed_options" '
     . as $root
-    | ($managed | map({key: .value, value: .label}) | from_entries) as $labels
-    | all(.additionalModelOptionsCache[]?; ($labels[.value] // .label) == .label)
-    and all($managed[]; .value as $value | any($root.additionalModelOptionsCache[]?; .value == $value))
+    | all($managed[] as $expected;
+        [$root.additionalModelOptionsCache[]? | select(.value == $expected.value)] as $matches
+        | ($matches | length) == 1
+        and $matches[0].label == $expected.label
+        and $matches[0].description == $expected.description)
   ' "$state_file" >/dev/null 2>&1; then
     return 0
   fi
@@ -183,12 +202,6 @@ ensure_model_display_names() {
 }
 
 ensure_model_display_names
-
-readonly claudex_preload="$CLAUDE_CONFIG_DIR/preload.cjs"
-if [[ -r "$claudex_preload" ]]; then
-  readonly escaped_claudex_preload="${claudex_preload// /\\ }"
-  export BUN_OPTIONS="--preload $escaped_claudex_preload ${BUN_OPTIONS:-}"
-fi
 
 fetch_models() {
   printf 'Authorization: Bearer %s\n' "$CLAUDEX_PROXY_TOKEN" | \
@@ -283,7 +296,18 @@ maybe_update_claude() {
   [[ "$last" =~ ^[0-9]+$ ]] || last=0
   (( now - last >= CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS )) || return 0
   mkdir -p "$update_dir"
-  if mkdir "$update_dir/lock" 2>/dev/null; then
+  local lock_dir="$update_dir/lock" lock_mtime=0
+  if [[ -d "$lock_dir" ]]; then
+    if stat -f '%m' "$lock_dir" >/dev/null 2>&1; then
+      lock_mtime=$(stat -f '%m' "$lock_dir")
+    else
+      lock_mtime=$(stat -c '%Y' "$lock_dir" 2>/dev/null || printf 0)
+    fi
+    if [[ "$lock_mtime" =~ ^[0-9]+$ ]] && (( now - lock_mtime >= 3600 )); then
+      rmdir "$lock_dir" 2>/dev/null || true
+    fi
+  fi
+  if mkdir "$lock_dir" 2>/dev/null; then
     (
       if claude update >"$update_dir/claude-update.log" 2>&1; then
         local completed temporary
@@ -292,7 +316,7 @@ maybe_update_claude() {
         printf '%s\n' "$completed" > "$temporary"
         mv -f "$temporary" "$stamp"
       fi
-      rmdir "$update_dir/lock" 2>/dev/null || true
+      rmdir "$lock_dir" 2>/dev/null || true
     ) &
   fi
 }
@@ -321,13 +345,15 @@ load_claude_capabilities() {
 model_name() {
   case "$1" in
     opusplan|solplan) printf '%s\n' "GPT-5.6 Solplan" ;;
+    gpt-5.6-sol|opus|fable) printf '%s\n' "GPT-5.6 Sol" ;;
     gpt-5.6-terra|sonnet) printf '%s\n' "GPT-5.6 Terra" ;;
     gpt-5.6-luna|haiku) printf '%s\n' "GPT-5.6 Luna" ;;
-    *) printf '%s\n' "GPT-5.6 Sol" ;;
+    *) printf '%s\n' "${1:-Unknown model}" ;;
   esac
 }
 
 doctor() {
+  load_claude_capabilities
   ensure_proxy
 
   local saved_model models proxy_version missing=0 model
@@ -367,7 +393,7 @@ doctor() {
   printf '%s\n' "Plan mode policy: ${CLAUDEX_PLAN_MODE_POLICY} (implementation-first unless planning is genuinely required)"
   printf '%s\n' "Rendering: no-flicker mode with native terminal cursor"
   printf '%s\n' "Terminal UI: fullscreen (launch command hidden while Claudex is open)"
-  printf '%s\n' "Header model name: GPT-5.6 Sol"
+  printf '%s\n' "Header model name: $(model_name "$saved_model")"
   printf '%s\n' "Mouse pointer: ${CLAUDEX_MOUSE_POINTER_SHAPE}"
   printf '%s\n' "Isolation: Claudex config at ${CLAUDE_CONFIG_DIR}; normal Claude config is untouched"
 
@@ -383,30 +409,6 @@ doctor() {
 
   return "$missing"
 }
-
-if [[ "${1:-}" == "--login" ]]; then
-  [[ -x "$codex_session_helper" ]] || {
-    printf '%s\n' 'claudex: authentication helper is missing; reinstall Claudex.' >&2
-    exit 1
-  }
-  exec "$codex_session_helper" login
-fi
-
-if [[ "${1:-}" == "--logout" ]]; then
-  [[ -x "$codex_session_helper" ]] || {
-    printf '%s\n' 'claudex: authentication helper is missing; reinstall Claudex.' >&2
-    exit 1
-  }
-  exec "$codex_session_helper" logout
-fi
-
-if [[ "${1:-}" == "--auth-status" ]]; then
-  [[ -x "$codex_session_helper" ]] || {
-    printf '%s\n' 'claudex: authentication helper is missing; reinstall Claudex.' >&2
-    exit 1
-  }
-  exec "$codex_session_helper" status
-fi
 
 if [[ "${1:-}" == "--doctor" ]]; then
   doctor
@@ -481,7 +483,13 @@ while (( $# > 0 )); do
       forwarded_args+=("$@")
       break
       ;;
-    *) forwarded_args+=("$1") ;;
+    *)
+      # Claudex-only options form a leading prefix. Once Claude's own
+      # arguments begin, preserve every remaining token byte-for-byte so a
+      # prompt or option value such as "--terra" is never consumed by us.
+      forwarded_args+=("$@")
+      break
+      ;;
   esac
   shift
 done
@@ -533,8 +541,19 @@ if (( direct_chrome )); then
   forwarded_args=(--chrome "${forwarded_args[@]}")
 fi
 
+# The preload intentionally rewrites GPT-backed Claudex UI. Never inject it
+# into first-party Claude/Chrome or maintenance commands.
+readonly claudex_preload="$claudex_config_dir/preload.cjs"
+if (( use_proxy )) && [[ -r "$claudex_preload" ]]; then
+  readonly escaped_claudex_preload="${claudex_preload// /\\ }"
+  export BUN_OPTIONS="--preload $escaped_claudex_preload ${BUN_OPTIONS:-}"
+fi
+
 load_claude_capabilities
-maybe_update_claude
+case "${forwarded_args[0]:-}" in
+  update|upgrade) ;;
+  *) maybe_update_claude ;;
+esac
 
 if (( use_proxy )); then
   ensure_proxy
@@ -693,21 +712,27 @@ if (( rewrite_resume_footer && claude_exit == 0 )); then
   project_key=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
   project_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$project_key"
   latest_session_file=""
+  session_candidate_count=0
   if [[ -d "$project_dir" ]]; then
     while IFS= read -r candidate; do
+      session_candidate_count=$(( session_candidate_count + 1 ))
       if [[ -z "$latest_session_file" || "$candidate" -nt "$latest_session_file" ]]; then
         latest_session_file="$candidate"
       fi
     done < <(find "$project_dir" -maxdepth 1 -type f -name '*.jsonl' -newer "$resume_marker" -print 2>/dev/null)
   fi
-  if [[ -n "$latest_session_file" ]]; then
+  if (( session_candidate_count == 1 )) && [[ -n "$latest_session_file" ]]; then
     session_id="${latest_session_file##*/}"
     session_id="${session_id%.jsonl}"
     if [[ "$session_id" =~ ^[0-9a-fA-F-]{36}$ ]]; then
       # Claude Code prints its hardcoded binary name after the JavaScript
       # runtime has already shut down. Replace those final two terminal rows
       # from the launcher, which still owns the authenticated resume path.
-      printf '\033[2A\033[JResume this session with:\nclaudex --resume %s\n' "$session_id"
+      if (( direct_chrome )); then
+        printf '\033[2A\033[JResume this session with:\nclaudex --claude-chrome --resume %s\n' "$session_id"
+      else
+        printf '\033[2A\033[JResume this session with:\nclaudex --resume %s\n' "$session_id"
+      fi
     fi
   fi
 fi

@@ -55,18 +55,25 @@ const streamedPhrases = [
   'Opus in plan mode, else Sonnet',
   'Use Opus in plan mode, Sonnet otherwise',
   'claude --resume',
+  'claude -resume',
+  'claude -r',
 ];
 
 function trailingManagedPrefixStart(text) {
   const visible = [];
   const rawStarts = [];
   const ansi = new RegExp(csi, 'y');
+  let incompleteAnsiStart = -1;
   for (let index = 0; index < text.length;) {
     ansi.lastIndex = index;
     const match = ansi.exec(text);
     if (match) {
       index += match[0].length;
       continue;
+    }
+    if (text[index] === '\x1b' && /^\x1b\[[0-?]*[ -\/]*$/.test(text.slice(index))) {
+      incompleteAnsiStart = index;
+      break;
     }
     rawStarts.push(index);
     visible.push(text[index]);
@@ -76,7 +83,7 @@ function trailingManagedPrefixStart(text) {
   let longest = 0;
   for (const phrase of streamedPhrases) {
     const maximum = Math.min(rendered.length, phrase.length - 1);
-    for (let length = maximum; length >= 4; length -= 1) {
+    for (let length = maximum; length >= 1; length -= 1) {
       if (length <= longest) break;
       if (phrase.startsWith(rendered.slice(-length))) {
         longest = length;
@@ -84,7 +91,10 @@ function trailingManagedPrefixStart(text) {
       }
     }
   }
-  return longest > 0 ? rawStarts[rendered.length - longest] : -1;
+  const phraseStart = longest > 0 ? rawStarts[rendered.length - longest] : -1;
+  if (phraseStart < 0) return incompleteAnsiStart;
+  if (incompleteAnsiStart < 0) return phraseStart;
+  return Math.min(phraseStart, incompleteAnsiStart);
 }
 
 // Claude Code's plan/execution switching is implemented by its built-in
@@ -93,26 +103,38 @@ function trailingManagedPrefixStart(text) {
 // TTY input, replace only the final word just before Enter. For a pasted full
 // command, rewrite it before Claude Code sees the chunk.
 let currentInputLine = '';
+function updateModelMode(line) {
+  const match = line.trim().match(/^\/model(?:[ \t]+(.+))?$/i);
+  if (!match) return;
+  if ((match[1] || '').trim().toLowerCase() === 'solplan') process.env.CLAUDEX_MODEL_MODE = 'solplan';
+  else delete process.env.CLAUDEX_MODEL_MODE;
+}
+
 function trackInputLine(text) {
   for (const character of text) {
-    if (character === '\r' || character === '\n') currentInputLine = '';
-    else if (character === '\x15') currentInputLine = '';
+    if (character === '\r' || character === '\n') {
+      updateModelMode(currentInputLine);
+      currentInputLine = '';
+    } else if (character === '\x03' || character === '\x15') currentInputLine = '';
     else if (character === '\x7f' || character === '\b') currentInputLine = currentInputLine.slice(0, -1);
     else if (character >= ' ' && character !== '\x7f') currentInputLine += character;
   }
 }
 
 function rewriteSolplanInput(text) {
-  const pasted = text.replace(/(^|[\r\n])\/model[ \t]+solplan(?=[\r\n])/gi, '$1/model opusplan');
+  const submittedModelCommands = text.match(/(?:^|[\r\n])\/model[ \t]+[^\r\n]*(?=[\r\n])/gi) || [];
+  for (const command of submittedModelCommands) updateModelMode(command.replace(/^[\r\n]/, ''));
+  const pasted = text.replace(/(^|[\r\n])\/model[ \t]+solplan[ \t]*(?=[\r\n])/gi, '$1/model opusplan');
   if (pasted !== text) {
-    process.env.CLAUDEX_MODEL_MODE = 'solplan';
     trackInputLine(pasted);
+    process.env.CLAUDEX_MODEL_MODE = 'solplan';
     return pasted;
   }
-  if (/^[\r\n]+$/.test(text) && currentInputLine.trim().toLowerCase() === '/model solplan') {
+  if (/^[\r\n]+$/.test(text) && /^\/model[ \t]+solplan[ \t]*$/i.test(currentInputLine)) {
+    const replaceLength = currentInputLine.match(/solplan[ \t]*$/i)[0].length;
     process.env.CLAUDEX_MODEL_MODE = 'solplan';
     currentInputLine = '';
-    return `${'\x7f'.repeat('solplan'.length)}opusplan${text}`;
+    return `${'\x7f'.repeat(replaceLength)}opusplan${text}`;
   }
   trackInputLine(text);
   return text;
@@ -179,16 +201,16 @@ function installOutputFilter(stream) {
     const decoded = buffer ? chunk.toString(characterEncoding) : chunk;
     if (typeof decoded !== 'string') return originalWrite(chunk, encoding, callback);
 
-    const filtered = filterClaudexOutput(pending + decoded);
-    const pendingStart = trailingManagedPrefixStart(filtered);
-    const ready = pendingStart >= 0 ? filtered.slice(0, pendingStart) : filtered;
-    pending = pendingStart >= 0 ? filtered.slice(pendingStart) : '';
+    const combined = pending + decoded;
+    const pendingStart = trailingManagedPrefixStart(combined);
+    const ready = filterClaudexOutput(pendingStart >= 0 ? combined.slice(0, pendingStart) : combined);
+    pending = pendingStart >= 0 ? combined.slice(pendingStart) : '';
     chunk = buffer ? Buffer.from(ready, characterEncoding) : ready;
     return originalWrite(chunk, encoding, callback);
   };
 
   process.on('exit', () => {
-    if (pending) originalWrite(pending);
+    if (pending) originalWrite(filterClaudexOutput(pending));
     pending = '';
   });
 }

@@ -10,6 +10,7 @@ printf '%s\n' 'CLAUDEX_PROXY_TOKEN=test-token' "CLAUDEX_CODEX_AUTH_DIR=$tmp/home
 cp "$root/settings.json" "$tmp/home/.config/claudex/settings.json"
 cp "$root/usage-limit" "$tmp/home/.config/claudex/usage-limit"
 cp "$root/codex-session" "$tmp/home/.config/claudex/codex-session"
+cp "$root/preload.cjs" "$tmp/home/.config/claudex/preload.cjs"
 chmod +x "$tmp/home/.config/claudex/codex-session"
 cat > "$tmp/home/.codex/auth.json" <<'EOF'
 {"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T01:00:00Z","tokens":{"access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"codex-source-id","account_id":"account-test"}}
@@ -44,16 +45,24 @@ if [[ "${1:-}" == "--help" ]]; then
   printf '%s\n' '--model --agents --append-system-prompt --permission-mode --settings --effort'
   exit
 fi
-if [[ "${1:-}" == "update" ]]; then exit 0; fi
+if [[ "${1:-}" == "update" ]]; then
+  [[ -z "${FAKE_UPDATE_LOG:-}" ]] || printf '%s\n' "$$" >> "$FAKE_UPDATE_LOG"
+  exit "${FAKE_UPDATE_EXIT:-0}"
+fi
 if [[ "${FAKE_CLAUDE_RESUME:-0}" == 1 ]]; then
   project_key=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
-  project_dir="${CLAUDE_CONFIG_DIR}/projects/$project_key"
+  project_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$project_key"
   mkdir -p "$project_dir"
   printf '%s\n' '{}' > "$project_dir/123e4567-e89b-12d3-a456-426614174000.jsonl"
+  if [[ "${FAKE_FOREIGN_RESUME:-0}" == 1 ]]; then
+    sleep 0.1
+    printf '%s\n' '{}' > "$project_dir/223e4567-e89b-12d3-a456-426614174000.jsonl"
+  fi
   printf '%s\n' 'Resume this session with:'
   printf '%s\n' 'claude --resume 123e4567-e89b-12d3-a456-426614174000'
   exit
 fi
+[[ -z "${FAKE_CLAUDE_DELAY:-}" ]] || sleep "$FAKE_CLAUDE_DELAY"
 printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
 printf '%s\n' "BG=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
 printf '%s\n' "SUBAGENT=${CLAUDE_CODE_SUBAGENT_MODEL}"
@@ -68,13 +77,14 @@ printf '%s\n' "OPUS_NAME=${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME}"
 printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
 printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
+printf '%s\n' "BUN=${BUN_OPTIONS:-}"
 printf '%s\n' "ARGS=$*"
 EOF
 cat > "$tmp/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${FAKE_CODEX_LOGGED_OUT:-0}" == 1 ]]; then exit 1; fi
 if [[ "${1:-}" == login && "${2:-}" == status ]]; then exit 0; fi
-if [[ "${1:-}" == logout ]]; then exit 0; fi
+if [[ "${1:-}" == logout ]]; then exit "${FAKE_CODEX_LOGOUT_EXIT:-0}"; fi
 if [[ "${1:-}" == -c && "${3:-}" == login ]]; then exit 0; fi
 [[ "${1:-}" == app-server ]] || exit 2
 while IFS= read -r line; do
@@ -137,6 +147,14 @@ jq -e '
   and any(.additionalModelOptionsCache[]?; .value == "gpt-5.6-luna" and .label == "GPT-5.6 Luna")
   and any(.additionalModelOptionsCache[]?; .value == "opusplan" and .label == "GPT-5.6 Solplan")
 ' "$state_file" >/dev/null
+jq '.additionalModelOptionsCache += [{"value":"gpt-5.6-sol","label":"GPT-5.6 Sol","description":"stale duplicate"}]' \
+  "$state_file" > "$tmp/duplicated-model-cache.json"
+mv "$tmp/duplicated-model-cache.json" "$state_file"
+run_wrapper --version >/dev/null
+jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $sol
+  | ($sol | length) == 1
+  and $sol[0].description == "Frontier capability for planning and the hardest engineering work"' \
+  "$state_file" >/dev/null
 [[ "$default_output" == *'AUTO=gpt-5.6-luna'* ]]
 [[ "$default_output" == *'BG=gpt-5.6-luna'* ]]
 [[ "$default_output" == *'SUBAGENT=gpt-5.6-terra'* ]]
@@ -148,6 +166,8 @@ jq -e '
 [[ "$default_output" == *'ACCESSIBILITY=1'* ]]
 [[ "$default_output" == *'OPUS=gpt-5.6-sol'* ]]
 [[ "$default_output" == *'OPUS_NAME=GPT-5.6 Sol'* ]]
+[[ "$default_output" == *'BASE=http://127.0.0.1:8318'* ]]
+[[ "$default_output" == *"BUN=--preload $tmp/home/.config/claudex/preload.cjs"* ]]
 [[ "$default_output" == *'--permission-mode auto'* ]]
 [[ "$default_output" == *'--model gpt-5.6-terra'* ]]
 [[ "$default_output" == *'Do not create a team, spawn or delegate to additional agents'* ]]
@@ -230,6 +250,13 @@ explicit_agents_output=$(run_wrapper --agents '{}' test-prompt)
 chrome_output=$(run_wrapper --claude-chrome --print chrome-test)
 [[ "$chrome_output" == *'ARGS=--chrome --print chrome-test'* ]]
 [[ "$chrome_output" == *$'CONFIG=\n'* ]]
+[[ "$chrome_output" == *$'BUN=\n'* ]]
+
+prompt_flag_output=$(run_wrapper --print --terra)
+[[ "$prompt_flag_output" == *' --print --terra'* ]]
+[[ "$prompt_flag_output" != *'--model gpt-5.6-terra'* ]]
+option_value_output=$(run_wrapper --append-system-prompt --manual --print test-prompt)
+[[ "$option_value_output" == *'--append-system-prompt --manual --print test-prompt'* ]]
 
 doctor_output=$(run_wrapper --doctor)
 [[ "$doctor_output" == *'CLIProxyAPI: CLIProxyAPI test'* ]]
@@ -252,6 +279,22 @@ doctor_output=$(run_wrapper --doctor)
 [[ "$doctor_output" == *'Mouse pointer: pointer'* ]]
 [[ "$doctor_output" == *'gpt-5.6-terra: advertised'* ]]
 [[ "$doctor_output" != *'extra version detail'* ]]
+
+cp "$tmp/home/.config/claudex/settings.json" "$tmp/settings-before-unknown.json"
+jq '.model = "gpt-unrecognized"' "$tmp/settings-before-unknown.json" > "$tmp/home/.config/claudex/settings.json"
+unknown_doctor=$(run_wrapper --doctor)
+[[ "$unknown_doctor" == *'Saved model: gpt-unrecognized (gpt-unrecognized)'* ]]
+[[ "$unknown_doctor" == *'Header model name: gpt-unrecognized'* ]]
+mv "$tmp/settings-before-unknown.json" "$tmp/home/.config/claudex/settings.json"
+
+mv "$tmp/bin/claude" "$tmp/bin/claude.off"
+if HOME="$tmp/home" PATH="$tmp/bin:/opt/homebrew/bin:/usr/bin:/bin" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  "$root/claudex" --doctor >"$tmp/no-claude.out" 2>"$tmp/no-claude.err"; then
+  printf '%s\n' 'expected doctor without Claude Code to fail' >&2
+  exit 1
+fi
+mv "$tmp/bin/claude.off" "$tmp/bin/claude"
+grep -F 'Claude Code was not found' "$tmp/no-claude.err" >/dev/null
 
 usage_output=$(run_wrapper --usage-limit)
 [[ "$usage_output" == *'Codex usage limits (Pro plan)'* ]]
@@ -306,6 +349,8 @@ selected_output=$(run_wrapper --account private@example.com)
 auto_account_output=$(run_wrapper --account auto)
 [[ "$auto_account_output" == *'automatic'* ]]
 [[ ! -e "$tmp/home/.config/claudex/codex-usage-account" ]]
+[[ ! -e "$tmp/home/.config/claudex/usage-cache/summary" ]]
+FAKE_USAGE_FAIL=1 run_wrapper --usage-limit >/dev/null
 
 if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
   CLAUDEX_PERMISSION_MODE=broken "$root/claudex" >/dev/null 2>&1; then
@@ -389,6 +434,43 @@ filtered_resume=$(printf '%s' "$resume_frame" | node --require "$root/preload.cj
 filtered_resume_stderr=$(node --require "$root/preload.cjs" -e 'process.stderr.write(process.argv[1])' "$resume_frame" 2>&1)
 [[ "$filtered_resume_stderr" == *'claudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
 
+node - "$root/preload.cjs" <<'NODE'
+const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const preload = process.argv[2];
+for (const [source, expected] of [
+  ['Opus Plan Mode', 'GPT-5.6 Solplan'],
+  ['Opus Plan', 'GPT-5.6 Solplan'],
+  ['· API Usage Billing', ''],
+  ['claude --resume abc', 'claudex --resume abc'],
+]) {
+  for (let split = 1; split < source.length; split += 1) {
+    const code = `const s=${JSON.stringify(source)},n=${split};process.stdout.write(s.slice(0,n));process.stdout.write(s.slice(n));`;
+    const result = spawnSync(process.execPath, ['--require', preload, '-e', code], { encoding: 'utf8' });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, expected, `${source} split at ${split}`);
+  }
+}
+const ansiCode = 'process.stdout.write("Opus\\x1b[");process.stdout.write("5G Plan Mode")';
+const ansi = spawnSync(process.execPath, ['--require', preload, '-e', ansiCode], { encoding: 'utf8' });
+assert.equal(ansi.stdout.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, ''), 'GPT-5.6 Solplan');
+NODE
+
+solplan_input_regression=$(CLAUDEX_TEST_TTY_INPUT=1 node - "$root/preload.cjs" <<'NODE'
+const assert = require('node:assert/strict');
+const preload = require(process.argv[2]);
+assert.equal(preload.rewriteSolplanInput('/model solplan \r'), '/model opusplan\r');
+assert.equal(process.env.CLAUDEX_MODEL_MODE, 'solplan');
+assert.equal(preload.rewriteSolplanInput('/model gpt-5.6-terra\r'), '/model gpt-5.6-terra\r');
+assert.equal(process.env.CLAUDEX_MODEL_MODE, undefined);
+preload.rewriteSolplanInput('/model solplan');
+preload.rewriteSolplanInput('\x03');
+assert.equal(preload.rewriteSolplanInput('\r'), '\r');
+process.stdout.write('ok');
+NODE
+)
+[[ "$solplan_input_regression" == ok ]]
+
 solplan_picker='Opus Plan Mode · Use Opus in plan mode, Sonnet otherwise'
 filtered_solplan=$(printf '%s' "$solplan_picker" | node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
 [[ "$filtered_solplan" == *'GPT-5.6 Solplan'* ]]
@@ -438,5 +520,61 @@ if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUD
   exit 1
 fi
 grep -F 'Codex is logged out. Run `codex login` (or `claudex --login`) and retry.' "$tmp/logged-out.stderr" >/dev/null
+
+bridge_file="$tmp/home/.cli-proxy-api/codex-claudex-managed.json"
+cat > "$bridge_file" <<'EOF'
+{"type":"codex","access_token":"disabled-access","refresh_token":"disabled-refresh","account_id":"account-test","last_refresh":"2099-01-01T00:00:00Z","disabled":true,"expired":true}
+EOF
+run_wrapper --auth-status >/dev/null
+jq -e '.access_token == "codex-source-access" and .disabled == false and .expired == false' "$bridge_file" >/dev/null || {
+  printf '%s\n' 'disabled bridge credential was not repaired' >&2
+  jq '{access_token, disabled, expired, last_refresh}' "$bridge_file" >&2
+  exit 1
+}
+
+if HOME="$tmp/home" PATH="$tmp/bin:$PATH" FAKE_CODEX_LOGOUT_EXIT=9 \
+  "$root/claudex" --logout >/dev/null 2>&1; then
+  printf '%s\n' 'expected failed Codex logout to propagate' >&2
+  exit 1
+fi
+[[ ! -e "$bridge_file" ]]
+
+cat > "$tmp/home/.cli-proxy-api/codex-disabled.json" <<'EOF'
+{"type":"codex","access_token":"disabled","account_id":"disabled-account","email":"disabled@example.com","disabled":true}
+EOF
+disabled_accounts=$(run_wrapper --accounts)
+[[ "$disabled_accounts" == *'disabled@example.com (disabled)'* ]]
+if run_wrapper --account disabled@example.com >/dev/null 2>&1; then
+  printf '%s\n' 'expected disabled usage account selection to fail' >&2
+  exit 1
+fi
+
+foreign_resume_output=$(FAKE_CLAUDE_RESUME=1 FAKE_FOREIGN_RESUME=1 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper)
+[[ "$foreign_resume_output" != *$'\033[2A\033[JResume this session with:'* ]]
+
+direct_resume_output=$(FAKE_CLAUDE_RESUME=1 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper --claude-chrome)
+[[ "$direct_resume_output" == *'claudex --claude-chrome --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
+
+update_home="$tmp/update-home"
+mkdir -p "$update_home/.config/claudex" "$update_home/.codex" "$update_home/.cli-proxy-api"
+cp "$root/settings.json" "$update_home/.config/claudex/settings.json"
+cp "$root/codex-session" "$update_home/.config/claudex/codex-session"
+cp "$root/preload.cjs" "$update_home/.config/claudex/preload.cjs"
+chmod +x "$update_home/.config/claudex/codex-session"
+cp "$tmp/home/.codex/auth.json" "$update_home/.codex/auth.json"
+printf '%s\n' 'CLAUDEX_PROXY_TOKEN=test-token' "CLAUDEX_CODEX_AUTH_DIR=$update_home/.cli-proxy-api" > "$update_home/.config/claudex/env"
+update_dir="$update_home/.config/claudex/update"
+mkdir -p "$update_dir/lock"
+touch -t 200001010000 "$update_dir/lock"
+update_log="$tmp/update.log"
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=0 FAKE_UPDATE_LOG="$update_log" \
+  FAKE_CLAUDE_DELAY=0.2 "$root/claudex" test-prompt >/dev/null
+for _ in {1..50}; do [[ -s "$update_log" ]] && break; sleep 0.02; done
+[[ -s "$update_log" ]]
+rm -f "$update_log" "$update_dir/last-success"
+rmdir "$update_dir/lock" 2>/dev/null || true
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=0 FAKE_UPDATE_LOG="$update_log" \
+  "$root/claudex" update >/dev/null
+[[ "$(wc -l < "$update_log" | tr -d ' ')" == 1 ]]
 
 printf '%s\n' 'all Claudex tests passed'

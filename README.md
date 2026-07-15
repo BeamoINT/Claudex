@@ -23,7 +23,7 @@ Download-and-run compatibility layer for using the Codex GPT-5.6 model family in
 - full-screen rendering that hides the shell launch command while Claudex is open
 - friendly model names, no-flicker rendering, a native terminal cursor, a normal mouse pointer, and a compact status line
 - removal of Claude Code's hardcoded `API Usage Billing` welcome label without modifying the signed Claude binary
-- resume hints rewritten to `claudex --resume <session>` so resumed work stays on the same Codex-backed path
+- resume hints rewritten to `claudex --resume <session>` (or `claudex --claude-chrome --resume <session>`) so resumed work stays on the same authenticated path
 - automatic Codex login synchronization with clear logged-out recovery through `claudex --login`
 - daily non-blocking Claude Code update checks plus runtime capability detection for new Claude Code releases
 - conservative plan-mode tuning that implements concrete requests directly and reserves plan mode for explicit plans or material decisions
@@ -133,6 +133,8 @@ Inside `/model`, choose **GPT-5.6 Solplan** or enter `/model solplan`. Claudex r
 `--max-effort` and `--ultracode` are intentionally separate. Max effort passes Claude Code's native `--effort max`. Ultracode enables the session-only `ultracode` and `workflows` settings and uses xhigh reasoning, matching Claude Code's own implementation. Explicit `--effort` or `--settings` flags are rejected when combined with either shortcut so a later argument cannot silently disable the requested mode.
 
 Claudex forwards unrecognized Claude Code options and subcommands. It does not inject its leader prompt, custom agents, or permission mode into `--bare`, `--safe-mode`, or maintenance commands such as `mcp`, `plugin`, `auth`, `update`, and `doctor`. At launch it reads the installed Claude Code capability list and only injects supported optional switches. Claude Code's own updater is checked in the background every 24 hours by default, while installation performs an immediate update check. See the [Claude Code compatibility audit](docs/claude-code-compatibility.md) for the tested feature matrix and upstream boundaries.
+
+Put Claudex-specific launch switches before the first Claude Code argument, for example `claudex --terra --print "prompt"`. After the first forwarded Claude argument, every remaining token is preserved literally; this prevents prompt text or upstream option values such as `--terra` and `--manual` from being mistaken for Claudex switches.
 
 ## Claude in Chrome
 

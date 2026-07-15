@@ -59,6 +59,8 @@ sync_session() {
     .type == "codex"
     and (.access_token | type == "string" and length > 0)
     and .account_id == $source[0].tokens.account_id
+    and ((.disabled // false) != true)
+    and ((.expired // false) != true)
     and ((.last_refresh // "") | tostring) >= (($source[0].last_refresh // "") | tostring)
   ' "$bridge_auth_file" >/dev/null 2>&1; then
     should_write=0
@@ -100,8 +102,13 @@ logout() {
     fail 'Codex CLI was not found; the local Claudex bridge session was cleared.'
     return 10
   }
-  codex logout
+  local logout_status=0
+  codex logout || logout_status=$?
   clear_bridge_session
+  if (( logout_status != 0 )); then
+    fail 'Codex logout failed, but the local Claudex bridge session was cleared.'
+    return "$logout_status"
+  fi
   printf '%s\n' 'Codex and Claudex are logged out.'
 }
 

@@ -51,6 +51,20 @@ function Get-Property($Object, [string] $Name, $Default = $null) {
     return $value
 }
 
+function Clear-UsageCache {
+    foreach ($path in @($cacheFile, $summaryFile, $lastAttemptFile, $lastSuccessFile)) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
+}
+
+function Test-UsableCodexCredential($Credential) {
+    return (Get-Property $Credential 'type' '') -eq 'codex' -and
+        -not [string]::IsNullOrWhiteSpace([string] (Get-Property $Credential 'access_token' '')) -and
+        -not [bool] (Get-Property $Credential 'disabled' $false) -and
+        -not [bool] (Get-Property $Credential 'expired' $false)
+}
+
 function Get-ProxyAuthDirectory {
     if ($env:CLAUDEX_CODEX_AUTH_DIR) { return $env:CLAUDEX_CODEX_AUTH_DIR }
     $proxyConfig = if ($env:CLAUDEX_PROXY_CONFIG) { $env:CLAUDEX_PROXY_CONFIG } else { Join-Path $configDir 'cliproxyapi.yaml' }
@@ -65,6 +79,8 @@ function Get-ProxyAuthDirectory {
 function Find-CodexAuthFile {
     if ($env:CLAUDEX_CODEX_AUTH_FILE) {
         if (-not (Test-Path -LiteralPath $env:CLAUDEX_CODEX_AUTH_FILE -PathType Leaf)) { throw 'CLAUDEX_CODEX_AUTH_FILE does not exist.' }
+        $explicit = Get-Content -LiteralPath $env:CLAUDEX_CODEX_AUTH_FILE -Raw | ConvertFrom-Json
+        if (-not (Test-UsableCodexCredential $explicit)) { throw 'CLAUDEX_CODEX_AUTH_FILE is disabled, expired, or invalid.' }
         return $env:CLAUDEX_CODEX_AUTH_FILE
     }
     $authDir = Get-ProxyAuthDirectory
@@ -77,13 +93,13 @@ function Find-CodexAuthFile {
         $selectedPath = Join-Path $authDir $selectedName
         if (-not (Test-Path -LiteralPath $selectedPath -PathType Leaf)) { throw 'the selected Codex usage account no longer exists.' }
         $selected = Get-Content -LiteralPath $selectedPath -Raw | ConvertFrom-Json
-        if ((Get-Property $selected 'type' '') -ne 'codex' -or -not (Get-Property $selected 'access_token' '')) { throw 'the selected Codex usage account is invalid.' }
+        if (-not (Test-UsableCodexCredential $selected)) { throw 'the selected Codex usage account is disabled, expired, or invalid.' }
         return $selectedPath
     }
     foreach ($file in @(Get-ChildItem -LiteralPath $authDir -File -Filter 'codex*.json' | Sort-Object LastWriteTimeUtc -Descending)) {
         try {
             $candidate = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
-            if ((Get-Property $candidate 'type' '') -eq 'codex' -and (Get-Property $candidate 'access_token' '')) { return $file.FullName }
+            if (Test-UsableCodexCredential $candidate) { return $file.FullName }
         } catch { }
     }
     throw 'no CLIProxyAPI Codex OAuth credential was found; run the installer with -Login.'
@@ -113,7 +129,9 @@ function Show-CodexAccounts {
         $entry = $files[$index]
         $marker = if ($entry.File.FullName -eq $active) { '*' } else { ' ' }
         $email = [string] (Get-Property $entry.Data 'email' 'unknown account')
-        $suffix = if ([bool] (Get-Property $entry.Data 'disabled' $false)) { ' (disabled)' } else { '' }
+        $suffix = if ([bool] (Get-Property $entry.Data 'disabled' $false)) { ' (disabled)' }
+            elseif ([bool] (Get-Property $entry.Data 'expired' $false)) { ' (expired)' }
+            else { '' }
         Write-Output "[$marker] $($index + 1). $email$suffix"
     }
     Write-Output 'Select one with: claudex --account <number|email|filename>; use auto to follow the newest credential.'
@@ -122,6 +140,7 @@ function Show-CodexAccounts {
 function Select-CodexAccount([string] $Selector) {
     if ($Selector -eq 'auto') {
         Remove-Item -LiteralPath $accountSelectionFile -Force -ErrorAction SilentlyContinue
+        Clear-UsageCache
         Write-Output 'Codex usage account selection: automatic (newest refreshed credential).'
         return
     }
@@ -130,10 +149,15 @@ function Select-CodexAccount([string] $Selector) {
     for ($index = 0; $index -lt $files.Count; $index++) {
         $entry = $files[$index]
         $email = [string] (Get-Property $entry.Data 'email' '')
-        if ($Selector -eq [string] ($index + 1) -or $Selector -eq $email -or $Selector -eq $entry.File.Name) { $selected = $entry; break }
+        if ($Selector -eq [string] ($index + 1) -or $Selector -eq $email -or $Selector -eq $entry.File.Name) {
+            if (-not (Test-UsableCodexCredential $entry.Data)) { throw "Codex account '$Selector' is disabled or expired." }
+            $selected = $entry
+            break
+        }
     }
     if ($null -eq $selected) { throw "no Codex account matched '$Selector'. Run: claudex --accounts" }
     Write-AtomicText $accountSelectionFile ($selected.File.Name + "`n")
+    Clear-UsageCache
     Write-Output "Selected Codex usage account: $([string] (Get-Property $selected.Data 'email' 'unknown account'))"
 }
 
@@ -269,8 +293,19 @@ function Get-AppServerUsageResponse {
     $codex = Get-Command codex -ErrorAction SilentlyContinue
     if (-not $codex) { throw 'Codex CLI is unavailable for the app-server fallback.' }
     $startInfo = New-Object Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $codex.Source
-    $startInfo.Arguments = 'app-server'
+    $codexPath = [string] $codex.Source
+    $codexExtension = [IO.Path]::GetExtension($codexPath).ToLowerInvariant()
+    if ($codex.CommandType -eq 'ExternalScript' -or $codexExtension -in @('.ps1', '.cmd', '.bat')) {
+        # npm installs command shims on Windows. ProcessStartInfo with shell
+        # execution disabled cannot CreateProcess a .ps1/.cmd file directly,
+        # so invoke that trusted local shim through the current PowerShell.
+        $escapedCodexPath = $codexPath.Replace("'", "''")
+        $startInfo.FileName = (Get-Process -Id $PID).Path
+        $startInfo.Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -Command `"& '$escapedCodexPath' app-server`""
+    } else {
+        $startInfo.FileName = $codexPath
+        $startInfo.Arguments = 'app-server'
+    }
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardInput = $true

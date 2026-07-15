@@ -49,9 +49,13 @@ echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]
             if ($firstArgument -eq 'update') { return }
             if ($env:FAKE_CLAUDE_RESUME -eq '1') {
                 $projectKey = [regex]::Replace((Get-Location).Path, '[^A-Za-z0-9]', '-')
-                $projectDirectory = Join-Path (Join-Path $env:CLAUDE_CONFIG_DIR 'projects') $projectKey
+                $sessionConfig = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
+                $projectDirectory = Join-Path (Join-Path $sessionConfig 'projects') $projectKey
                 [IO.Directory]::CreateDirectory($projectDirectory) | Out-Null
                 [IO.File]::WriteAllText((Join-Path $projectDirectory '123e4567-e89b-12d3-a456-426614174000.jsonl'), "{}`n", $utf8)
+                if ($env:FAKE_FOREIGN_RESUME -eq '1') {
+                    [IO.File]::WriteAllText((Join-Path $projectDirectory '223e4567-e89b-12d3-a456-426614174001.jsonl'), "{}`n", $utf8)
+                }
                 Write-Output 'Resume this session with:'
                 Write-Output 'claude --resume 123e4567-e89b-12d3-a456-426614174000'
                 $global:LASTEXITCODE = 0
@@ -71,6 +75,7 @@ echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]
             Write-Output "POWERSHELL_TOOL=$env:CLAUDE_CODE_USE_POWERSHELL_TOOL"
             Write-Output "MODE=$env:CLAUDEX_SESSION_MODE"
             Write-Output "BASE=$env:ANTHROPIC_BASE_URL"
+            Write-Output "BUN=$env:BUN_OPTIONS"
             Write-Output "CONFIG=$env:CLAUDE_CONFIG_DIR"
             Write-Output "ARGS=$($args -join ' ')"
         }
@@ -82,8 +87,14 @@ exit /b 1
 '@, $utf8)
         [IO.File]::WriteAllText((Join-Path $fakeBin 'codex.cmd'), @'
 @echo off
+if "%1"=="app-server" (
+  echo {"id":1,"result":{}}
+  echo {"id":2,"result":{"rateLimits":{"limitId":"codex","limitName":"Codex","planType":"pro","primary":{"usedPercent":63,"windowDurationMins":10080,"resetsAt":1784705933}},"rateLimitsByLimitId":{}}}
+  exit /b 0
+)
 if "%FAKE_CODEX_LOGGED_OUT%"=="1" exit /b 1
 if "%1"=="login" if "%2"=="status" exit /b 0
+if "%1"=="logout" if not "%FAKE_CODEX_LOGOUT_EXIT%"=="" exit /b %FAKE_CODEX_LOGOUT_EXIT%
 if "%1"=="logout" exit /b 0
 if "%1"=="-c" exit /b 0
 exit /b 2
@@ -125,6 +136,7 @@ printf '%s\n' "OPUS_NAME=${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME}"
 printf '%s\n' "POWERSHELL_TOOL=${CLAUDE_CODE_USE_POWERSHELL_TOOL}"
 printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
 printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
+printf '%s\n' "BUN=${BUN_OPTIONS:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
 printf 'ARGS='; printf ' %s' "$@"; printf '\n'
 '@, $utf8)
@@ -132,7 +144,7 @@ printf 'ARGS='; printf ' %s' "$@"; printf '\n'
 #!/bin/sh
 if [ "${FAKE_CODEX_LOGGED_OUT:-0}" = 1 ]; then exit 1; fi
 if [ "${1:-}" = login ] && [ "${2:-}" = status ]; then exit 0; fi
-if [ "${1:-}" = logout ]; then exit 0; fi
+if [ "${1:-}" = logout ]; then exit "${FAKE_CODEX_LOGOUT_EXIT:-0}"; fi
 if [ "${1:-}" = -c ]; then exit 0; fi
 exit 2
 '@, $utf8)
@@ -167,6 +179,7 @@ exit 1
     Assert-True ($output.Contains('ACCESSIBILITY=1')) 'native terminal cursor'
     Assert-True ($output.Contains('OPUS=gpt-5.6-sol')) 'single Sol alias'
     Assert-True ($output.Contains('OPUS_NAME=GPT-5.6 Sol')) 'friendly name'
+    Assert-True ($output.Contains('BUN=--preload')) 'proxied session preload'
     Assert-True ($output.Contains('POWERSHELL_TOOL=1')) 'native PowerShell tool'
     Assert-True ($output.Contains('--permission-mode auto')) 'auto permissions'
     Assert-True ($output.Contains('--model gpt-5.6-terra')) 'startup model'
@@ -182,6 +195,19 @@ exit 1
     Assert-True (-not $output.Contains('"claudex-builder"')) 'legacy builder alias removed'
     Assert-True (-not $output.Contains('"claudex-fast"')) 'legacy fast alias removed'
     Assert-True (-not $output.Contains('"model":"gpt-5.6-sol"')) 'leader model is not delegated'
+
+    $env:BUN_OPTIONS = ''
+    $directChrome = (& (Join-Path $root 'claudex.ps1') --claude-chrome test-prompt | Out-String)
+    Assert-True ($directChrome.Contains('ARGS=--chrome test-prompt')) 'direct Chrome arguments'
+    Assert-True ($directChrome.Contains('BUN=')) 'direct Chrome BUN output'
+    Assert-True (-not $directChrome.Contains('BUN=--preload')) 'direct Chrome preload isolation'
+    Assert-True (-not $directChrome.Contains('BASE=http')) 'direct Chrome proxy isolation'
+
+    $flagPrompt = (& (Join-Path $root 'claudex.ps1') --print --terra | Out-String)
+    Assert-True ($flagPrompt.Contains('ARGS=--print --terra')) 'flag-shaped prompt preserved'
+    Assert-True (-not $flagPrompt.Contains('--model gpt-5.6-terra')) 'flag-shaped prompt not consumed'
+    $flagValue = (& (Join-Path $root 'claudex.ps1') --permission-mode --manual | Out-String)
+    Assert-True ($flagValue.Contains('ARGS=--permission-mode --manual')) 'flag-shaped option value preserved'
 
     $ultracode = (& (Join-Path $root 'claudex.ps1') --ultracode --sol test-prompt | Out-String)
     Assert-True ($ultracode.Contains('MODE=ultracode')) 'ultracode session label'
@@ -209,6 +235,22 @@ exit 1
     Remove-Item Env:CLAUDEX_TEST_RESUME_CAPTURE_FILE
     Assert-True ($resumeFooter.Contains("$([char]27)[2A$([char]27)[JResume this session with:")) 'resume footer rows replaced'
     Assert-True ($resumeFooter.Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'Claudex resume command'
+
+    Remove-Item -LiteralPath $resumeCapture -Force
+    $env:FAKE_CLAUDE_RESUME = '1'
+    $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
+    $env:CLAUDEX_TEST_RESUME_CAPTURE_FILE = $resumeCapture
+    & (Join-Path $root 'claudex.ps1') --claude-chrome | Out-Null
+    $directResumeFooter = [IO.File]::ReadAllText($resumeCapture)
+    Assert-True ($directResumeFooter.Contains('claudex --claude-chrome --resume 123e4567-e89b-12d3-a456-426614174000')) 'direct Chrome resume command'
+    Remove-Item -LiteralPath $resumeCapture -Force
+    $env:FAKE_FOREIGN_RESUME = '1'
+    & (Join-Path $root 'claudex.ps1') | Out-Null
+    Assert-True (-not (Test-Path -LiteralPath $resumeCapture)) 'ambiguous concurrent resume is not rewritten'
+    Remove-Item Env:FAKE_CLAUDE_RESUME
+    Remove-Item Env:FAKE_FOREIGN_RESUME
+    Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT
+    Remove-Item Env:CLAUDEX_TEST_RESUME_CAPTURE_FILE
 
     $bare = (& (Join-Path $root 'claudex.ps1') --bare --print test-prompt | Out-String)
     Assert-True (-not $bare.Contains('--agents')) 'bare mode custom agents suppressed'
@@ -239,6 +281,28 @@ exit 1
     Assert-True ($doctor.Contains('Plan mode policy: conservative')) 'doctor plan policy'
     Assert-True ($doctor.Contains('gpt-5.6-terra: advertised')) 'doctor models'
 
+    $bridgeAuthFile = Join-Path $testAuthDir 'codex-claudex-managed.json'
+    [IO.File]::WriteAllText($bridgeAuthFile, '{"type":"codex","access_token":"disabled-access","refresh_token":"disabled-refresh","account_id":"account-test","last_refresh":"2099-01-01T00:00:00Z","disabled":true,"expired":true}', $utf8)
+    & (Join-Path $root 'codex-session.ps1') status | Out-Null
+    $repairedBridge = Get-Content -LiteralPath $bridgeAuthFile -Raw | ConvertFrom-Json
+    Assert-True ($repairedBridge.access_token -eq 'codex-source-access') 'disabled bridge credential repaired'
+    Assert-True (-not [bool] $repairedBridge.disabled -and -not [bool] $repairedBridge.expired) 'repaired bridge credential enabled'
+
+    $env:FAKE_CODEX_LOGOUT_EXIT = '9'
+    $savedErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $shellPath = (Get-Process -Id $PID).Path
+        $logoutOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'codex-session.ps1') logout 2>&1
+        $logoutExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedErrorPreference
+        Remove-Item Env:FAKE_CODEX_LOGOUT_EXIT -ErrorAction SilentlyContinue
+    }
+    Assert-True ($logoutExit -eq 9) 'failed Codex logout exit propagated'
+    Assert-True (-not (Test-Path -LiteralPath $bridgeAuthFile)) 'failed Codex logout clears bridge credential'
+    Assert-True (($logoutOutput | Out-String).Contains('Codex logout failed, but the local Claudex bridge session was cleared.')) 'failed logout diagnostic'
+
     $usage = (& (Join-Path $root 'claudex.ps1') --usage-limit | Out-String)
     Assert-True ($usage.Contains('Codex usage limits (Pro plan)')) 'usage plan'
     Assert-True ($usage.Contains('Codex 7-day: 18% remaining (82% used)')) 'usage main window'
@@ -263,8 +327,32 @@ exit 1
     Assert-True ($accounts.Contains('private@example.com')) 'usage account picker lists account'
     $selection = (& (Join-Path $root 'claudex.ps1') --account private@example.com | Out-String)
     Assert-True ($selection.Contains('Selected Codex usage account: private@example.com')) 'usage account picker selects account'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $testConfig 'usage-cache\limits.json'))) 'usage cache invalidated on account selection'
     $automatic = (& (Join-Path $root 'claudex.ps1') --account auto | Out-String)
     Assert-True ($automatic.Contains('automatic')) 'usage account picker restores automatic mode'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $testConfig 'usage-cache\limits.json'))) 'usage cache invalidated on automatic selection'
+
+    [IO.File]::WriteAllText((Join-Path $testAuthDir 'codex-disabled.json'), '{"type":"codex","access_token":"disabled","account_id":"disabled-account","email":"disabled@example.com","disabled":true}', $utf8)
+    $disabledAccounts = (& (Join-Path $root 'claudex.ps1') --accounts | Out-String)
+    Assert-True ($disabledAccounts.Contains('disabled@example.com (disabled)')) 'disabled usage account is labeled'
+    $disabledRejected = $false
+    try { & (Join-Path $root 'claudex.ps1') --account disabled@example.com | Out-Null } catch { $disabledRejected = $true }
+    Assert-True $disabledRejected 'disabled usage account is rejected'
+
+    & (Join-Path $root 'claudex.ps1') --usage-limit | Out-Null
+    Assert-True (Test-Path -LiteralPath (Join-Path $testConfig 'usage-cache\limits.json') -PathType Leaf) 'usage cache repopulated after account change'
+
+    if ($isWindowsPlatform) {
+        $env:CLAUDEX_USAGE_SOURCE = 'app-server'
+        try {
+            $appServerUsage = (& (Join-Path $root 'claudex.ps1') --usage-limit | Out-String)
+        } finally { Remove-Item Env:CLAUDEX_USAGE_SOURCE -ErrorAction SilentlyContinue }
+        Assert-True ($appServerUsage.Contains('Codex 7-day: 37% remaining (63% used)')) 'Windows Codex command shim app-server usage'
+        Assert-True ($appServerUsage.Contains('Source: app-server')) 'Windows app-server usage source'
+        $env:CLAUDEX_USAGE_SOURCE = 'web'
+        try { & (Join-Path $root 'claudex.ps1') --usage-limit | Out-Null }
+        finally { Remove-Item Env:CLAUDEX_USAGE_SOURCE -ErrorAction SilentlyContinue }
+    }
 
     $statusJson = '{"session_id":"stable-session","model":{"id":"gpt-5.6-sol"},"effort":{"level":"xhigh"},"context_window":{"used_percentage":42.9,"total_input_tokens":171600,"context_window_size":400000}}'
     $status = ($statusJson | & (Join-Path $root 'statusline.ps1') | Out-String)
