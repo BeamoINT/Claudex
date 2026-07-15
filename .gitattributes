@@ -1,0 +1,12 @@
+* text=auto
+
+*.sh text eol=lf
+*.zsh text eol=lf
+*.ps1 text eol=lf
+*.cmd text eol=crlf
+*.cjs text eol=lf
+*.mjs text eol=lf
+claudex text eol=lf
+codex-session text eol=lf
+statusline text eol=lf
+usage-limit text eol=lf

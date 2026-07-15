@@ -431,6 +431,9 @@ exit 1
     Assert-True ($installedEnv.Contains('CLAUDEX_PROXY_URL=http://127.0.0.1:8318')) 'dedicated proxy port'
     Assert-True ($installedEnv.Contains('CLAUDEX_CODEX_AUTH_DIR=')) 'managed Codex auth directory'
 
+    & node (Join-Path $root 'scripts\check-docs.mjs')
+    Assert-True ($LASTEXITCODE -eq 0) 'community and documentation checks'
+
     [Console]::WriteLine('all Claudex Windows tests passed')
 } finally {
     if ($isWindowsPlatform) { Remove-Item Function:\global:claude -ErrorAction SilentlyContinue }

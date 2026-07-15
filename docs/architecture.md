@@ -1,0 +1,97 @@
+# Architecture
+
+Claudex is a launcher and compatibility layer. It does not fork or patch the
+signed Claude Code executable.
+
+## Request flow
+
+```text
+User
+  |
+  v
+claudex launcher (Bash or PowerShell)
+  |-- validates config and Claude Code capabilities
+  |-- synchronizes Codex auth through codex-session
+  |-- injects model aliases, limits, agents, and status settings
+  v
+Claude Code terminal UI
+  |
+  v
+CLIProxyAPI on 127.0.0.1:8318
+  |
+  v
+authenticated Codex account
+```
+
+The preload module runs inside Claude Code's JavaScript runtime only for GPT-
+backed Claudex sessions. It adjusts managed model labels, Solplan input, resume
+hints, and known terminal text. Direct Claude-in-Chrome sessions do not receive
+that preload or the GPT proxy environment.
+
+## Components
+
+| Component | Unix | Windows | Responsibility |
+| --- | --- | --- | --- |
+| Launcher | `claudex` | `claudex.ps1`, `claudex.cmd` | Parse Claudex flags, negotiate Claude capabilities, configure the session, and launch Claude Code |
+| Installer | `install.sh` | `install.ps1` | Install dependencies, private config, launchers, and verified compatibility binary |
+| Auth bridge | `codex-session` | `codex-session.ps1` | Validate Codex login and atomically synchronize the minimum credential fields |
+| Usage helper | `usage-limit` | `usage-limit.ps1` | Fetch, sanitize, cache, and display usage limits |
+| Status line | `statusline` | `statusline.ps1` | Render model, effort, stable context, and cached usage status |
+| Terminal preload | `preload.cjs` | shared | Filter managed UI text and translate Solplan input without modifying Claude Code |
+| Settings template | `settings.json` | shared | Provide isolated default Claude Code settings |
+
+## Authentication lifecycle
+
+1. Codex owns the user-facing login flow.
+2. Claudex verifies `codex login status`.
+3. A file-backed ChatGPT session is read from the standard Codex location.
+4. The minimum fields needed by CLIProxyAPI are written atomically into
+   Claudex's private credential directory with restrictive permissions.
+5. A newer source refresh, different account, disabled bridge, or expired
+   bridge causes a replacement.
+6. Logout always removes the bridge, even if the upstream logout command fails.
+
+Claudex never places an OAuth token in process arguments or intended terminal
+output. The repository contains no credentials.
+
+## Usage-limit flow
+
+The status line never blocks on a network request. It reads a sanitized summary
+and starts a bounded background refresh when needed. Detailed usage can come
+from the authenticated web endpoint or Codex app-server. Before a snapshot is
+written, identity and credential fields are removed. Account selection clears
+the prior snapshot.
+
+## Context stabilization
+
+Claude Code can briefly emit zero or missing context data during startup and
+compaction. The status line stores the last trustworthy percentage per session
+and uses it only for that same session. Real sub-percent usage is shown as
+`<1%`; a new session with no trustworthy data omits the percentage instead of
+showing a false zero.
+
+## Update and compatibility strategy
+
+The installer performs a best-effort Claude Code update. The launcher checks
+again on a configurable interval without blocking startup, recovers stale lock
+directories, and avoids racing explicit update commands. At every launch,
+Claudex reads `claude --help` and injects optional switches only when supported.
+Unknown arguments are forwarded exactly.
+
+The compatibility binary is pinned by version and SHA-256 for every supported
+operating-system and architecture pair. Changing that pin requires verifying
+all asset digests and running the full platform matrix.
+
+## Trust boundaries
+
+- **Trusted local inputs:** repository-managed scripts, installed private
+  configuration, standard Codex credentials, and supported command-line flags.
+- **Loopback boundary:** CLIProxyAPI binds to `127.0.0.1` and requires a random
+  local key.
+- **Third-party boundary:** Codex, Claude Code, provider APIs, browser
+  extensions, and CLIProxyAPI remain separately maintained software and
+  services.
+- **Public repository boundary:** no generated config, auth, prompts, history,
+  sessions, or usage caches belong in Git.
+
+See [SECURITY.md](../SECURITY.md) for reporting and supported versions.

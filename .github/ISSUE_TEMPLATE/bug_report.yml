@@ -1,0 +1,89 @@
+name: Bug report
+description: Report a reproducible problem in Claudex
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Claudex. Search existing issues first. Never include OAuth tokens, `auth.json`, generated proxy keys, prompts, session IDs, or unsanitized private paths.
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Before submitting
+      options:
+        - label: I updated to the latest Claudex release and reran the installer.
+          required: true
+        - label: I searched existing issues and discussions.
+          required: true
+        - label: I removed credentials and private data from all output.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Ubuntu or Debian
+        - Another Linux distribution
+        - WSL
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: platform-version
+    attributes:
+      label: Operating system version
+      placeholder: "Example: macOS 15.5 or Windows 11 24H2"
+    validations:
+      required: true
+  - type: input
+    id: shell
+    attributes:
+      label: Shell and terminal
+      placeholder: "Example: Zsh 5.9 in Ghostty"
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Claude Code and Codex versions
+      description: Run `claude --version` and `codex --version`.
+      placeholder: "Claude Code x.y.z; codex-cli x.y.z"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and why it is incorrect.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest safe sequence of commands that reproduces the problem.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Sanitized doctor output
+      description: Paste relevant output from `claudex --doctor` after removing private data.
+      render: text
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add sanitized logs, screenshots, or links that help explain the problem.
