@@ -526,4 +526,14 @@ emit_mouse_pointer_shape() {
 emit_mouse_pointer_shape "$CLAUDEX_MOUSE_POINTER_SHAPE"
 trap 'emit_mouse_pointer_shape default' EXIT
 
-claude "${claude_args[@]}" "${forwarded_args[@]}"
+if (( ${#claude_args[@]} > 0 )); then
+  if (( ${#forwarded_args[@]} > 0 )); then
+    claude "${claude_args[@]}" "${forwarded_args[@]}"
+  else
+    claude "${claude_args[@]}"
+  fi
+elif (( ${#forwarded_args[@]} > 0 )); then
+  claude "${forwarded_args[@]}"
+else
+  claude
+fi

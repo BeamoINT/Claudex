@@ -6,6 +6,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 $ClaudeArguments = @($ClaudeArguments)
+$previousSessionMode = [Environment]::GetEnvironmentVariable('CLAUDEX_SESSION_MODE', 'Process')
+$previousEffortLevel = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_EFFORT_LEVEL', 'Process')
 
 $configDir = if ($env:CLAUDEX_CONFIG_DIR) { $env:CLAUDEX_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.config\claudex' }
 $configFile = Join-Path $configDir 'env'
@@ -412,5 +414,9 @@ try {
     $exitCode = $LASTEXITCODE
 } finally {
     Set-MousePointer 'default'
+    if ($null -eq $previousSessionMode) { Remove-Item Env:CLAUDEX_SESSION_MODE -ErrorAction SilentlyContinue }
+    else { $env:CLAUDEX_SESSION_MODE = $previousSessionMode }
+    if ($null -eq $previousEffortLevel) { Remove-Item Env:CLAUDE_CODE_EFFORT_LEVEL -ErrorAction SilentlyContinue }
+    else { $env:CLAUDE_CODE_EFFORT_LEVEL = $previousEffortLevel }
 }
 exit $exitCode
