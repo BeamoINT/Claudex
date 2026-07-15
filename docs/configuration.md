@@ -63,6 +63,9 @@ may represent a different account.
 
 Do not point the proxy at a non-loopback address without a separate security
 review. Never share or commit `CLAUDEX_PROXY_TOKEN` or any Codex credential.
+The generated config performs three bounded retries for transient upstream 5xx
+responses plus two pre-stream bootstrap retries, with short cooldowns so a
+recovered blip does not flash as a user-facing API error.
 
 ## Updates
 

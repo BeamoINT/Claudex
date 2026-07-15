@@ -20,6 +20,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ### Fixed
 
+- Moved bounded transient 5xx and pre-stream retries into the local bridge so
+  recovered upstream blips no longer flash as red API errors in Claude Code.
 - Prevented intermittent bottom-of-screen corruption by leaving fullscreen TUI
   cursor/redraw frames byte-for-byte native and removing an unsupported terminal
   title control sequence from status-line output.

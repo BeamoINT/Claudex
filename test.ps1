@@ -266,26 +266,41 @@ exit 1
         $env:CLAUDEX_TEST_PROXY_REACHABLE_FILE = $proxyReady
         $stateHashBefore = (Get-FileHash -LiteralPath (Join-Path $testConfig '.claude.json') -Algorithm SHA256).Hash
         $shellPath = (Get-Process -Id $PID).Path
-        $dummyParent = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-Command', 'Start-Sleep -Seconds 5') -PassThru
+        $parentCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('Start-Sleep -Seconds 15'))
+        $dummyParent = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-EncodedCommand', $parentCommand) -PassThru
         $quotedLauncher = '"' + (Join-Path $root 'claudex.ps1') + '"'
         $watchArguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedLauncher,
             '--claudex-internal-proxy-watch', [string] $dummyParent.Id)
-        $watcher = Start-Process -FilePath $shellPath -ArgumentList $watchArguments -PassThru -WindowStyle Hidden
+        $watcherStdout = Join-Path $temporary 'windows-proxy-watcher.stdout.log'
+        $watcherStderr = Join-Path $temporary 'windows-proxy-watcher.stderr.log'
+        $watcher = Start-Process -FilePath $shellPath -ArgumentList $watchArguments -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $watcherStdout -RedirectStandardError $watcherStderr
         try {
-            foreach ($attempt in 1..60) {
+            foreach ($attempt in 1..100) {
                 if (Test-Path -LiteralPath $proxyReady -PathType Leaf) { break }
                 Start-Sleep -Milliseconds 100
             }
-            Assert-True (Test-Path -LiteralPath $proxyReady -PathType Leaf) 'Windows proxy watcher recovered a refused connection'
+            if (-not (Test-Path -LiteralPath $proxyReady -PathType Leaf)) {
+                $watcher.Refresh()
+                $watcherOutput = if (Test-Path -LiteralPath $watcherStdout) { [IO.File]::ReadAllText($watcherStdout) } else { '' }
+                $watcherError = if (Test-Path -LiteralPath $watcherStderr) { [IO.File]::ReadAllText($watcherStderr) } else { '' }
+                $proxyErrorPath = Join-Path $testConfig 'logs\cliproxyapi.stderr.log'
+                $proxyError = if (Test-Path -LiteralPath $proxyErrorPath) { [IO.File]::ReadAllText($proxyErrorPath) } else { '' }
+                throw "assertion failed: Windows proxy watcher recovered a refused connection; watcherExited=$($watcher.HasExited); stdout=$watcherOutput; stderr=$watcherError; proxyStderr=$proxyError"
+            }
             Start-Sleep -Milliseconds 300
+            $watcher.Refresh()
             Assert-True (-not $watcher.HasExited) 'Windows proxy watcher survives after recovery'
             Assert-True (-not (Test-Path -LiteralPath (Join-Path $testConfig 'run\proxy-start.lock'))) 'Windows proxy recovery lock released'
             $stateHashAfter = (Get-FileHash -LiteralPath (Join-Path $testConfig '.claude.json') -Algorithm SHA256).Hash
             Assert-True ($stateHashAfter -eq $stateHashBefore) 'internal proxy watcher does not mutate model state'
             Assert-True (@(Get-Content -LiteralPath $proxyStartLog).Count -eq 1) 'Windows proxy watcher starts one recovery process'
-        } finally {
             Stop-Process -Id $dummyParent.Id -Force -ErrorAction SilentlyContinue
-            if (-not $watcher.WaitForExit(5000)) { Stop-Process -Id $watcher.Id -Force -ErrorAction SilentlyContinue }
+            $dummyParent = $null
+            Assert-True ($watcher.WaitForExit(5000)) 'Windows proxy watcher exits after its parent'
+        } finally {
+            if ($dummyParent) { Stop-Process -Id $dummyParent.Id -Force -ErrorAction SilentlyContinue }
+            if (-not $watcher.HasExited -and -not $watcher.WaitForExit(5000)) { Stop-Process -Id $watcher.Id -Force -ErrorAction SilentlyContinue }
             Remove-Item Env:FAKE_PROXY_READY_FILE -ErrorAction SilentlyContinue
             Remove-Item Env:FAKE_PROXY_START_LOG -ErrorAction SilentlyContinue
             Remove-Item Env:CLAUDEX_TEST_PROXY_REACHABLE_FILE -ErrorAction SilentlyContinue
@@ -587,6 +602,10 @@ exit 1
     Assert-True ($installedEnv.Contains('CLAUDEX_PROXY_CONFIG=')) 'managed proxy config path'
     Assert-True ($installedEnv.Contains('CLAUDEX_PROXY_URL=http://127.0.0.1:8318')) 'dedicated proxy port'
     Assert-True ($installedEnv.Contains('CLAUDEX_CODEX_AUTH_DIR=')) 'managed Codex auth directory'
+    $installedProxyConfig = Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'cliproxyapi.yaml') -Raw
+    Assert-True ($installedProxyConfig.Contains('request-retry: 3')) 'proxy retries transient upstream failures before surfacing an API error'
+    Assert-True ($installedProxyConfig.Contains('transient-error-cooldown-seconds: 1')) 'proxy transient cooldown stays bounded'
+    Assert-True ($installedProxyConfig.Contains('bootstrap-retries: 2')) 'proxy retries pre-stream failures'
 
     & node (Join-Path $root 'scripts\check-docs.mjs')
     Assert-True ($LASTEXITCODE -eq 0) 'community and documentation checks'

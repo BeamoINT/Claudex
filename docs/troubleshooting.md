@@ -36,6 +36,10 @@ again. Claudex will not silently map an unavailable model to a different one.
 
 Temporary provider outages and cooldowns are upstream conditions. Claudex
 bounds retries and agent concurrency to avoid turning them into retry storms.
+The managed bridge retries transient upstream 500/502/503/504 responses before
+Claude Code sees them, including failures before the first stream byte. A red
+API error that remains after those bounded retries is a persistent failure and
+is intentionally still shown.
 When Codex reports an exhausted model quota, Claudex labels it as a rate limit
 and points to `/usage-limit`. If you sign into another account in Codex Desktop
 or the Codex CLI, the running Claudex session follows that account

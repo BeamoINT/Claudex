@@ -615,6 +615,9 @@ installed_env=$(<"$install_home/.config/claudex/env")
 [[ -r "$install_home/.config/claudex/cliproxyapi.yaml" ]]
 [[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'host: "127.0.0.1"'* ]]
 [[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'port: 8318'* ]]
+[[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'request-retry: 3'* ]]
+[[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'transient-error-cooldown-seconds: 1'* ]]
+[[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'bootstrap-retries: 2'* ]]
 
 package_home="$tmp/package home"
 mkdir -p "$package_home/.codex"

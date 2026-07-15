@@ -164,8 +164,13 @@ debug: false
 logging-to-file: false
 logs-max-total-size-mb: 100
 usage-statistics-enabled: false
-request-retry: 1
+request-retry: 3
 max-retry-credentials: 1
+max-retry-interval: 5
+transient-error-cooldown-seconds: 1
+streaming:
+  keepalive-seconds: 15
+  bootstrap-retries: 2
 "@
 [IO.File]::WriteAllText($proxyConfigTarget, $proxyConfig, $utf8)
 $managedProxyForEnv = if (Test-Path -LiteralPath $managedProxy -PathType Leaf) { $managedProxy } else { $proxyBinary }
