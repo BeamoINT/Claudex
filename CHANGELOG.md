@@ -5,6 +5,24 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-15
+
+### Changed
+
+- Upgraded auto-mode classification from Luna to Terra while enforcing that
+  auto and background classifiers remain on managed Codex GPT models.
+- Added scoped consent rules so a user's explicit approval of a named action
+  and target is not discarded after an auto-mode denial.
+- Increased client retry tolerance for brief local or upstream API outages.
+
+### Fixed
+
+- Kept the localhost Codex bridge healthy for the lifetime of a session and
+  serialized recovery across concurrent Claudex tabs, preventing intermittent
+  `ConnectionRefused` failures after a proxy exit.
+- Kept the no-BOM encoding object available to native Windows resume-footer
+  cleanup even when Claudex is launched outside the test harness.
+
 ## [1.1.1] - 2026-07-15
 
 ### Fixed
@@ -52,7 +70,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first-party profile support.
 - Cross-platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/BeamoINT/Claudex/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/BeamoINT/Claudex/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/BeamoINT/Claudex/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BeamoINT/Claudex/releases/tag/v1.0.0

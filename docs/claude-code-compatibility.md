@@ -11,7 +11,7 @@ This audit targets Claude Code 2.1.210, the version used for the July 2026 produ
 | Solplan | Friendly `/model solplan` entry backed by Claude Code's `opusplan` selector; Sol plans and Terra implements | Model-cache, alias-environment, and launcher regressions |
 | Max effort | `--max-effort` maps to native `--effort max` and labels the session `max` | Isolated launcher test and live exact-output prompt |
 | Ultracode | `--ultracode` enables session-only `ultracode`, `workflows`, and xhigh effort | Isolated launcher test and live exact-output prompt |
-| Auto mode | Luna classifier is pinned so safety classification does not accidentally call Terra or Sol | Environment and doctor tests |
+| Auto mode | Terra classifier is pinned through the Codex bridge, explicit named approvals are carried into classification, and Anthropic model IDs are rejected for classifier overrides | Environment, settings-schema, and doctor tests |
 | Agents and tasks | Terra/Luna names expose the actual model; concurrency and no-recursion guards limit cooldown storms; Sol reconciles task state | Argument-contract tests |
 | Context and compaction | 400k accounting, 280k automatic compaction, and session cache suppress transient false zero values | Status-line regression tests |
 | Usage limits | Direct web response, cached outage behavior, low-quota alert, account selection, and app-server recovery | Fake-service regressions and live app-server query |

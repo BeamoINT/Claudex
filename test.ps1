@@ -46,6 +46,10 @@ echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]
             $firstArgument = if ($args) { [string] $args[0] } else { '' }
             if ($firstArgument -eq '--version') { Write-Output '2.1.210 (test)'; return }
             if ($firstArgument -eq '--help') { Write-Output '--model --agents --append-system-prompt --permission-mode --settings --effort'; return }
+            if ($firstArgument -eq 'auto-mode' -and $args.Count -gt 1 -and $args[1] -eq 'defaults') {
+                Write-Output '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
+                return
+            }
             if ($firstArgument -eq 'update') { return }
             if ($env:FAKE_CLAUDE_RESUME -eq '1') {
                 $projectKey = [regex]::Replace((Get-Location).Path, '[^A-Za-z0-9]', '-')
@@ -123,6 +127,10 @@ if [ "${1:-}" = "--help" ]; then
   printf '%s\n' '--model --agents --append-system-prompt --permission-mode --settings --effort'
   exit 0
 fi
+if [ "${1:-}" = "auto-mode" ] && [ "${2:-}" = "defaults" ]; then
+  printf '%s\n' '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
+  exit 0
+fi
 if [ "${1:-}" = "update" ]; then exit 0; fi
 printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
 printf '%s\n' "BG=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
@@ -165,16 +173,22 @@ exit 1
     $env:CLAUDEX_CURL_BIN = $fakeCurl
     $env:PATH = "$fakeBin$([IO.Path]::PathSeparator)$env:PATH"
     $env:CLAUDEX_SKIP_AUTO_UPDATE = '1'
+    $env:CLAUDEX_SKIP_PROXY_WATCHER = '1'
     Remove-Item Env:CLAUDEX_PERMISSION_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:CLAUDEX_AUTO_COMPACT_WINDOW -ErrorAction SilentlyContinue
     Remove-Item Env:CLAUDEX_MOUSE_POINTER_SHAPE -ErrorAction SilentlyContinue
 
+    $sourceSettings = Get-Content -LiteralPath (Join-Path $root 'settings.json') -Raw | ConvertFrom-Json
+    Assert-True (@($sourceSettings.autoMode.environment | Where-Object { $_.StartsWith('User-designated task boundary:') }).Count -eq 1) 'auto-mode task boundary'
+    Assert-True (@($sourceSettings.autoMode.allow | Where-Object { $_.StartsWith('Explicit Action Approval:') }).Count -eq 1) 'auto-mode explicit approval'
+    Assert-True (@($sourceSettings.autoMode.allow | Where-Object { $_.StartsWith('Requested Agent Configuration:') }).Count -eq 1) 'auto-mode requested configuration'
+
     $output = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
-    Assert-True ($output.Contains('AUTO=gpt-5.6-luna')) 'auto classifier'
+    Assert-True ($output.Contains('AUTO=gpt-5.6-terra')) 'auto classifier'
     Assert-True ($output.Contains('BG=gpt-5.6-luna')) 'background classifier'
     Assert-True ($output.Contains('SUBAGENT=gpt-5.6-terra')) 'subagent model'
     Assert-True ($output.Contains('CONCURRENCY=3')) 'tool concurrency'
-    Assert-True ($output.Contains('RETRIES=2')) 'bounded retries'
+    Assert-True ($output.Contains('RETRIES=4')) 'bounded retries'
     Assert-True ($output.Contains('CONTEXT=400000')) 'context window'
     Assert-True ($output.Contains('COMPACT=280000')) 'compaction window'
     Assert-True ($output.Contains('NO_FLICKER=1')) 'no-flicker rendering'
@@ -197,6 +211,10 @@ exit 1
     Assert-True (-not $output.Contains('"claudex-builder"')) 'legacy builder alias removed'
     Assert-True (-not $output.Contains('"claudex-fast"')) 'legacy fast alias removed'
     Assert-True (-not $output.Contains('"model":"gpt-5.6-sol"')) 'leader model is not delegated'
+    $composedSettings = Get-Content -LiteralPath (Join-Path $testConfig 'settings.json') -Raw | ConvertFrom-Json
+    Assert-True (@($composedSettings.autoMode.allow | Where-Object { $_ -eq 'Default allow rule' }).Count -eq 1) 'upstream auto-mode allow rule preserved'
+    Assert-True (@($composedSettings.autoMode.allow | Where-Object { $_.StartsWith('Explicit Action Approval:') }).Count -eq 1) 'Claudex auto-mode allow rule composed'
+    Assert-True (@($composedSettings.autoMode.environment | Where-Object { $_ -eq 'Default environment rule' }).Count -eq 1) 'upstream auto-mode environment preserved'
 
     $env:BUN_OPTIONS = ''
     $directChrome = (& (Join-Path $root 'claudex.ps1') --claude-chrome test-prompt | Out-String)

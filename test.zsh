@@ -34,6 +34,7 @@ for argument in "$@"; do
     exit
   fi
 done
+if [[ -n "${FAKE_PROXY_READY_FILE:-}" && ! -e "$FAKE_PROXY_READY_FILE" ]]; then exit 7; fi
 printf '%s\n' '{"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}'
 EOF
 cat > "$tmp/bin/claude" <<'EOF'
@@ -44,6 +45,10 @@ if [[ "${1:-}" == "--version" ]]; then
 fi
 if [[ "${1:-}" == "--help" ]]; then
   printf '%s\n' '--model --agents --append-system-prompt --permission-mode --settings --effort'
+  exit
+fi
+if [[ "${1:-}" == "auto-mode" && "${2:-}" == "defaults" ]]; then
+  printf '%s\n' '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
   exit
 fi
 if [[ "${1:-}" == "update" ]]; then
@@ -64,6 +69,16 @@ if [[ "${FAKE_CLAUDE_RESUME:-0}" == 1 ]]; then
   exit "${FAKE_CLAUDE_RESUME_EXIT:-0}"
 fi
 [[ -z "${FAKE_CLAUDE_DELAY:-}" ]] || sleep "$FAKE_CLAUDE_DELAY"
+if [[ "${FAKE_PROXY_RECOVERY:-0}" == 1 ]]; then
+  rm -f "$FAKE_PROXY_READY_FILE"
+  for attempt in {1..60}; do
+    [[ -e "$FAKE_PROXY_READY_FILE" ]] && break
+    sleep 0.1
+  done
+  if [[ -e "$FAKE_PROXY_READY_FILE" ]]; then printf '%s\n' 'PROXY_RECOVERED=1'
+  else printf '%s\n' 'PROXY_RECOVERED=0'
+  fi
+fi
 printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
 printf '%s\n' "BG=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
 printf '%s\n' "SUBAGENT=${CLAUDE_CODE_SUBAGENT_MODEL}"
@@ -97,6 +112,16 @@ done
 EOF
 cat > "$tmp/bin/cliproxyapi" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "-version" ]]; then
+  printf '%s\n' 'CLIProxyAPI test'
+  printf '%s\n' 'extra version detail'
+  exit 1
+fi
+if [[ -n "${FAKE_PROXY_READY_FILE:-}" ]]; then
+  : > "$FAKE_PROXY_READY_FILE"
+  [[ -z "${FAKE_PROXY_START_LOG:-}" ]] || printf '%s\n' "$$" >> "$FAKE_PROXY_START_LOG"
+  exit 0
+fi
 printf '%s\n' 'CLIProxyAPI test'
 printf '%s\n' 'extra version detail'
 exit 1
@@ -105,6 +130,7 @@ chmod +x "$tmp/bin/"*
 
 run_wrapper() {
   HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
+    CLAUDEX_SKIP_PROXY_WATCHER=1 \
     "$root/claudex" "$@"
 }
 
@@ -128,6 +154,9 @@ input_listener_output=$(printf '/model solplan\r' | CLAUDEX_TEST_TTY_INPUT=1 nod
 jq -e '
   .model == "opus"
   and .permissions.defaultMode == "auto"
+  and (.autoMode.environment | any(startswith("User-designated task boundary:")))
+  and (.autoMode.allow | any(startswith("Explicit Action Approval:")))
+  and (.autoMode.allow | any(startswith("Requested Agent Configuration:")))
   and .autoCompactEnabled == true
   and .autoCompactWindow == 280000
   and .precomputeCompactionEnabled == true
@@ -158,11 +187,11 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
   | ($sol | length) == 1
   and $sol[0].description == "Frontier capability for planning and the hardest engineering work"' \
   "$state_file" >/dev/null
-[[ "$default_output" == *'AUTO=gpt-5.6-luna'* ]]
+[[ "$default_output" == *'AUTO=gpt-5.6-terra'* ]]
 [[ "$default_output" == *'BG=gpt-5.6-luna'* ]]
 [[ "$default_output" == *'SUBAGENT=gpt-5.6-terra'* ]]
 [[ "$default_output" == *'CONCURRENCY=3'* ]]
-[[ "$default_output" == *'RETRIES=2'* ]]
+[[ "$default_output" == *'RETRIES=4'* ]]
 [[ "$default_output" == *'CONTEXT=400000'* ]]
 [[ "$default_output" == *'COMPACT=280000'* ]]
 [[ "$default_output" == *'NO_FLICKER=1'* ]]
@@ -187,6 +216,22 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" != *'"claudex-fast"'* ]]
 [[ "$default_output" == *'Sol capacity is reserved for the leader'* ]]
 [[ "$default_output" != *'"model":"gpt-5.6-sol"'* ]]
+jq -e '
+  (.autoMode.allow | index("Default allow rule") != null)
+  and (.autoMode.allow | any(startswith("Explicit Action Approval:")))
+  and (.autoMode.environment | index("Default environment rule") != null)
+  and (.autoMode.environment | any(startswith("User-designated task boundary:")))
+' "$tmp/home/.config/claudex/settings.json" >/dev/null
+
+proxy_ready_file="$tmp/proxy-ready"
+proxy_start_log="$tmp/proxy-start.log"
+: > "$proxy_ready_file"
+proxy_recovery_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=0 \
+  FAKE_PROXY_READY_FILE="$proxy_ready_file" FAKE_PROXY_START_LOG="$proxy_start_log" \
+  FAKE_PROXY_RECOVERY=1 "$root/claudex" recovery-test)
+[[ "$proxy_recovery_output" == *'PROXY_RECOVERED=1'* ]]
+[[ "$(wc -l < "$proxy_start_log" | tr -d ' ')" == 1 ]]
 
 auto_output=$(run_wrapper --auto --luna test-prompt)
 [[ "$auto_output" == *'--permission-mode auto'* ]]
@@ -273,11 +318,12 @@ option_value_output=$(run_wrapper --append-system-prompt --manual --print test-p
 doctor_output=$(run_wrapper --doctor)
 [[ "$doctor_output" == *'CLIProxyAPI: CLIProxyAPI test'* ]]
 [[ "$doctor_output" == *'Default permission mode: auto'* ]]
-[[ "$doctor_output" == *'Auto-mode classifier: gpt-5.6-luna'* ]]
+[[ "$doctor_output" == *'Auto-mode classifier: gpt-5.6-terra'* ]]
+[[ "$doctor_output" == *'Auto-mode provider: Codex/OpenAI through the authenticated loopback bridge'* ]]
 [[ "$doctor_output" == *'Subagent model: gpt-5.6-terra (Sol is reserved for the leader)'* ]]
 [[ "$doctor_output" == *'Agent concurrency: 3'* ]]
 [[ "$doctor_output" == *'Task lifecycle: Sol-owned with final-response reconciliation'* ]]
-[[ "$doctor_output" == *'API retries: 2'* ]]
+[[ "$doctor_output" == *'API retries: 4'* ]]
 [[ "$doctor_output" == *'Context window: 400000 tokens'* ]]
 [[ "$doctor_output" == *'Auto-compact window: 280000 tokens (precompute enabled)'* ]]
 [[ "$doctor_output" == *'Context status: session-stabilized (transient zero suppressed)'* ]]
@@ -367,6 +413,11 @@ FAKE_USAGE_FAIL=1 run_wrapper --usage-limit >/dev/null
 if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
   CLAUDEX_PERMISSION_MODE=broken "$root/claudex" >/dev/null 2>&1; then
   printf '%s\n' 'expected invalid permission mode to fail' >&2
+  exit 1
+fi
+if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  CLAUDEX_AUTO_MODE_MODEL=claude-sonnet-5 "$root/claudex" >/dev/null 2>&1; then
+  printf '%s\n' 'expected Anthropic auto-mode classifier override to fail' >&2
   exit 1
 fi
 

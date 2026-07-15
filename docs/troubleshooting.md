@@ -43,6 +43,10 @@ automatically; press Continue after the new sign-in completes.
 
 ## Local proxy does not become healthy
 
+An open Claudex session automatically restarts a proxy that exits unexpectedly.
+The recovery is shared across tabs and normally completes within the client's
+bounded retry window. If `ConnectionRefused` persists:
+
 1. Confirm no unrelated process is using port 8318.
 2. Rerun the installer so the pinned compatibility binary and config are
    restored.

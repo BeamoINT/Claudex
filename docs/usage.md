@@ -28,6 +28,12 @@ claudex --terra --print "Explain this repository"
 or `--settings` arguments cannot be combined with either shortcut because they
 could silently override the selected mode.
 
+Auto mode uses GPT-5.6 Terra through the authenticated Codex bridge for its
+safety classifier. It recognizes an explicit user approval for the named
+action and target without demanding a duplicate confirmation; hard security
+boundaries and actions outside that scope remain blocked. Classifier overrides
+accept managed Codex GPT model IDs only.
+
 ## Model picker
 
 Inside Claudex, use `/model` to choose a model. Claudex maintains exactly one

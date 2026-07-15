@@ -10,6 +10,7 @@ else { $ClaudeArguments = [string[]] @($ClaudeArguments) }
 $previousSessionMode = [Environment]::GetEnvironmentVariable('CLAUDEX_SESSION_MODE', 'Process')
 $previousEffortLevel = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_EFFORT_LEVEL', 'Process')
 $previousModelMode = [Environment]::GetEnvironmentVariable('CLAUDEX_MODEL_MODE', 'Process')
+$utf8 = New-Object Text.UTF8Encoding($false)
 
 $configDir = if ($env:CLAUDEX_CONFIG_DIR) { $env:CLAUDEX_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.config\claudex' }
 $configFile = Join-Path $configDir 'env'
@@ -49,12 +50,12 @@ if ($proxyToken.Contains("`r") -or $proxyToken.Contains("`n")) { Fail 'CLAUDEX_P
 $proxyUrl = Env-OrDefault 'CLAUDEX_PROXY_URL' 'http://127.0.0.1:8318'
 $model = Env-OrDefault 'CLAUDEX_MODEL' 'gpt-5.6-sol'
 $permissionMode = Env-OrDefault 'CLAUDEX_PERMISSION_MODE' 'auto'
-$autoModeModel = Env-OrDefault 'CLAUDEX_AUTO_MODE_MODEL' 'gpt-5.6-luna'
+$autoModeModel = Env-OrDefault 'CLAUDEX_AUTO_MODE_MODEL' 'gpt-5.6-terra'
 $backgroundModel = Env-OrDefault 'CLAUDEX_BACKGROUND_MODEL' 'gpt-5.6-luna'
 $subagentModel = Env-OrDefault 'CLAUDEX_SUBAGENT_MODEL' 'gpt-5.6-terra'
 $toolConcurrency = Env-OrDefault 'CLAUDEX_MAX_TOOL_USE_CONCURRENCY' '3'
 $agentConcurrency = Env-OrDefault 'CLAUDEX_MAX_AGENT_CONCURRENCY' '3'
-$maxRetries = Env-OrDefault 'CLAUDEX_MAX_RETRIES' '2'
+$maxRetries = Env-OrDefault 'CLAUDEX_MAX_RETRIES' '4'
 $contextWindow = Env-OrDefault 'CLAUDEX_CONTEXT_WINDOW' '400000'
 $compactWindow = Env-OrDefault 'CLAUDEX_AUTO_COMPACT_WINDOW' '280000'
 $mousePointer = Env-OrDefault 'CLAUDEX_MOUSE_POINTER_SHAPE' 'pointer'
@@ -82,6 +83,16 @@ if (-not (Test-Path -LiteralPath $settingsFile -PathType Leaf)) {
 
 if ($permissionMode -notin @('manual', 'auto', 'acceptEdits', 'dontAsk', 'plan')) {
     Fail "invalid CLAUDEX_PERMISSION_MODE '$permissionMode'; expected manual, auto, acceptEdits, dontAsk, or plan." 2
+}
+$managedCodexModelIds = @('gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna')
+foreach ($modelSetting in @(
+    @{ Name = 'CLAUDEX_AUTO_MODE_MODEL'; Value = $autoModeModel },
+    @{ Name = 'CLAUDEX_BACKGROUND_MODEL'; Value = $backgroundModel },
+    @{ Name = 'CLAUDEX_SUBAGENT_MODEL'; Value = $subagentModel }
+)) {
+    if ($modelSetting.Value -notin $managedCodexModelIds) {
+        Fail "$($modelSetting.Name) must be a managed Codex model (gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna)." 2
+    }
 }
 
 function Require-Integer([string] $Name, [string] $Value, [int] $Minimum, [int] $Maximum) {
@@ -133,7 +144,6 @@ function Update-ModelCache {
     $state | Add-Member -NotePropertyName additionalModelOptionsCache -NotePropertyValue @($preserved + $managedModels) -Force
     [IO.Directory]::CreateDirectory($configDir) | Out-Null
     $tempFile = Join-Path $configDir ('.claude.json.tmp.' + [guid]::NewGuid().ToString('N'))
-    $utf8 = New-Object Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($tempFile, ($state | ConvertTo-Json -Depth 100), $utf8)
     Move-Item -LiteralPath $tempFile -Destination $stateFile -Force
 }
@@ -173,24 +183,58 @@ function Ensure-Proxy {
     & $codexSessionHelper sync
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if (Test-ProxyReady) { return }
-    $proxyBinary = Find-ProxyExecutable
-    if (-not $proxyBinary) { Fail 'CLIProxyAPI is not reachable and no proxy executable was found.' }
-    [Console]::Error.WriteLine('claudex: starting the local CLIProxyAPI service...')
-    $proxyConfig = Env-OrDefault 'CLAUDEX_PROXY_CONFIG' (Join-Path $configDir 'cliproxyapi.yaml')
-    $logDir = Join-Path $configDir 'logs'
-    [IO.Directory]::CreateDirectory($logDir) | Out-Null
-    $arguments = @()
-    if (Test-Path -LiteralPath $proxyConfig -PathType Leaf) {
-        $arguments = @('-config', ('"' + $proxyConfig + '"'))
+    $runDir = Join-Path $configDir 'run'
+    $lockDir = Join-Path $runDir 'proxy-start.lock'
+    [IO.Directory]::CreateDirectory($runDir) | Out-Null
+    $lockAcquired = $false
+    foreach ($attempt in 1..100) {
+        try {
+            New-Item -LiteralPath $lockDir -ItemType Directory -ErrorAction Stop | Out-Null
+            $lockAcquired = $true
+            break
+        } catch {
+            if (Test-ProxyReady) { return }
+            try {
+                $lockAge = [DateTime]::UtcNow - (Get-Item -LiteralPath $lockDir).LastWriteTimeUtc
+                if ($lockAge.TotalSeconds -ge 30) {
+                    Remove-Item -LiteralPath $lockDir -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
+            Start-Sleep -Milliseconds 100
+        }
     }
-    Start-Process -FilePath $proxyBinary -ArgumentList $arguments -WindowStyle Hidden -WorkingDirectory $configDir `
-        -RedirectStandardOutput (Join-Path $logDir 'cliproxyapi.stdout.log') `
-        -RedirectStandardError (Join-Path $logDir 'cliproxyapi.stderr.log') | Out-Null
-    foreach ($attempt in 1..50) {
-        if (Test-ProxyReady) { return }
-        Start-Sleep -Milliseconds 100
+    if (-not $lockAcquired) { Fail 'timed out waiting for another session to start the local proxy.' }
+
+    $becameReady = $false
+    try {
+        if (Test-ProxyReady) { $becameReady = $true; return }
+        $proxyBinary = Find-ProxyExecutable
+        if (-not $proxyBinary) { Fail 'CLIProxyAPI is not reachable and no proxy executable was found.' }
+        [Console]::Error.WriteLine('claudex: starting the local CLIProxyAPI service...')
+        $proxyConfig = Env-OrDefault 'CLAUDEX_PROXY_CONFIG' (Join-Path $configDir 'cliproxyapi.yaml')
+        $logDir = Join-Path $configDir 'logs'
+        [IO.Directory]::CreateDirectory($logDir) | Out-Null
+        $arguments = @()
+        if (Test-Path -LiteralPath $proxyConfig -PathType Leaf) {
+            $arguments = @('-config', ('"' + $proxyConfig + '"'))
+        }
+        $startParameters = @{
+            FilePath = $proxyBinary
+            ArgumentList = $arguments
+            WorkingDirectory = $configDir
+            RedirectStandardOutput = (Join-Path $logDir 'cliproxyapi.stdout.log')
+            RedirectStandardError = (Join-Path $logDir 'cliproxyapi.stderr.log')
+        }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $startParameters.WindowStyle = 'Hidden' }
+        Start-Process @startParameters | Out-Null
+        foreach ($attempt in 1..100) {
+            if (Test-ProxyReady) { $becameReady = $true; break }
+            Start-Sleep -Milliseconds 100
+        }
+    } finally {
+        Remove-Item -LiteralPath $lockDir -Force -ErrorAction SilentlyContinue
     }
-    Fail 'local proxy did not become healthy. Run: claudex --doctor'
+    if (-not $becameReady) { Fail 'local proxy did not become healthy. Run: claudex --doctor' }
 }
 
 function Start-AuthWatcher {
@@ -209,6 +253,37 @@ function Start-AuthWatcher {
     }
 }
 
+function Invoke-ProxyWatchLoop([int] $ParentProcessId) {
+    while (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue) {
+        Start-Sleep -Seconds 1
+        if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { break }
+        if (-not (Test-ProxyReady)) { Ensure-Proxy }
+    }
+}
+
+function Start-ProxyWatcher {
+    if ($env:CLAUDEX_SKIP_PROXY_WATCHER -eq '1') { return $null }
+    $hostExecutable = (Get-Process -Id $PID).Path
+    $quotedScript = '"' + $PSCommandPath.Replace('"', '\"') + '"'
+    $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedScript,
+        '--claudex-internal-proxy-watch', [string] $PID)
+    try {
+        $parameters = @{ FilePath = $hostExecutable; ArgumentList = $arguments; PassThru = $true }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $parameters.WindowStyle = 'Hidden' }
+        return Start-Process @parameters
+    } catch {
+        [Console]::Error.WriteLine('claudex: warning: local proxy recovery watcher could not be started for this session.')
+        return $null
+    }
+}
+
+if ($ClaudeArguments.Count -eq 2 -and $ClaudeArguments[0] -eq '--claudex-internal-proxy-watch') {
+    $watchedParent = 0
+    if (-not [int]::TryParse($ClaudeArguments[1], [ref] $watchedParent) -or $watchedParent -le 0) { exit 2 }
+    Invoke-ProxyWatchLoop $watchedParent
+    exit 0
+}
+
 function Load-ClaudeCapabilities {
     $claudeCommand = Get-Command claude -ErrorAction SilentlyContinue
     if (-not $claudeCommand) { Fail 'Claude Code was not found. Install Claude Code and retry.' }
@@ -217,6 +292,38 @@ function Load-ClaudeCapabilities {
     if ([string]::IsNullOrWhiteSpace($script:claudeHelp)) { Fail 'Claude Code did not return its capability list.' }
     if (-not $script:claudeHelp.Contains('--model')) {
         Fail 'this Claude Code build does not support custom models; run `claude update`.'
+    }
+}
+
+function Update-AutoModeRules {
+    $managedSettings = Join-Path $configDir 'settings.json'
+    if ([IO.Path]::GetFullPath($settingsFile) -ne [IO.Path]::GetFullPath($managedSettings)) { return }
+    $tempFile = $null
+    try {
+        $defaults = (& $script:claudeInvocation auto-mode defaults 2>$null | Out-String) | ConvertFrom-Json
+        foreach ($property in @('allow', 'environment', 'soft_deny', 'hard_deny')) {
+            if ($null -eq $defaults.PSObject.Properties[$property]) { return }
+        }
+        $settings = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
+        if ($null -eq $settings.PSObject.Properties['autoMode']) {
+            $settings | Add-Member -NotePropertyName autoMode -NotePropertyValue ([pscustomobject]@{})
+        }
+        $approval = 'Explicit Action Approval: A user message that explicitly approves a specific action and target, including reissuing it after a denial, satisfies named-and-specific consent for matching SOFT BLOCK rules. Do not ask for duplicate confirmation and do not treat the prior denial as permanent. This does not override HARD BLOCK rules or authorize a broader action.'
+        $requestedConfig = 'Requested Agent Configuration: Editing agent configuration is routine when the user explicitly asks for that specific configuration or permission change. Treat that edit as user-requested rather than Self-Modification; unrelated permission widening remains blocked.'
+        $taskBoundary = 'User-designated task boundary: A repository, cloud project, host, bucket, service, or destination that the user explicitly identifies in their own message as owned or controlled infrastructure and as the intended target is trusted for the specifically requested operation and data flow only. Merely naming a target does not establish trust; do not infer trust for agent-selected destinations, unrelated resources, or broader scopes.'
+        $settings.autoMode | Add-Member -NotePropertyName allow -NotePropertyValue @(@($defaults.allow) + @($approval, $requestedConfig)) -Force
+        $settings.autoMode | Add-Member -NotePropertyName environment -NotePropertyValue @(@($defaults.environment) + @($taskBoundary)) -Force
+        $serializedSettings = $settings | ConvertTo-Json -Depth 100
+        if ($serializedSettings -eq (Get-Content -LiteralPath $settingsFile -Raw)) { return }
+        $tempFile = Join-Path $configDir ('settings.json.tmp.' + [guid]::NewGuid().ToString('N'))
+        [IO.File]::WriteAllText($tempFile, $serializedSettings, $utf8)
+        Move-Item -LiteralPath $tempFile -Destination $settingsFile -Force
+        $tempFile = $null
+    } catch {
+        # Older Claude Code builds may not expose auto-mode defaults. The
+        # shipped settings remain valid and capability negotiation continues.
+    } finally {
+        if ($tempFile) { Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -268,6 +375,7 @@ function Model-Name([string] $Id) {
 
 function Invoke-Doctor {
     Load-ClaudeCapabilities
+    Update-AutoModeRules
     Ensure-Proxy
     $saved = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
     $savedModel = if ($null -ne $saved.PSObject.Properties['model'] -and $saved.model) { [string] $saved.model } else { 'gpt-5.6-sol' }
@@ -287,6 +395,7 @@ function Invoke-Doctor {
     Write-Output "Saved model: $(Model-Name $savedModel) ($savedModel)"
     Write-Output "Default permission mode: $permissionMode"
     Write-Output "Auto-mode classifier: $autoModeModel (only used when auto mode is selected)"
+    Write-Output 'Auto-mode provider: Codex/OpenAI through the authenticated loopback bridge'
     Write-Output "Subagent model: $subagentModel (Sol is reserved for the leader)"
     Write-Output "Tool concurrency: $toolConcurrencyNumber"
     Write-Output "Agent concurrency: $agentConcurrencyNumber"
@@ -431,11 +540,13 @@ if ($useProxy) {
 }
 
 Load-ClaudeCapabilities
+if ($useProxy -or ($forwardArguments.Count -gt 0 -and $forwardArguments[0] -eq 'auto-mode')) { Update-AutoModeRules }
 if ($forwardArguments.Count -eq 0 -or $forwardArguments[0] -notin @('update', 'upgrade')) { Start-ClaudeUpdateCheck }
 
 if ($useProxy) {
     Ensure-Proxy
     $authWatcher = Start-AuthWatcher
+    $proxyWatcher = Start-ProxyWatcher
 
     $env:ANTHROPIC_BASE_URL = $proxyUrl
     $env:ANTHROPIC_AUTH_TOKEN = $proxyToken
@@ -462,6 +573,7 @@ if ($useProxy) {
     $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = [string] $compactWindowNumber
 } else {
     $authWatcher = $null
+    $proxyWatcher = $null
     Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
     Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue
 }
@@ -483,7 +595,7 @@ $agents = [ordered]@{
 $agentsJson = $agents | ConvertTo-Json -Depth 10 -Compress
 $capacityGuard = "Claudex capacity rule: keep at most $agentConcurrencyNumber Agent tasks active at once. Launch no more than $agentConcurrencyNumber agents in a wave, wait for one to finish before starting another, and never create an agent team. Sol capacity is reserved for the leader; use the configured Terra or Luna agents for delegated work. If a model reports a 429 or cooldown, do not launch replacement agents or create a retry storm; continue useful local work and retry at most once after active agents settle."
 $taskGuard = 'Claudex task lifecycle rule: the Sol leader is the sole owner of the shared task list. Keep it compact and create only tasks that represent real remaining deliverables, not duplicate discovery lanes or speculative work. Mark a task in_progress only while the leader or a currently active agent is working on it; queued or blocked work stays pending. After every agent result, immediately reconcile its parent task and mark it completed once its outcome is integrated and verified. Before every final answer, call TaskList and reconcile every entry: completed work must be completed, inactive work must not remain in_progress, and genuinely unfinished pending work must be explicitly reported instead of being hidden behind a completion claim. Never leave stale in_progress tasks after their work is done.'
-$codexGuard = "Claudex Codex-model rule: operate as a Codex coding agent inside Claude Code's interface. Treat the available Claude Code tools and their schemas as the authoritative execution protocol. Prefer direct implementation and verification for concrete change requests. Do not invent unsupported provider behavior, do not expose raw internal tool protocol, and keep progress updates concise and evidence-based."
+$codexGuard = "Claudex Codex-model rule: operate as a Codex coding agent inside Claude Code's interface. Treat the available Claude Code tools and their schemas as the authoritative execution protocol. Prefer direct implementation and verification for concrete change requests. Treat the user's explicit approval as decisive for the specifically named action and target: after a soft auto-mode denial, ask for precise consent only when it is missing, then retry once when the user grants it instead of claiming the denial is permanent. Hard-deny security boundaries still apply. Do not invent unsupported provider behavior, do not expose raw internal tool protocol, and keep progress updates concise and evidence-based."
 $planGuard = if ($planModePolicy -eq 'conservative') { 'Claudex plan-mode rule: remain in the current execution mode by default. Do not call EnterPlanMode or switch into plan permission mode merely because work is large, multi-step, unfamiliar, or benefits from private reasoning. Enter plan mode only when the user explicitly asks for a plan/design-only response, when a required user decision would materially change the implementation, or when the requested action is irreversible and needs approval before execution. For ordinary bug fixes and implementation requests, inspect, implement, test, and report directly.' } else { '' }
 $leaderGuard = @($capacityGuard, $taskGuard, $codexGuard, $planGuard) -join ([Environment]::NewLine + [Environment]::NewLine)
 
@@ -587,6 +699,10 @@ try {
     if ($authWatcher -and -not $authWatcher.HasExited) {
         Stop-Process -Id $authWatcher.Id -Force -ErrorAction SilentlyContinue
         $authWatcher.WaitForExit(2000) | Out-Null
+    }
+    if ($proxyWatcher -and -not $proxyWatcher.HasExited) {
+        Stop-Process -Id $proxyWatcher.Id -Force -ErrorAction SilentlyContinue
+        $proxyWatcher.WaitForExit(2000) | Out-Null
     }
     if ($resumeMarker) { Remove-Item -LiteralPath $resumeMarker -Force -ErrorAction SilentlyContinue }
     Set-MousePointer 'default'
