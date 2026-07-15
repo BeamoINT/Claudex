@@ -5,17 +5,14 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-15
+
 ### Added
 
 - MIT licensing and complete open-source community documentation.
 - Contributor, conduct, support, security, and governance policies.
 - Structured bug report, feature request, and pull request templates.
 - User, configuration, architecture, troubleshooting, and development guides.
-
-## [1.0.0] - 2026-07-15
-
-### Added
-
 - Zero-configuration installers for macOS, Linux, WSL, and native Windows.
 - Codex authentication synchronization and local compatibility service.
 - GPT-5.6 Sol, Terra, Luna, and Solplan model integration.
