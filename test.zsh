@@ -208,6 +208,8 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" == *'Before every final answer, call TaskList and reconcile every entry'* ]]
 [[ "$default_output" == *'Never leave stale in_progress tasks after their work is done'* ]]
 [[ "$default_output" == *'operate as a Codex coding agent inside Claude Code'* ]]
+[[ "$default_output" == *'Ask as few questions as possible'* ]]
+[[ "$default_output" == *'Never repeat a question the user already answered'* ]]
 [[ "$default_output" == *'Do not call EnterPlanMode'* ]]
 [[ "$default_output" == *'"gpt-5-6-terra"'* ]]
 [[ "$default_output" == *'"gpt-5-6-luna"'* ]]

@@ -34,6 +34,11 @@ action and target without demanding a duplicate confirmation; hard security
 boundaries and actions outside that scope remain blocked. Classifier overrides
 accept managed Codex GPT model IDs only.
 
+The Sol leader is tuned to inspect context and make safe, reasonable assumptions
+instead of asking for routine confirmations. It asks only when an answer cannot
+be discovered and would materially change the result, expand scope, or precede
+an irreversible action, and it does not repeat questions already answered.
+
 ## Model picker
 
 Inside Claudex, use `/model` to choose a model. Claudex maintains exactly one

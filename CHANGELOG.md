@@ -14,6 +14,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Added scoped consent rules so a user's explicit approval of a named action
   and target is not discarded after an auto-mode denial.
 - Increased client retry tolerance for brief local or upstream API outages.
+- Reduced unnecessary questions by making context inspection, safe assumptions,
+  and autonomous execution the default for reversible in-scope work.
 
 ### Fixed
 

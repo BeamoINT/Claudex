@@ -204,6 +204,8 @@ exit 1
     Assert-True ($output.Contains('Before every final answer, call TaskList and reconcile every entry')) 'leader task reconciliation'
     Assert-True ($output.Contains('Never leave stale in_progress tasks after their work is done')) 'stale task guard'
     Assert-True ($output.Contains('operate as a Codex coding agent inside Claude Code')) 'Codex tuning guard'
+    Assert-True ($output.Contains('Ask as few questions as possible')) 'low-question autonomy guard'
+    Assert-True ($output.Contains('Never repeat a question the user already answered')) 'no-repeat question guard'
     Assert-True ($output.Contains('Do not call EnterPlanMode')) 'conservative plan mode guard'
     Assert-True ($output.Contains('"gpt-5-6-terra"')) 'transparent Terra agent name'
     Assert-True ($output.Contains('"gpt-5-6-luna"')) 'transparent Luna agent name'
