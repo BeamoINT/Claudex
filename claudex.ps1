@@ -545,7 +545,7 @@ function Update-ResumeFooter([string] $Marker) {
     if (-not (Test-Path -LiteralPath $projectDirectory -PathType Container)) { return }
     $markerTime = (Get-Item -LiteralPath $Marker).LastWriteTimeUtc
     $candidates = @(Get-ChildItem -LiteralPath $projectDirectory -File -Filter '*.jsonl' |
-        Where-Object { $_.LastWriteTimeUtc -gt $markerTime } |
+        Where-Object { $_.LastWriteTimeUtc -ge $markerTime } |
         Sort-Object LastWriteTimeUtc -Descending)
     $latest = $null
     foreach ($candidate in $candidates) {
