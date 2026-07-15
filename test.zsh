@@ -45,6 +45,15 @@ if [[ "${1:-}" == "--help" ]]; then
   exit
 fi
 if [[ "${1:-}" == "update" ]]; then exit 0; fi
+if [[ "${FAKE_CLAUDE_RESUME:-0}" == 1 ]]; then
+  project_key=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
+  project_dir="${CLAUDE_CONFIG_DIR}/projects/$project_key"
+  mkdir -p "$project_dir"
+  printf '%s\n' '{}' > "$project_dir/123e4567-e89b-12d3-a456-426614174000.jsonl"
+  printf '%s\n' 'Resume this session with:'
+  printf '%s\n' 'claude --resume 123e4567-e89b-12d3-a456-426614174000'
+  exit
+fi
 printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
 printf '%s\n' "BG=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
 printf '%s\n' "SUBAGENT=${CLAUDE_CODE_SUBAGENT_MODEL}"
@@ -174,6 +183,10 @@ solplan_output=$(run_wrapper --solplan test-prompt)
 [[ "$solplan_output" == *'--model opusplan'* ]]
 [[ "$solplan_output" == *'OPUS=gpt-5.6-sol'* ]]
 [[ "$solplan_output" == *'SUBAGENT=gpt-5.6-terra'* ]]
+
+resume_footer_output=$(FAKE_CLAUDE_RESUME=1 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper)
+[[ "$resume_footer_output" == *$'\033[2A\033[JResume this session with:'* ]]
+[[ "$resume_footer_output" == *'claudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
 
 bare_output=$(run_wrapper --bare --print test-prompt)
 [[ "$bare_output" != *'--agents'* ]]
@@ -362,6 +375,12 @@ filtered_frame=$(printf '%s' "$billing_frame" | \
 [[ "$filtered_frame" == *'GPT-5.6 Sol with high effort'* ]]
 [[ "$filtered_frame" != *'API Usage Billing'* ]]
 [[ "$filtered_frame" != *$'·\033[43GAPI'* ]]
+split_billing=$(node --require "$root/preload.cjs" -e '
+  process.stdout.write("GPT-5.6 Solplan · API Usage Bil");
+  process.stdout.write("ling");
+')
+[[ "$split_billing" == *'GPT-5.6 Solplan'* ]]
+[[ "$split_billing" != *'API Usage Billing'* ]]
 
 resume_frame='Resume this session with: claude --resume 123e4567-e89b-12d3-a456-426614174000'
 filtered_resume=$(printf '%s' "$resume_frame" | node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
@@ -378,7 +397,7 @@ ansi_solplan_picker=$'Opus\033[5G Plan · Opus\033[20G in plan mode, else Sonnet
 filtered_ansi_solplan=$(printf '%s' "$ansi_solplan_picker" | node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
 plain_ansi_solplan=$(printf '%s' "$filtered_ansi_solplan" | sed $'s/\033\\[[0-9;?]*[ -\\/]*[@-~]//g')
 [[ "$plain_ansi_solplan" == *'GPT-5.6 Solplan'* ]]
-[[ "$plain_ansi_solplan" == *'GPT-5.6 Sol in plan mode, else GPT-5.6 Terra'* ]]
+[[ "$plain_ansi_solplan" != *'Opus in plan mode, else Sonnet'* ]]
 [[ "$plain_ansi_solplan" != *'API Usage Billing'* ]]
 
 install_home="$tmp/install home"

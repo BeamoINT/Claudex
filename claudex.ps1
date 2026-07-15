@@ -491,11 +491,41 @@ function Set-MousePointer([string] $Shape) {
     [Console]::Out.Write("$([char]27)]22;$Shape$([char]27)\")
 }
 
+$rewriteResumeFooter = ((-not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) -or $env:CLAUDEX_TEST_TTY_OUTPUT -eq '1')
+foreach ($argument in $forwardArguments) {
+    if ($argument -in @('--print', '-p', '--help', '-h', '--version', '-v', 'doctor')) { $rewriteResumeFooter = $false }
+}
+$resumeMarker = $null
+if ($rewriteResumeFooter) {
+    $resumeMarker = Join-Path $configDir ('.resume-start-' + [guid]::NewGuid().ToString('N'))
+    [IO.File]::WriteAllText($resumeMarker, '', $utf8)
+}
+
+function Update-ResumeFooter([string] $Marker) {
+    if (-not $Marker -or -not (Test-Path -LiteralPath $Marker -PathType Leaf)) { return }
+    $sessionConfigDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
+    $projectKey = [regex]::Replace((Get-Location).Path, '[^A-Za-z0-9]', '-')
+    $projectDirectory = Join-Path (Join-Path $sessionConfigDir 'projects') $projectKey
+    if (-not (Test-Path -LiteralPath $projectDirectory -PathType Container)) { return }
+    $markerTime = (Get-Item -LiteralPath $Marker).LastWriteTimeUtc
+    $latest = Get-ChildItem -LiteralPath $projectDirectory -File -Filter '*.jsonl' |
+        Where-Object { $_.LastWriteTimeUtc -gt $markerTime } |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+    if (-not $latest) { return }
+    $sessionId = [IO.Path]::GetFileNameWithoutExtension($latest.Name)
+    if ($sessionId -notmatch '^[0-9a-fA-F-]{36}$') { return }
+    $escape = [char]27
+    [Console]::Out.Write("$escape[2A$escape[JResume this session with:`nclaudex --resume $sessionId`n")
+}
+
 try {
     Set-MousePointer $mousePointer
     & claude @claudeLaunchArguments
     $exitCode = $LASTEXITCODE
+    if ($rewriteResumeFooter -and $exitCode -eq 0) { Update-ResumeFooter $resumeMarker }
 } finally {
+    if ($resumeMarker) { Remove-Item -LiteralPath $resumeMarker -Force -ErrorAction SilentlyContinue }
     Set-MousePointer 'default'
     if ($null -eq $previousSessionMode) { Remove-Item Env:CLAUDEX_SESSION_MODE -ErrorAction SilentlyContinue }
     else { $env:CLAUDEX_SESSION_MODE = $previousSessionMode }
