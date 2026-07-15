@@ -36,8 +36,8 @@ The model UI, stabilized status line, auto mode, compaction, task/agent policy, 
 ## New macOS or Linux installation
 
 ```bash
-git clone https://github.com/BeamoINT/claudex-setup.git
-cd claudex-setup
+git clone https://github.com/BeamoINT/Claudex.git
+cd Claudex
 ./install.sh --login
 ```
 
@@ -54,8 +54,8 @@ export PATH="$HOME/.local/bin:$PATH"
 Run PowerShell from the cloned repository:
 
 ```powershell
-git clone https://github.com/BeamoINT/claudex-setup.git
-Set-Location claudex-setup
+git clone https://github.com/BeamoINT/Claudex.git
+Set-Location Claudex
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Login
 ```
 
