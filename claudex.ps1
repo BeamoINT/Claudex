@@ -285,18 +285,27 @@ function Start-AuthWatcher {
     }
 }
 
+function Write-ProxyWatcherTestTrace([string] $Message) {
+    if (-not $env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE) { return }
+    try { Add-Content -LiteralPath $env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE -Value $Message } catch { }
+}
+
 function Invoke-ProxyWatchLoop([int] $ParentProcessId) {
+    Write-ProxyWatcherTestTrace "watcher entered for parent $ParentProcessId"
     while (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue) {
         Start-Sleep -Seconds 1
         if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { break }
         if (-not (Test-ProxyReachable)) {
-            try { Ensure-Proxy } catch {
-                if ($env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE) {
-                    try { Add-Content -LiteralPath $env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE -Value $_.Exception.Message } catch { }
-                }
+            Write-ProxyWatcherTestTrace 'proxy unreachable; starting recovery'
+            try {
+                Ensure-Proxy
+                Write-ProxyWatcherTestTrace 'proxy recovery completed'
+            } catch {
+                Write-ProxyWatcherTestTrace ("proxy recovery failed: " + $_.Exception.Message)
             }
         }
     }
+    Write-ProxyWatcherTestTrace 'watcher exited'
 }
 
 function Start-ProxyWatcher {
