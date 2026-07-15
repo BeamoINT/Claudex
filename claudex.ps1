@@ -295,9 +295,15 @@ function Get-ProxyHealth([int] $TimeoutMilliseconds = 5000) {
         $models = Fetch-Models $TimeoutMilliseconds
         $script:lastProxyModelIds = @($models.data | ForEach-Object { [string] $_.id } | Where-Object { $_ })
         if ($script:lastProxyModelIds.Count -gt 0) { return 'healthy' }
+        Write-ProxyRecoveryDiagnostic 'proxy health response contained no model identifiers'
         return 'unhealthy'
-    } catch [UnauthorizedAccessException] { return 'authentication-failed' }
-    catch { return 'unhealthy' }
+    } catch [UnauthorizedAccessException] {
+        Write-ProxyRecoveryDiagnostic 'proxy health request was rejected by local authentication'
+        return 'authentication-failed'
+    } catch {
+        Write-ProxyRecoveryDiagnostic ("proxy health request failed: " + $_.Exception.Message)
+        return 'unhealthy'
+    }
 }
 
 function Test-ProxyReady([int] $TimeoutMilliseconds = 5000) {

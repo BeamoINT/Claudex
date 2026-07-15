@@ -224,7 +224,13 @@ exit 1
     [IO.File]::WriteAllText((Join-Path $testConfig 'settings.json'), ($seedSettings | ConvertTo-Json -Depth 100), $utf8)
 
     $output = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
-    Assert-True ($output.Contains('AUTO=gpt-5.6-terra')) 'auto classifier'
+    if (-not $output.Contains('AUTO=gpt-5.6-terra')) {
+        $proxyRecoveryLog = Join-Path $testConfig 'logs\proxy-recovery.log'
+        $proxyRecoveryDetail = if (Test-Path -LiteralPath $proxyRecoveryLog -PathType Leaf) {
+            Get-Content -LiteralPath $proxyRecoveryLog -Raw
+        } else { 'proxy recovery log was not created' }
+        throw "assertion failed: auto classifier; proxy diagnostics: $proxyRecoveryDetail"
+    }
     Assert-True ($output.Contains('BG=gpt-5.6-luna')) 'background classifier'
     Assert-True ($output.Contains('SUBAGENT=gpt-5.6-terra')) 'subagent model'
     Assert-True ($output.Contains('CONCURRENCY=3')) 'tool concurrency'
