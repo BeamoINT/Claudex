@@ -255,11 +255,11 @@ function Ensure-Proxy {
         }
         $startParameters = @{
             FilePath = $proxyBinary
-            ArgumentList = $arguments
             WorkingDirectory = $configDir
             RedirectStandardOutput = (Join-Path $logDir 'cliproxyapi.stdout.log')
             RedirectStandardError = (Join-Path $logDir 'cliproxyapi.stderr.log')
         }
+        if ($arguments.Count -gt 0) { $startParameters.ArgumentList = $arguments }
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $startParameters.WindowStyle = 'Hidden' }
         Write-ProxyWatcherTestTrace "recovery: starting $proxyBinary"
         Start-Process @startParameters | Out-Null
