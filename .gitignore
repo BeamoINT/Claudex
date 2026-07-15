@@ -1,0 +1,15 @@
+.DS_Store
+.env
+.env.*
+env
+*.log
+*.tmp
+*.bak
+.claude.json
+history.jsonl
+projects/
+sessions/
+shell-snapshots/
+telemetry/
+todos/
+backups/

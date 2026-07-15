@@ -1,0 +1,33 @@
+{
+  "model": "gpt-5.6-sol",
+  "availableModels": [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "sonnet",
+    "haiku"
+  ],
+  "modelOverrides": {
+    "gpt-5.6-sol": "gpt-5.6-sol",
+    "gpt-5.6-terra": "gpt-5.6-terra",
+    "gpt-5.6-luna": "gpt-5.6-luna",
+    "claude-fable-5": "gpt-5.6-sol",
+    "claude-opus-4-8": "gpt-5.6-sol",
+    "claude-sonnet-5": "gpt-5.6-terra",
+    "claude-haiku-4-5-20251001": "gpt-5.6-luna"
+  },
+  "permissions": {
+    "defaultMode": "auto"
+  },
+  "autoCompactEnabled": true,
+  "autoCompactWindow": 280000,
+  "precomputeCompactionEnabled": true,
+  "verbose": false,
+  "tui": "fullscreen",
+  "statusLine": {
+    "type": "command",
+    "command": "__CLAUDEX_STATUSLINE_COMMAND__",
+    "padding": 0
+  },
+  "effortLevel": "high"
+}

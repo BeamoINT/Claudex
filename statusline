@@ -1,0 +1,49 @@
+#!/bin/zsh
+set -u
+
+readonly input="$(<&0)"
+parsed=$(print -r -- "$input" | jq -ejr '[
+  (.model.id // ""),
+  (.model.display_name // ""),
+  (.effort.level // ""),
+  (if .context_window.used_percentage == null then "" else (.context_window.used_percentage | floor | tostring) end)
+] | join("\u001f")' 2>/dev/null) || parsed=$'\x1f\x1f\x1f'
+
+IFS=$'\x1f' read -r model_id display_name effort context_percent <<< "$parsed"
+
+if [[ -z "$effort" ]]; then
+  effort="${CLAUDE_CODE_EFFORT_LEVEL:-${CLAUDE_EFFORT:-}}"
+fi
+if [[ -z "$effort" && -r "${CLAUDE_CONFIG_DIR:-$HOME/.config/claudex}/settings.json" ]]; then
+  effort=$(jq -r '.effortLevel // empty' \
+    "${CLAUDE_CONFIG_DIR:-$HOME/.config/claudex}/settings.json" 2>/dev/null) || effort=""
+fi
+readonly effort="${effort:-adaptive}"
+
+case "$model_id" in
+  gpt-5.6-sol) model_name="GPT-5.6 Sol" ;;
+  gpt-5.6-terra) model_name="GPT-5.6 Terra" ;;
+  gpt-5.6-luna) model_name="GPT-5.6 Luna" ;;
+  claude-fable-*|claude-opus-*) model_name="GPT-5.6 Sol" ;;
+  claude-sonnet-*) model_name="GPT-5.6 Terra" ;;
+  claude-haiku-*) model_name="GPT-5.6 Luna" ;;
+  *)
+    case "$display_name" in
+      *Fable*|*Opus*) model_name="GPT-5.6 Sol" ;;
+      *Sonnet*) model_name="GPT-5.6 Terra" ;;
+      *Haiku*) model_name="GPT-5.6 Luna" ;;
+      *) model_name="${model_id:-${display_name:-Unknown model}}" ;;
+    esac
+    ;;
+esac
+
+# Keep the terminal tab title accurate as /model and /effort change.
+printf '\033]0;%s\007' "Claudex · ${model_name} · ${effort} effort"
+
+if [[ -n "$context_percent" ]]; then
+  printf '\033[38;5;81mClaudex\033[0m · \033[1m%s\033[0m · %s effort · %s%% context\n' \
+    "$model_name" "$effort" "$context_percent"
+else
+  printf '\033[38;5;81mClaudex\033[0m · \033[1m%s\033[0m · %s effort\n' \
+    "$model_name" "$effort"
+fi
