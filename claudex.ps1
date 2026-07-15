@@ -193,12 +193,15 @@ function Find-ProxyExecutable {
 }
 
 function Ensure-Proxy {
+    Write-ProxyWatcherTestTrace 'recovery: begin'
     if (-not (Test-Path -LiteralPath $codexSessionHelper -PathType Leaf)) {
         throw "authentication helper is missing: $codexSessionHelper; reinstall Claudex."
     }
     & $codexSessionHelper sync
     if ($LASTEXITCODE -ne 0) { throw "authentication synchronization failed with exit code $LASTEXITCODE." }
+    Write-ProxyWatcherTestTrace 'recovery: authentication synchronized'
     if (Test-ProxyReady) { return }
+    Write-ProxyWatcherTestTrace 'recovery: readiness check failed'
     $runDir = Join-Path $configDir 'run'
     $lockDir = Join-Path $runDir 'proxy-start.lock'
     $ownerFile = Join-Path $lockDir 'owner-pid'
@@ -235,6 +238,7 @@ function Ensure-Proxy {
         }
     }
     if (-not $lockAcquired) { throw 'timed out waiting for another session to start the local proxy.' }
+    Write-ProxyWatcherTestTrace 'recovery: startup lock acquired'
 
     $becameReady = $false
     try {
@@ -257,11 +261,14 @@ function Ensure-Proxy {
             RedirectStandardError = (Join-Path $logDir 'cliproxyapi.stderr.log')
         }
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $startParameters.WindowStyle = 'Hidden' }
+        Write-ProxyWatcherTestTrace "recovery: starting $proxyBinary"
         Start-Process @startParameters | Out-Null
+        Write-ProxyWatcherTestTrace 'recovery: process launched'
         foreach ($attempt in 1..100) {
             if (Test-ProxyReady) { $becameReady = $true; break }
             Start-Sleep -Milliseconds 100
         }
+        Write-ProxyWatcherTestTrace "recovery: readiness loop completed; ready=$becameReady"
     } finally {
         Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $lockDir -Force -ErrorAction SilentlyContinue
