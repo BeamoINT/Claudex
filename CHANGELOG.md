@@ -5,6 +5,13 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-15
+
+### Fixed
+
+- Replaced Claude Code's native `claude --resume` shutdown instruction after
+  interrupted and nonzero exits, while preserving the original exit status.
+
 ## [1.1.0] - 2026-07-15
 
 ### Added
@@ -43,6 +50,7 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first-party profile support.
 - Cross-platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/BeamoINT/Claudex/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/BeamoINT/Claudex/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BeamoINT/Claudex/releases/tag/v1.0.0

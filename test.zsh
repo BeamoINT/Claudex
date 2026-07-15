@@ -61,7 +61,7 @@ if [[ "${FAKE_CLAUDE_RESUME:-0}" == 1 ]]; then
   fi
   printf '%s\n' 'Resume this session with:'
   printf '%s\n' 'claude --resume 123e4567-e89b-12d3-a456-426614174000'
-  exit
+  exit "${FAKE_CLAUDE_RESUME_EXIT:-0}"
 fi
 [[ -z "${FAKE_CLAUDE_DELAY:-}" ]] || sleep "$FAKE_CLAUDE_DELAY"
 printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
@@ -210,6 +210,15 @@ solplan_output=$(run_wrapper --solplan test-prompt)
 resume_footer_output=$(FAKE_CLAUDE_RESUME=1 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper)
 [[ "$resume_footer_output" == *$'\033[2A\033[JResume this session with:'* ]]
 [[ "$resume_footer_output" == *'claudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
+
+if interrupted_resume_output=$(FAKE_CLAUDE_RESUME=1 FAKE_CLAUDE_RESUME_EXIT=130 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper); then
+  interrupted_resume_exit=0
+else
+  interrupted_resume_exit=$?
+fi
+[[ "$interrupted_resume_exit" == 130 ]]
+[[ "$interrupted_resume_output" == *$'\033[2A\033[JResume this session with:'* ]]
+[[ "$interrupted_resume_output" == *'claudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
 
 bare_output=$(run_wrapper --bare --print test-prompt)
 [[ "$bare_output" != *'--agents'* ]]

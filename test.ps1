@@ -60,7 +60,7 @@ echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]
                 }
                 Write-Output 'Resume this session with:'
                 Write-Output 'claude --resume 123e4567-e89b-12d3-a456-426614174000'
-                $global:LASTEXITCODE = 0
+                $global:LASTEXITCODE = if ($env:FAKE_CLAUDE_RESUME_EXIT) { [int]$env:FAKE_CLAUDE_RESUME_EXIT } else { 0 }
                 return
             }
             Write-Output "AUTO=$env:CLAUDE_CODE_AUTO_MODE_MODEL"
@@ -237,6 +237,14 @@ exit 1
     Remove-Item Env:CLAUDEX_TEST_RESUME_CAPTURE_FILE
     Assert-True ($resumeFooter.Contains("$([char]27)[2A$([char]27)[JResume this session with:")) 'resume footer rows replaced'
     Assert-True ($resumeFooter.Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'Claudex resume command'
+
+    $env:FAKE_CLAUDE_RESUME_EXIT = '130'
+    & (Join-Path $root 'claudex.ps1') | Out-Null
+    $interruptedResumeExit = $LASTEXITCODE
+    $interruptedResumeFooter = [IO.File]::ReadAllText($resumeCapture)
+    Remove-Item Env:FAKE_CLAUDE_RESUME_EXIT
+    Assert-True ($interruptedResumeExit -eq 130) 'interrupted Claude exit status preserved'
+    Assert-True ($interruptedResumeFooter.Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'interrupted session uses Claudex resume command'
 
     Remove-Item -LiteralPath $resumeCapture -Force
     $env:FAKE_CLAUDE_RESUME = '1'

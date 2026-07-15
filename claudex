@@ -728,7 +728,7 @@ run_claude
 claude_exit=$?
 set -e
 
-if (( rewrite_resume_footer && claude_exit == 0 )); then
+if (( rewrite_resume_footer )); then
   project_key=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
   project_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$project_key"
   latest_session_file=""
