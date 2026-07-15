@@ -4,7 +4,9 @@ param(
     [switch] $Statusline,
     [switch] $RefreshCache,
     [switch] $LockHeld,
-    [switch] $NoColor
+    [switch] $NoColor,
+    [switch] $Accounts,
+    [string] $Account
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +19,7 @@ $summaryFile = Join-Path $cacheDir 'summary'
 $lastAttemptFile = Join-Path $cacheDir 'last-attempt'
 $lastSuccessFile = Join-Path $cacheDir 'last-success'
 $refreshLock = Join-Path $cacheDir 'refresh.lock'
+$accountSelectionFile = Join-Path $configDir 'codex-usage-account'
 $curlCommand = if ($env:CLAUDEX_CURL_BIN) { $env:CLAUDEX_CURL_BIN } else { 'curl.exe' }
 $usageUrl = if ($env:CLAUDEX_USAGE_URL) { $env:CLAUDEX_USAGE_URL } else { 'https://chatgpt.com/backend-api/wham/usage' }
 
@@ -33,6 +36,9 @@ function Get-IntegerSetting([string] $Name, [int] $Default, [int] $Minimum, [int
 $refreshSeconds = Get-IntegerSetting 'CLAUDEX_USAGE_REFRESH_SECONDS' 300 60 3600
 $timeoutSeconds = Get-IntegerSetting 'CLAUDEX_USAGE_TIMEOUT_SECONDS' 8 1 30
 $maxStaleSeconds = Get-IntegerSetting 'CLAUDEX_USAGE_MAX_STALE_SECONDS' 86400 $refreshSeconds 604800
+$alertPercent = Get-IntegerSetting 'CLAUDEX_USAGE_ALERT_PERCENT' 20 0 100
+$usageSource = if ($env:CLAUDEX_USAGE_SOURCE) { $env:CLAUDEX_USAGE_SOURCE } else { 'auto' }
+if ($usageSource -notin @('auto', 'web', 'app-server')) { throw 'CLAUDEX_USAGE_SOURCE must be auto, web, or app-server.' }
 
 function Get-Property($Object, [string] $Name, $Default = $null) {
     if ($Object -is [Collections.IDictionary]) {
@@ -63,6 +69,17 @@ function Find-CodexAuthFile {
     }
     $authDir = Get-ProxyAuthDirectory
     if (-not (Test-Path -LiteralPath $authDir -PathType Container)) { throw 'CLIProxyAPI Codex OAuth directory was not found.' }
+    if (Test-Path -LiteralPath $accountSelectionFile -PathType Leaf) {
+        $selectedName = [IO.File]::ReadAllText($accountSelectionFile).Trim()
+        if (-not $selectedName -or $selectedName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or $selectedName.Contains('/') -or $selectedName.Contains('\')) {
+            throw 'the saved Codex usage account selection is invalid.'
+        }
+        $selectedPath = Join-Path $authDir $selectedName
+        if (-not (Test-Path -LiteralPath $selectedPath -PathType Leaf)) { throw 'the selected Codex usage account no longer exists.' }
+        $selected = Get-Content -LiteralPath $selectedPath -Raw | ConvertFrom-Json
+        if ((Get-Property $selected 'type' '') -ne 'codex' -or -not (Get-Property $selected 'access_token' '')) { throw 'the selected Codex usage account is invalid.' }
+        return $selectedPath
+    }
     foreach ($file in @(Get-ChildItem -LiteralPath $authDir -File -Filter 'codex*.json' | Sort-Object LastWriteTimeUtc -Descending)) {
         try {
             $candidate = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
@@ -70,6 +87,54 @@ function Find-CodexAuthFile {
         } catch { }
     }
     throw 'no CLIProxyAPI Codex OAuth credential was found; run the installer with -Login.'
+}
+
+function Get-CodexAuthFiles {
+    $authDir = Get-ProxyAuthDirectory
+    if (-not (Test-Path -LiteralPath $authDir -PathType Container)) { throw 'CLIProxyAPI Codex OAuth directory was not found.' }
+    $valid = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $authDir -File -Filter 'codex*.json' | Sort-Object Name)) {
+        try {
+            $candidate = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+            if ((Get-Property $candidate 'type' '') -eq 'codex' -and (Get-Property $candidate 'access_token' '')) {
+                $valid += [pscustomobject]@{ File = $file; Data = $candidate }
+            }
+        } catch { }
+    }
+    return @($valid)
+}
+
+function Show-CodexAccounts {
+    $files = @(Get-CodexAuthFiles)
+    if ($files.Count -eq 0) { throw 'no CLIProxyAPI Codex OAuth credentials were found.' }
+    $active = try { Find-CodexAuthFile } catch { '' }
+    Write-Output 'Codex usage accounts:'
+    for ($index = 0; $index -lt $files.Count; $index++) {
+        $entry = $files[$index]
+        $marker = if ($entry.File.FullName -eq $active) { '*' } else { ' ' }
+        $email = [string] (Get-Property $entry.Data 'email' 'unknown account')
+        $suffix = if ([bool] (Get-Property $entry.Data 'disabled' $false)) { ' (disabled)' } else { '' }
+        Write-Output "[$marker] $($index + 1). $email$suffix"
+    }
+    Write-Output 'Select one with: claudex --account <number|email|filename>; use auto to follow the newest credential.'
+}
+
+function Select-CodexAccount([string] $Selector) {
+    if ($Selector -eq 'auto') {
+        Remove-Item -LiteralPath $accountSelectionFile -Force -ErrorAction SilentlyContinue
+        Write-Output 'Codex usage account selection: automatic (newest refreshed credential).'
+        return
+    }
+    $files = @(Get-CodexAuthFiles)
+    $selected = $null
+    for ($index = 0; $index -lt $files.Count; $index++) {
+        $entry = $files[$index]
+        $email = [string] (Get-Property $entry.Data 'email' '')
+        if ($Selector -eq [string] ($index + 1) -or $Selector -eq $email -or $Selector -eq $entry.File.Name) { $selected = $entry; break }
+    }
+    if ($null -eq $selected) { throw "no Codex account matched '$Selector'. Run: claudex --accounts" }
+    Write-AtomicText $accountSelectionFile ($selected.File.Name + "`n")
+    Write-Output "Selected Codex usage account: $([string] (Get-Property $selected.Data 'email' 'unknown account'))"
 }
 
 function Convert-Window($Window) {
@@ -118,14 +183,22 @@ function Format-Epoch([long] $Epoch) {
 
 function Get-CompactSummary($Snapshot) {
     $parts = New-Object 'System.Collections.Generic.List[string]'
+    $remainingValues = New-Object 'System.Collections.Generic.List[int]'
     $limit = Get-Property $Snapshot 'rate_limit' $null
     if ($limit) {
         foreach ($windowName in @('primary_window', 'secondary_window')) {
             $window = Get-Property $limit $windowName $null
-            if ($window) { $parts.Add("$(Get-ShortWindowLabel ([long] $window.limit_window_seconds)) $(Get-RemainingPercent $window)% left") }
+            if ($window) {
+                $remaining = Get-RemainingPercent $window
+                $remainingValues.Add($remaining)
+                $parts.Add("$(Get-ShortWindowLabel ([long] $window.limit_window_seconds)) $remaining% left")
+            }
         }
     }
-    if ($parts.Count -gt 0) { return 'Codex ' + ($parts -join ' · ') }
+    if ($parts.Count -gt 0) {
+        $prefix = if ($alertPercent -gt 0 -and ($remainingValues | Measure-Object -Minimum).Minimum -le $alertPercent) { '⚠ Codex ' } else { 'Codex ' }
+        return $prefix + ($parts -join ' · ')
+    }
     if ($limit -and [bool] (Get-Property $limit 'limit_reached' $false)) { return 'Codex limit reached' }
     if (Get-Property $Snapshot 'rate_limit_reached_type' $null) { return 'Codex limit reached' }
     return ''
@@ -142,10 +215,7 @@ function Write-AtomicText([string] $Path, [string] $Content) {
     }
 }
 
-function Refresh-UsageCache {
-    [IO.Directory]::CreateDirectory($cacheDir) | Out-Null
-    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-    Write-AtomicText $lastAttemptFile "$now`n"
+function Get-WebUsageResponse {
     $authFile = Find-CodexAuthFile
     $auth = Get-Content -LiteralPath $authFile -Raw | ConvertFrom-Json
     $token = [string] (Get-Property $auth 'access_token' '')
@@ -169,41 +239,153 @@ function Refresh-UsageCache {
         if (Test-Path -LiteralPath $curlConfig) { Remove-Item -LiteralPath $curlConfig -Force }
     }
 
-    try { $response = $raw | ConvertFrom-Json } catch { throw 'OpenAI returned an unrecognized usage response.' }
-    $rateLimit = Convert-Limit (Get-Property $response 'rate_limit' $null)
+    try { return ($raw | ConvertFrom-Json) } catch { throw 'OpenAI returned an unrecognized usage response.' }
+}
+
+function Read-AppServerResponse($Process, [int] $Id) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $remaining = [math]::Max(1, [int] ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        $readTask = $Process.StandardOutput.ReadLineAsync()
+        $delayTask = [Threading.Tasks.Task]::Delay($remaining)
+        $completed = [Threading.Tasks.Task]::WhenAny($readTask, $delayTask).GetAwaiter().GetResult()
+        if (-not [object]::ReferenceEquals($completed, $readTask)) { throw 'Codex app-server response timed out.' }
+        $line = $readTask.GetAwaiter().GetResult()
+        if ($null -eq $line) { throw 'Codex app-server closed before returning rate limits.' }
+        try { $message = $line | ConvertFrom-Json } catch { continue }
+        if ([int] (Get-Property $message 'id' -1) -eq $Id) {
+            $result = Get-Property $message 'result' $null
+            if ($null -eq $result) { throw "Codex app-server request $Id failed." }
+            return $result
+        }
+    }
+    throw 'Codex app-server response timed out.'
+}
+
+function Get-AppServerUsageResponse {
+    if ($env:CLAUDEX_CODEX_AUTH_FILE -or (Test-Path -LiteralPath $accountSelectionFile -PathType Leaf)) {
+        throw 'app-server fallback is disabled while an explicit usage account is selected.'
+    }
+    $codex = Get-Command codex -ErrorAction SilentlyContinue
+    if (-not $codex) { throw 'Codex CLI is unavailable for the app-server fallback.' }
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $codex.Source
+    $startInfo.Arguments = 'app-server'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { throw 'could not start Codex app-server.' }
+        $process.StandardInput.WriteLine('{"id":1,"method":"initialize","params":{"clientInfo":{"name":"Claudex","title":"Claudex usage fallback","version":"1.0.0"}}}')
+        $process.StandardInput.Flush()
+        Read-AppServerResponse $process 1 | Out-Null
+        $process.StandardInput.WriteLine('{"method":"initialized"}')
+        $process.StandardInput.WriteLine('{"id":2,"method":"account/rateLimits/read","params":null}')
+        $process.StandardInput.Flush()
+        return (Read-AppServerResponse $process 2)
+    } finally {
+        try { $process.StandardInput.Close() } catch { }
+        if (-not $process.HasExited) { try { $process.Kill() } catch { } }
+        $process.Dispose()
+    }
+}
+
+function Refresh-UsageCache {
+    [IO.Directory]::CreateDirectory($cacheDir) | Out-Null
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    Write-AtomicText $lastAttemptFile "$now`n"
+    $source = ''
+    if ($usageSource -eq 'web') {
+        $response = Get-WebUsageResponse
+        $source = 'web'
+    } elseif ($usageSource -eq 'app-server') {
+        $response = Get-AppServerUsageResponse
+        $source = 'app-server'
+    } else {
+        try {
+            $response = Get-WebUsageResponse
+            $candidateLimit = Convert-Limit (Get-Property $response 'rate_limit' $null)
+            if ($null -eq $candidateLimit -or ($null -eq $candidateLimit.primary_window -and $null -eq $candidateLimit.secondary_window)) {
+                throw 'OpenAI returned no recognized Codex rate-limit window.'
+            }
+            $source = 'web'
+        }
+        catch { $response = Get-AppServerUsageResponse; $source = 'app-server' }
+    }
+
+    $additional = @()
+    if ($source -eq 'app-server') {
+        $mainSource = Get-Property $response 'rateLimits' $null
+        $rateLimit = Convert-Limit $mainSource
+        $limitsById = Get-Property $response 'rateLimitsByLimitId' $null
+        if ($limitsById) {
+            foreach ($property in $limitsById.PSObject.Properties) {
+                $entry = $property.Value
+                if ((Get-Property $entry 'limitId' '') -eq (Get-Property $mainSource 'limitId' '')) { continue }
+                $additional += [ordered]@{
+                    limit_name = [string] (Get-Property $entry 'limitName' $property.Name)
+                    metered_feature = Get-Property $entry 'limitId' $property.Name
+                    rate_limit = Convert-Limit $entry
+                }
+            }
+        }
+        $creditsSource = Get-Property $mainSource 'credits' $null
+        $credits = if ($creditsSource) {
+            [ordered]@{
+                has_credits = [bool] (Get-Property $creditsSource 'hasCredits' $false)
+                unlimited = [bool] (Get-Property $creditsSource 'unlimited' $false)
+                overage_limit_reached = $false
+                balance = Get-Property $creditsSource 'balance' $null
+            }
+        } else { $null }
+        $planType = Get-Property $mainSource 'planType' $null
+        $codeReviewLimit = $null
+        $spendControlReached = $false
+        $reachedType = Get-Property $mainSource 'rateLimitReachedType' $null
+        $resetCredits = Get-Property (Get-Property $response 'rateLimitResetCredits' $null) 'availableCount' 0
+    } else {
+        $rateLimit = Convert-Limit (Get-Property $response 'rate_limit' $null)
+        foreach ($entry in @(Get-Property $response 'additional_rate_limits' @())) {
+            $additional += [ordered]@{
+                limit_name = [string] (Get-Property $entry 'limit_name' 'Additional limit')
+                metered_feature = Get-Property $entry 'metered_feature' $null
+                rate_limit = Convert-Limit (Get-Property $entry 'rate_limit' $null)
+            }
+        }
+        $creditsSource = Get-Property $response 'credits' $null
+        $credits = if ($creditsSource) {
+            [ordered]@{
+                has_credits = [bool] (Get-Property $creditsSource 'has_credits' $false)
+                unlimited = [bool] (Get-Property $creditsSource 'unlimited' $false)
+                overage_limit_reached = [bool] (Get-Property $creditsSource 'overage_limit_reached' $false)
+                balance = Get-Property $creditsSource 'balance' $null
+            }
+        } else { $null }
+        $planType = Get-Property $response 'plan_type' $null
+        $codeReviewLimit = Convert-Limit (Get-Property $response 'code_review_rate_limit' $null)
+        $spendControlReached = [bool] (Get-Property (Get-Property $response 'spend_control' $null) 'reached' $false)
+        $reachedType = Get-Property $response 'rate_limit_reached_type' $null
+        $resetCredits = Get-Property (Get-Property $response 'rate_limit_reset_credits' $null) 'available_count' 0
+    }
     if ($null -eq $rateLimit -or ($null -eq $rateLimit.primary_window -and $null -eq $rateLimit.secondary_window)) {
         throw 'OpenAI returned no Codex rate-limit window.'
     }
-    $additional = @()
-    foreach ($entry in @(Get-Property $response 'additional_rate_limits' @())) {
-        $additional += [ordered]@{
-            limit_name = [string] (Get-Property $entry 'limit_name' 'Additional limit')
-            metered_feature = Get-Property $entry 'metered_feature' $null
-            rate_limit = Convert-Limit (Get-Property $entry 'rate_limit' $null)
-        }
-    }
-    $creditsSource = Get-Property $response 'credits' $null
-    $credits = if ($creditsSource) {
-        [ordered]@{
-            has_credits = [bool] (Get-Property $creditsSource 'has_credits' $false)
-            unlimited = [bool] (Get-Property $creditsSource 'unlimited' $false)
-            overage_limit_reached = [bool] (Get-Property $creditsSource 'overage_limit_reached' $false)
-            balance = Get-Property $creditsSource 'balance' $null
-        }
-    } else { $null }
-    $spendControl = Get-Property $response 'spend_control' $null
-    $resetCredits = Get-Property $response 'rate_limit_reset_credits' $null
     $snapshot = [ordered]@{
         version = 1
         fetched_at = $now
-        plan_type = Get-Property $response 'plan_type' $null
+        source = $source
+        plan_type = $planType
         rate_limit = $rateLimit
-        code_review_rate_limit = Convert-Limit (Get-Property $response 'code_review_rate_limit' $null)
+        code_review_rate_limit = $codeReviewLimit
         additional_rate_limits = $additional
         credits = $credits
-        spend_control_reached = [bool] (Get-Property $spendControl 'reached' $false)
-        rate_limit_reached_type = Get-Property $response 'rate_limit_reached_type' $null
-        reset_credits_available = [int] (Get-Property $resetCredits 'available_count' 0)
+        spend_control_reached = $spendControlReached
+        rate_limit_reached_type = $reachedType
+        reset_credits_available = [int] $resetCredits
     }
     Write-AtomicText $cacheFile (($snapshot | ConvertTo-Json -Depth 20 -Compress) + "`n")
     Write-AtomicText $summaryFile ((Get-CompactSummary $snapshot) + "`n")
@@ -235,6 +417,17 @@ function Write-Detail($Snapshot) {
     foreach ($entry in @(Get-Property $Snapshot 'additional_rate_limits' @())) {
         Write-LimitRows ([string] $entry.limit_name) (Get-Property $entry 'rate_limit' $null)
     }
+    $remainingValues = @()
+    $mainForAlert = Get-Property $Snapshot 'rate_limit' $null
+    if ($mainForAlert) {
+        foreach ($windowName in @('primary_window', 'secondary_window')) {
+            $window = Get-Property $mainForAlert $windowName $null
+            if ($window) { $remainingValues += Get-RemainingPercent $window }
+        }
+    }
+    if ($alertPercent -gt 0 -and $remainingValues.Count -gt 0 -and ($remainingValues | Measure-Object -Minimum).Minimum -le $alertPercent) {
+        Write-Output "Warning: Codex capacity is at or below the configured $alertPercent% alert threshold."
+    }
     $resetCredits = [int] (Get-Property $Snapshot 'reset_credits_available' 0)
     if ($resetCredits -gt 0) { Write-Output "Rate-limit reset credits: $resetCredits" }
     $mainLimit = Get-Property $Snapshot 'rate_limit' $null
@@ -243,7 +436,12 @@ function Write-Detail($Snapshot) {
     }
     $fetched = [long] (Get-Property $Snapshot 'fetched_at' 0)
     if ($fetched -gt 0) { Write-Output "Updated: $(Format-Epoch $fetched)" }
+    Write-Output "Source: $([string] (Get-Property $Snapshot 'source' 'web'))"
 }
+
+$accountMode = $Accounts -or -not [string]::IsNullOrWhiteSpace($Account)
+if ($Accounts) { Show-CodexAccounts; exit 0 }
+if (-not [string]::IsNullOrWhiteSpace($Account)) { Select-CodexAccount $Account; exit 0 }
 
 $refreshFailed = $false
 try {

@@ -120,6 +120,9 @@ if [[ -z "$effort" && -r "${CLAUDE_CONFIG_DIR:-$HOME/.config/claudex}/settings.j
   effort=$(jq -r '.effortLevel // empty' \
     "${CLAUDE_CONFIG_DIR:-$HOME/.config/claudex}/settings.json" 2>/dev/null) || effort=""
 fi
+if [[ -n "${CLAUDEX_SESSION_MODE:-}" ]]; then
+  effort="$CLAUDEX_SESSION_MODE"
+fi
 readonly effort="${effort:-adaptive}"
 
 case "$model_id" in

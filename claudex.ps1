@@ -62,6 +62,8 @@ $usageDisplay = Env-OrDefault 'CLAUDEX_USAGE_DISPLAY' 'on'
 $usageRefresh = Env-OrDefault 'CLAUDEX_USAGE_REFRESH_SECONDS' '300'
 $usageTimeout = Env-OrDefault 'CLAUDEX_USAGE_TIMEOUT_SECONDS' '8'
 $usageMaxStale = Env-OrDefault 'CLAUDEX_USAGE_MAX_STALE_SECONDS' '86400'
+$usageSource = Env-OrDefault 'CLAUDEX_USAGE_SOURCE' 'auto'
+$usageAlert = Env-OrDefault 'CLAUDEX_USAGE_ALERT_PERCENT' '20'
 
 if ($permissionMode -notin @('manual', 'auto', 'acceptEdits', 'dontAsk', 'plan')) {
     Fail "invalid CLAUDEX_PERMISSION_MODE '$permissionMode'; expected manual, auto, acceptEdits, dontAsk, or plan." 2
@@ -83,10 +85,12 @@ $compactWindowNumber = Require-Integer 'CLAUDEX_AUTO_COMPACT_WINDOW' $compactWin
 $usageRefreshNumber = Require-Integer 'CLAUDEX_USAGE_REFRESH_SECONDS' $usageRefresh 60 3600
 $usageTimeoutNumber = Require-Integer 'CLAUDEX_USAGE_TIMEOUT_SECONDS' $usageTimeout 1 30
 $usageMaxStaleNumber = Require-Integer 'CLAUDEX_USAGE_MAX_STALE_SECONDS' $usageMaxStale $usageRefreshNumber 604800
+$usageAlertNumber = Require-Integer 'CLAUDEX_USAGE_ALERT_PERCENT' $usageAlert 0 100
 if ($mousePointer -notin @('pointer', 'default', 'off')) {
     Fail 'CLAUDEX_MOUSE_POINTER_SHAPE must be pointer, default, or off.' 2
 }
 if ($usageDisplay -notin @('on', 'off')) { Fail 'CLAUDEX_USAGE_DISPLAY must be on or off.' 2 }
+if ($usageSource -notin @('auto', 'web', 'app-server')) { Fail 'CLAUDEX_USAGE_SOURCE must be auto, web, or app-server.' 2 }
 
 $env:CLAUDE_CONFIG_DIR = $configDir
 $stateFile = Join-Path $configDir '.claude.json'
@@ -203,6 +207,10 @@ function Invoke-Doctor {
     Write-Output "Auto-compact window: $compactWindowNumber tokens (precompute enabled)"
     Write-Output 'Context status: session-stabilized (transient zero suppressed)'
     Write-Output "Codex usage: status-line refresh every ${usageRefreshNumber}s; inspect with /usage-limit or claudex --usage-limit"
+    Write-Output "Usage source: $usageSource (documented Codex app-server fallback enabled in auto mode)"
+    Write-Output "Low-quota alert: $usageAlertNumber% remaining (0 disables)"
+    Write-Output 'Effort shortcuts: --max-effort and --ultracode (xhigh plus dynamic workflows)'
+    Write-Output 'Claude in Chrome: use --claude-chrome for the direct Anthropic profile required by the extension'
     Write-Output 'Rendering: no-flicker mode with native terminal cursor'
     Write-Output 'Terminal UI: fullscreen (launch command hidden while Claudex is open)'
     Write-Output 'Header model name: GPT-5.6 Sol'
@@ -231,36 +239,126 @@ if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '--usage-limit') {
     exit 1
 }
 
-Ensure-Proxy
+if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '--accounts') {
+    $usageHelper = Join-Path $configDir 'usage-limit.ps1'
+    if (-not (Test-Path -LiteralPath $usageHelper -PathType Leaf)) { Fail 'usage-limit helper is missing; reinstall Claudex.' }
+    & $usageHelper -Accounts
+    if ($?) { exit 0 } else { exit 1 }
+}
 
-$env:ANTHROPIC_BASE_URL = $proxyUrl
-$env:ANTHROPIC_AUTH_TOKEN = $proxyToken
-$env:ANTHROPIC_DEFAULT_OPUS_MODEL = 'gpt-5.6-sol'
-$env:ANTHROPIC_DEFAULT_SONNET_MODEL = 'gpt-5.6-terra'
-$env:ANTHROPIC_DEFAULT_HAIKU_MODEL = 'gpt-5.6-luna'
-$env:ANTHROPIC_DEFAULT_OPUS_MODEL_NAME = 'GPT-5.6 Sol'
-$env:ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = 'GPT-5.6 Terra'
-$env:ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME = 'GPT-5.6 Luna'
-$env:ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION = 'Frontier capability for planning and the hardest engineering work'
-$env:ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION = 'Balanced intelligence, speed, and cost for everyday coding'
-$env:ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION = 'Fast, efficient model for search, triage, and mechanical tasks'
-$capabilities = 'effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking'
-$env:ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES = $capabilities
-$env:ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = $capabilities
-$env:ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES = $capabilities
-$env:CLAUDE_CODE_AUTO_MODE_MODEL = $autoModeModel
-$env:CLAUDE_CODE_BG_CLASSIFIER_MODEL = $backgroundModel
-$env:CLAUDE_CODE_SUBAGENT_MODEL = $subagentModel
-$env:CLAUDE_CODE_ALWAYS_ENABLE_EFFORT = '1'
-$env:CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY = [string] $toolConcurrencyNumber
-$env:CLAUDE_CODE_MAX_RETRIES = [string] $maxRetriesNumber
-$env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = [string] $contextWindowNumber
-$env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = [string] $compactWindowNumber
+if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '--account') {
+    if ($ClaudeArguments.Count -ne 2) { Fail 'Usage: claudex --account <number|email|filename|auto>' 2 }
+    $usageHelper = Join-Path $configDir 'usage-limit.ps1'
+    if (-not (Test-Path -LiteralPath $usageHelper -PathType Leaf)) { Fail 'usage-limit helper is missing; reinstall Claudex.' }
+    & $usageHelper -Account $ClaudeArguments[1]
+    if ($?) { exit 0 } else { exit 1 }
+}
+
+$startModel = ''
+$effortMode = ''
+$launchPermissionMode = $permissionMode
+$directChrome = $false
+$forwardArguments = New-Object 'System.Collections.Generic.List[string]'
+$index = 0
+while ($index -lt $ClaudeArguments.Count) {
+    $argument = $ClaudeArguments[$index]
+    switch ($argument) {
+        '--sol' { $startModel = 'gpt-5.6-sol' }
+        '--terra' { $startModel = 'gpt-5.6-terra' }
+        '--luna' { $startModel = 'gpt-5.6-luna' }
+        '--manual' { $launchPermissionMode = 'manual' }
+        '--auto' { $launchPermissionMode = 'auto' }
+        '--accept-edits' { $launchPermissionMode = 'acceptEdits' }
+        '--ultracode' {
+            if ($effortMode -and $effortMode -ne 'ultracode') { Fail '--ultracode and --max-effort cannot be combined.' 2 }
+            $effortMode = 'ultracode'
+        }
+        '--max-effort' {
+            if ($effortMode -and $effortMode -ne 'max') { Fail '--ultracode and --max-effort cannot be combined.' 2 }
+            $effortMode = 'max'
+        }
+        '--claude-chrome' { $directChrome = $true }
+        '--' {
+            $forwardArguments.Add('--')
+            $index++
+            while ($index -lt $ClaudeArguments.Count) { $forwardArguments.Add($ClaudeArguments[$index]); $index++ }
+            continue
+        }
+        default { $forwardArguments.Add($argument) }
+    }
+    $index++
+}
+
+$useProxy = $true
+$injectSessionCustomizations = $true
+$injectPermission = $true
+$maintenanceCommands = @('--help', '-h', '--version', '-v', 'agents', 'auth', 'auto-mode', 'doctor', 'gateway', 'install', 'mcp', 'plugin', 'plugins', 'project', 'setup-token', 'ultrareview', 'update', 'upgrade')
+if ($forwardArguments.Count -gt 0 -and $forwardArguments[0] -in $maintenanceCommands) {
+    $useProxy = $false
+    $injectSessionCustomizations = $false
+    $injectPermission = $false
+}
+foreach ($argument in $forwardArguments) {
+    if ($argument -in @('--safe-mode', '--bare')) {
+        $injectSessionCustomizations = $false
+        $injectPermission = $false
+    }
+    if ($argument -eq '--agents') { $injectSessionCustomizations = $false }
+    if ($argument -in @('--permission-mode', '--dangerously-skip-permissions', '--allow-dangerously-skip-permissions')) { $injectPermission = $false }
+    if ($effortMode -and ($argument -in @('--effort', '--settings') -or $argument.StartsWith('--effort=') -or $argument.StartsWith('--settings='))) {
+        Fail "$argument conflicts with the selected Claudex effort shortcut." 2
+    }
+}
+
+if ($directChrome) {
+    if ($startModel) { Fail '--sol, --terra, and --luna cannot be combined with --claude-chrome because Chrome requires a first-party Anthropic model.' 2 }
+    $useProxy = $false
+    $injectSessionCustomizations = $false
+    $injectPermission = $false
+    if ($env:CLAUDEX_CHROME_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR = $env:CLAUDEX_CHROME_CONFIG_DIR }
+    else { Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
+    Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue
+    $forwardArguments.Insert(0, '--chrome')
+}
+
+if ($useProxy) {
+    Ensure-Proxy
+
+    $env:ANTHROPIC_BASE_URL = $proxyUrl
+    $env:ANTHROPIC_AUTH_TOKEN = $proxyToken
+    $env:ANTHROPIC_DEFAULT_OPUS_MODEL = 'gpt-5.6-sol'
+    $env:ANTHROPIC_DEFAULT_SONNET_MODEL = 'gpt-5.6-terra'
+    $env:ANTHROPIC_DEFAULT_HAIKU_MODEL = 'gpt-5.6-luna'
+    $env:ANTHROPIC_DEFAULT_OPUS_MODEL_NAME = 'GPT-5.6 Sol'
+    $env:ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = 'GPT-5.6 Terra'
+    $env:ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME = 'GPT-5.6 Luna'
+    $env:ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION = 'Frontier capability for planning and the hardest engineering work'
+    $env:ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION = 'Balanced intelligence, speed, and cost for everyday coding'
+    $env:ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION = 'Fast, efficient model for search, triage, and mechanical tasks'
+    $capabilities = 'effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking'
+    $env:ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES = $capabilities
+    $env:ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = $capabilities
+    $env:ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES = $capabilities
+    $env:CLAUDE_CODE_AUTO_MODE_MODEL = $autoModeModel
+    $env:CLAUDE_CODE_BG_CLASSIFIER_MODEL = $backgroundModel
+    $env:CLAUDE_CODE_SUBAGENT_MODEL = $subagentModel
+    $env:CLAUDE_CODE_ALWAYS_ENABLE_EFFORT = '1'
+    $env:CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY = [string] $toolConcurrencyNumber
+    $env:CLAUDE_CODE_MAX_RETRIES = [string] $maxRetriesNumber
+    $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = [string] $contextWindowNumber
+    $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = [string] $compactWindowNumber
+} else {
+    Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue
+}
 $env:CLAUDE_CODE_USE_POWERSHELL_TOOL = '1'
 $env:CLAUDEX_USAGE_DISPLAY = $usageDisplay
 $env:CLAUDEX_USAGE_REFRESH_SECONDS = [string] $usageRefreshNumber
 $env:CLAUDEX_USAGE_TIMEOUT_SECONDS = [string] $usageTimeoutNumber
 $env:CLAUDEX_USAGE_MAX_STALE_SECONDS = [string] $usageMaxStaleNumber
+$env:CLAUDEX_USAGE_SOURCE = $usageSource
+$env:CLAUDEX_USAGE_ALERT_PERCENT = [string] $usageAlertNumber
 $env:CLAUDE_CODE_NO_FLICKER = '1'
 $env:CLAUDE_CODE_ACCESSIBILITY = '1'
 
@@ -274,36 +372,33 @@ $capacityGuard = "Claudex capacity rule: keep at most $agentConcurrencyNumber Ag
 $taskGuard = 'Claudex task lifecycle rule: the Sol leader is the sole owner of the shared task list. Keep it compact and create only tasks that represent real remaining deliverables, not duplicate discovery lanes or speculative work. Mark a task in_progress only while the leader or a currently active agent is working on it; queued or blocked work stays pending. After every agent result, immediately reconcile its parent task and mark it completed once its outcome is integrated and verified. Before every final answer, call TaskList and reconcile every entry: completed work must be completed, inactive work must not remain in_progress, and genuinely unfinished pending work must be explicitly reported instead of being hidden behind a completion claim. Never leave stale in_progress tasks after their work is done.'
 $leaderGuard = $capacityGuard + [Environment]::NewLine + [Environment]::NewLine + $taskGuard
 
-$startModel = ''
-$launchPermissionMode = $permissionMode
-$forwardArguments = New-Object 'System.Collections.Generic.List[string]'
-$index = 0
-while ($index -lt $ClaudeArguments.Count) {
-    $argument = $ClaudeArguments[$index]
-    $recognized = $true
-    switch ($argument) {
-        '--sol' { $startModel = 'gpt-5.6-sol' }
-        '--terra' { $startModel = 'gpt-5.6-terra' }
-        '--luna' { $startModel = 'gpt-5.6-luna' }
-        '--manual' { $launchPermissionMode = 'manual' }
-        '--auto' { $launchPermissionMode = 'auto' }
-        '--accept-edits' { $launchPermissionMode = 'acceptEdits' }
-        '--' { $index++; $recognized = $false }
-        default { $recognized = $false }
-    }
-    if (-not $recognized) { break }
-    $index++
-}
-while ($index -lt $ClaudeArguments.Count) { $forwardArguments.Add($ClaudeArguments[$index]); $index++ }
-
 $claudeLaunchArguments = New-Object 'System.Collections.Generic.List[string]'
-foreach ($value in @('--agents', $agentsJson, '--append-system-prompt', $leaderGuard, '--permission-mode', $launchPermissionMode)) {
-    $claudeLaunchArguments.Add($value)
+if ($injectSessionCustomizations) {
+    foreach ($value in @('--agents', $agentsJson, '--append-system-prompt', $leaderGuard)) { $claudeLaunchArguments.Add($value) }
 }
-if ($settingsFile -ne (Join-Path $configDir 'settings.json')) {
+if ($injectPermission) {
+    $claudeLaunchArguments.Add('--permission-mode'); $claudeLaunchArguments.Add($launchPermissionMode)
+}
+if ($settingsFile -ne (Join-Path $configDir 'settings.json') -and $effortMode -ne 'ultracode') {
     $claudeLaunchArguments.Add('--settings'); $claudeLaunchArguments.Add($settingsFile)
 }
 if ($startModel) { $claudeLaunchArguments.Add('--model'); $claudeLaunchArguments.Add($startModel) }
+if ($effortMode -eq 'ultracode') {
+    if ($directChrome) { $ultracodeSettings = [pscustomobject]@{ ultracode = $true; workflows = $true } }
+    else {
+        $ultracodeSettings = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
+        $ultracodeSettings | Add-Member -NotePropertyName ultracode -NotePropertyValue $true -Force
+        $ultracodeSettings | Add-Member -NotePropertyName workflows -NotePropertyValue $true -Force
+    }
+    $claudeLaunchArguments.Add('--settings'); $claudeLaunchArguments.Add(($ultracodeSettings | ConvertTo-Json -Depth 100 -Compress))
+    $claudeLaunchArguments.Add('--effort'); $claudeLaunchArguments.Add('xhigh')
+    $env:CLAUDEX_SESSION_MODE = 'ultracode'
+    $env:CLAUDE_CODE_EFFORT_LEVEL = 'xhigh'
+} elseif ($effortMode -eq 'max') {
+    $claudeLaunchArguments.Add('--effort'); $claudeLaunchArguments.Add('max')
+    $env:CLAUDEX_SESSION_MODE = 'max'
+    $env:CLAUDE_CODE_EFFORT_LEVEL = 'max'
+}
 foreach ($value in $forwardArguments) { $claudeLaunchArguments.Add($value) }
 
 function Set-MousePointer([string] $Shape) {

@@ -40,6 +40,8 @@ source "$config_file"
 : "${CLAUDEX_USAGE_REFRESH_SECONDS:=300}"
 : "${CLAUDEX_USAGE_TIMEOUT_SECONDS:=8}"
 : "${CLAUDEX_USAGE_MAX_STALE_SECONDS:=86400}"
+: "${CLAUDEX_USAGE_SOURCE:=auto}"
+: "${CLAUDEX_USAGE_ALERT_PERCENT:=20}"
 
 case "$CLAUDEX_PROXY_TOKEN" in
   *$'\n'*|*$'\r'*)
@@ -112,6 +114,16 @@ if [[ ! "$CLAUDEX_USAGE_MAX_STALE_SECONDS" =~ ^[0-9]+$ ]] || (( CLAUDEX_USAGE_MA
   printf '%s\n' "claudex: CLAUDEX_USAGE_MAX_STALE_SECONDS must be between the refresh interval and 604800." >&2
   exit 2
 fi
+case "$CLAUDEX_USAGE_SOURCE" in auto|web|app-server) ;;
+  *) printf '%s\n' 'claudex: CLAUDEX_USAGE_SOURCE must be auto, web, or app-server.' >&2; exit 2 ;;
+esac
+if [[ ! "$CLAUDEX_USAGE_ALERT_PERCENT" =~ ^[0-9]+$ ]] || (( CLAUDEX_USAGE_ALERT_PERCENT < 0 || CLAUDEX_USAGE_ALERT_PERCENT > 100 )); then
+  printf '%s\n' 'claudex: CLAUDEX_USAGE_ALERT_PERCENT must be an integer from 0 to 100.' >&2
+  exit 2
+fi
+
+export CLAUDEX_USAGE_DISPLAY CLAUDEX_USAGE_REFRESH_SECONDS CLAUDEX_USAGE_TIMEOUT_SECONDS CLAUDEX_USAGE_MAX_STALE_SECONDS
+export CLAUDEX_USAGE_SOURCE CLAUDEX_USAGE_ALERT_PERCENT
 
 # Keep Claudex model choices, sessions, and preferences isolated from normal Claude Code.
 export CLAUDE_CONFIG_DIR="$claudex_config_dir"
@@ -271,6 +283,10 @@ doctor() {
   printf '%s\n' "Auto-compact window: ${CLAUDEX_AUTO_COMPACT_WINDOW} tokens (precompute enabled)"
   printf '%s\n' "Context status: session-stabilized (transient zero suppressed)"
   printf '%s\n' "Codex usage: status-line refresh every ${CLAUDEX_USAGE_REFRESH_SECONDS}s; inspect with /usage-limit or claudex --usage-limit"
+  printf '%s\n' "Usage source: ${CLAUDEX_USAGE_SOURCE} (documented Codex app-server fallback enabled in auto mode)"
+  printf '%s\n' "Low-quota alert: ${CLAUDEX_USAGE_ALERT_PERCENT}% remaining (0 disables)"
+  printf '%s\n' 'Effort shortcuts: --max-effort and --ultracode (xhigh plus dynamic workflows)'
+  printf '%s\n' 'Claude in Chrome: use --claude-chrome for the direct Anthropic profile required by the extension'
   printf '%s\n' "Rendering: no-flicker mode with native terminal cursor"
   printf '%s\n' "Terminal UI: fullscreen (launch command hidden while Claudex is open)"
   printf '%s\n' "Header model name: GPT-5.6 Sol"
@@ -305,45 +321,160 @@ if [[ "${1:-}" == "--usage-limit" ]]; then
   exec "$usage_helper" "$@"
 fi
 
-ensure_proxy
+if [[ "${1:-}" == "--accounts" ]]; then
+  usage_helper="$CLAUDE_CONFIG_DIR/usage-limit"
+  [[ -x "$usage_helper" ]] || {
+    printf '%s\n' "claudex: usage-limit helper is missing; reinstall Claudex." >&2
+    exit 1
+  }
+  exec "$usage_helper" --accounts
+fi
 
-export ANTHROPIC_BASE_URL="$CLAUDEX_PROXY_URL"
-export ANTHROPIC_AUTH_TOKEN="$CLAUDEX_PROXY_TOKEN"
+if [[ "${1:-}" == "--account" ]]; then
+  shift
+  [[ $# -eq 1 ]] || {
+    printf '%s\n' "Usage: claudex --account <number|email|filename|auto>" >&2
+    exit 2
+  }
+  usage_helper="$CLAUDE_CONFIG_DIR/usage-limit"
+  [[ -x "$usage_helper" ]] || {
+    printf '%s\n' "claudex: usage-limit helper is missing; reinstall Claudex." >&2
+    exit 1
+  }
+  exec "$usage_helper" --account "$1"
+fi
+
+start_model=""
+effort_mode=""
+permission_mode="$CLAUDEX_PERMISSION_MODE"
+direct_chrome=0
+forwarded_args=()
+while (( $# > 0 )); do
+  case "$1" in
+    --sol) start_model="gpt-5.6-sol" ;;
+    --terra) start_model="gpt-5.6-terra" ;;
+    --luna) start_model="gpt-5.6-luna" ;;
+    --manual) permission_mode="manual" ;;
+    --auto) permission_mode="auto" ;;
+    --accept-edits) permission_mode="acceptEdits" ;;
+    --ultracode)
+      [[ -z "$effort_mode" || "$effort_mode" == ultracode ]] || {
+        printf '%s\n' 'claudex: --ultracode and --max-effort cannot be combined.' >&2
+        exit 2
+      }
+      effort_mode=ultracode
+      ;;
+    --max-effort)
+      [[ -z "$effort_mode" || "$effort_mode" == max ]] || {
+        printf '%s\n' 'claudex: --ultracode and --max-effort cannot be combined.' >&2
+        exit 2
+      }
+      effort_mode=max
+      ;;
+    --claude-chrome) direct_chrome=1 ;;
+    --)
+      forwarded_args+=(--)
+      shift
+      forwarded_args+=("$@")
+      break
+      ;;
+    *) forwarded_args+=("$1") ;;
+  esac
+  shift
+done
+use_proxy=1
+inject_session_customizations=1
+inject_permission=1
+
+case "${forwarded_args[0]:-}" in
+  --help|-h|--version|-v|agents|auth|auto-mode|doctor|gateway|install|mcp|plugin|plugins|project|setup-token|ultrareview|update|upgrade)
+    use_proxy=0
+    inject_session_customizations=0
+    inject_permission=0
+    ;;
+esac
+
+for argument in "${forwarded_args[@]}"; do
+  case "$argument" in
+    --safe-mode|--bare)
+      inject_session_customizations=0
+      inject_permission=0
+      ;;
+    --agents) inject_session_customizations=0 ;;
+    --permission-mode|--dangerously-skip-permissions|--allow-dangerously-skip-permissions)
+      inject_permission=0
+      ;;
+    --effort|--effort=*|--settings|--settings=*)
+      if [[ -n "$effort_mode" ]]; then
+        printf '%s\n' "claudex: $argument conflicts with the selected Claudex effort shortcut." >&2
+        exit 2
+      fi
+      ;;
+  esac
+done
+
+if (( direct_chrome )); then
+  [[ -z "$start_model" ]] || {
+    printf '%s\n' 'claudex: --sol, --terra, and --luna cannot be combined with --claude-chrome because Chrome requires a first-party Anthropic model.' >&2
+    exit 2
+  }
+  use_proxy=0
+  inject_session_customizations=0
+  inject_permission=0
+  if [[ -n "${CLAUDEX_CHROME_CONFIG_DIR:-}" ]]; then
+    export CLAUDE_CONFIG_DIR="$CLAUDEX_CHROME_CONFIG_DIR"
+  else
+    unset CLAUDE_CONFIG_DIR
+  fi
+  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
+  forwarded_args=(--chrome "${forwarded_args[@]}")
+fi
+
+if (( use_proxy )); then
+  ensure_proxy
+
+  export ANTHROPIC_BASE_URL="$CLAUDEX_PROXY_URL"
+  export ANTHROPIC_AUTH_TOKEN="$CLAUDEX_PROXY_TOKEN"
 
 # Map one Claude Code selector alias onto each GPT-5.6 model. Registering the
 # same model through Fable, Opus, and the custom slot creates duplicate rows.
-export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.6-sol"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="gpt-5.6-terra"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-5.6-luna"
-export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="GPT-5.6 Sol"
-export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="GPT-5.6 Terra"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="GPT-5.6 Luna"
-export ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION="Frontier capability for planning and the hardest engineering work"
-export ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION="Balanced intelligence, speed, and cost for everyday coding"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION="Fast, efficient model for search, triage, and mechanical tasks"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.6-sol"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="gpt-5.6-terra"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-5.6-luna"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="GPT-5.6 Sol"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="GPT-5.6 Terra"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="GPT-5.6 Luna"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION="Frontier capability for planning and the hardest engineering work"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION="Balanced intelligence, speed, and cost for everyday coding"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION="Fast, efficient model for search, triage, and mechanical tasks"
 
-readonly gpt56_capabilities="effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
-export ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
-export ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
+  readonly gpt56_capabilities="effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
 
 # Claude Code otherwise chooses Sonnet 5 for an external-provider auto-mode classifier,
 # which Claudex maps to Terra. Pinning the classifier prevents misleading Terra outages.
-export CLAUDE_CODE_AUTO_MODE_MODEL="$CLAUDEX_AUTO_MODE_MODEL"
-export CLAUDE_CODE_BG_CLASSIFIER_MODEL="$CLAUDEX_BACKGROUND_MODEL"
-export CLAUDE_CODE_SUBAGENT_MODEL="$CLAUDEX_SUBAGENT_MODEL"
-export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1
-export CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY="$CLAUDEX_MAX_TOOL_USE_CONCURRENCY"
-export CLAUDE_CODE_MAX_RETRIES="$CLAUDEX_MAX_RETRIES"
-export CLAUDEX_USAGE_DISPLAY CLAUDEX_USAGE_REFRESH_SECONDS CLAUDEX_USAGE_TIMEOUT_SECONDS CLAUDEX_USAGE_MAX_STALE_SECONDS
-export CLAUDE_CODE_NO_FLICKER=1
-export CLAUDE_CODE_ACCESSIBILITY=1
+  export CLAUDE_CODE_AUTO_MODE_MODEL="$CLAUDEX_AUTO_MODE_MODEL"
+  export CLAUDE_CODE_BG_CLASSIFIER_MODEL="$CLAUDEX_BACKGROUND_MODEL"
+  export CLAUDE_CODE_SUBAGENT_MODEL="$CLAUDEX_SUBAGENT_MODEL"
+  export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1
+  export CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY="$CLAUDEX_MAX_TOOL_USE_CONCURRENCY"
+  export CLAUDE_CODE_MAX_RETRIES="$CLAUDEX_MAX_RETRIES"
 
 # Claude Code assumes unknown custom models have a 200k context window. Claudex's
 # GPT-5.6 backend supports a larger window, so make the meter accurate and force
 # client-side summarization before the session grows without bound.
-export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$CLAUDEX_CONTEXT_WINDOW"
-export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$CLAUDEX_AUTO_COMPACT_WINDOW"
+  export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$CLAUDEX_CONTEXT_WINDOW"
+  export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$CLAUDEX_AUTO_COMPACT_WINDOW"
+else
+  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
+fi
+
+export CLAUDEX_USAGE_DISPLAY CLAUDEX_USAGE_REFRESH_SECONDS CLAUDEX_USAGE_TIMEOUT_SECONDS CLAUDEX_USAGE_MAX_STALE_SECONDS
+export CLAUDEX_USAGE_SOURCE CLAUDEX_USAGE_ALERT_PERCENT
+export CLAUDE_CODE_NO_FLICKER=1
+export CLAUDE_CODE_ACCESSIBILITY=1
 
 # One proxy credential backs all three aliases. Custom agents must not recursively
 # spawn more agents, or a small parallel batch becomes a retry/429 storm.
@@ -355,29 +486,34 @@ readonly claudex_leader_guard="${claudex_capacity_guard}
 
 ${claudex_task_guard}"
 
-start_model=""
-permission_mode="$CLAUDEX_PERMISSION_MODE"
-while (( $# > 0 )); do
-  case "$1" in
-    --sol) start_model="gpt-5.6-sol" ;;
-    --terra) start_model="gpt-5.6-terra" ;;
-    --luna) start_model="gpt-5.6-luna" ;;
-    --manual) permission_mode="manual" ;;
-    --auto) permission_mode="auto" ;;
-    --accept-edits) permission_mode="acceptEdits" ;;
-    --) shift; break ;;
-    *) break ;;
-  esac
-  shift
-done
-
-claude_args=(--agents "$claudex_agents" --append-system-prompt "$claudex_leader_guard" --permission-mode "$permission_mode")
-if [[ "$settings_file" != "$CLAUDE_CONFIG_DIR/settings.json" ]]; then
+claude_args=()
+if (( inject_session_customizations )); then
+  claude_args+=(--agents "$claudex_agents" --append-system-prompt "$claudex_leader_guard")
+fi
+if (( inject_permission )); then
+  claude_args+=(--permission-mode "$permission_mode")
+fi
+if (( ! direct_chrome )) && [[ "$settings_file" != "$CLAUDE_CONFIG_DIR/settings.json" && "$effort_mode" != ultracode ]]; then
   claude_args+=(--settings "$settings_file")
 fi
 if [[ -n "$start_model" ]]; then
   claude_args+=(--model "$start_model")
 fi
+case "$effort_mode" in
+  ultracode)
+    if (( direct_chrome )); then
+      ultracode_settings='{"ultracode":true,"workflows":true}'
+    else
+      ultracode_settings=$(jq -c '. + {ultracode: true, workflows: true}' "$settings_file")
+    fi
+    claude_args+=(--settings "$ultracode_settings" --effort xhigh)
+    export CLAUDEX_SESSION_MODE=ultracode CLAUDE_CODE_EFFORT_LEVEL=xhigh
+    ;;
+  max)
+    claude_args+=(--effort max)
+    export CLAUDEX_SESSION_MODE=max CLAUDE_CODE_EFFORT_LEVEL=max
+    ;;
+esac
 
 emit_mouse_pointer_shape() {
   local shape="$1"
@@ -390,4 +526,4 @@ emit_mouse_pointer_shape() {
 emit_mouse_pointer_shape "$CLAUDEX_MOUSE_POINTER_SHAPE"
 trap 'emit_mouse_pointer_shape default' EXIT
 
-claude "${claude_args[@]}" "$@"
+claude "${claude_args[@]}" "${forwarded_args[@]}"

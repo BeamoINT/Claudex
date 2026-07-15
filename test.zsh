@@ -22,6 +22,7 @@ for argument in "$@"; do
   fi
   if [[ "$argument" == *'/wham/usage'* ]]; then
     [[ "${FAKE_USAGE_FAIL:-0}" != 1 ]] || exit 22
+    if [[ "${FAKE_USAGE_CHANGED:-0}" == 1 ]]; then printf '%s\n' '{"new_usage_schema":true}'; exit; fi
     printf '%s\n' '{"user_id":"private-user","account_id":"private-account","email":"private@example.com","plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":82,"limit_window_seconds":604800,"reset_after_seconds":565127,"reset_at":1784666240},"secondary_window":null},"code_review_rate_limit":null,"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","metered_feature":"codex_bengalfox","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":1784705933},"secondary_window":null}}],"credits":{"has_credits":false,"unlimited":false,"overage_limit_reached":false,"balance":"0"},"spend_control":{"reached":false,"individual_limit":null},"rate_limit_reached_type":null,"rate_limit_reset_credits":{"available_count":1}}'
     exit
   fi
@@ -45,7 +46,20 @@ printf '%s\n' "NO_FLICKER=${CLAUDE_CODE_NO_FLICKER}"
 printf '%s\n' "ACCESSIBILITY=${CLAUDE_CODE_ACCESSIBILITY}"
 printf '%s\n' "OPUS=${ANTHROPIC_DEFAULT_OPUS_MODEL}"
 printf '%s\n' "OPUS_NAME=${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME}"
+printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
+printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
+printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
 printf '%s\n' "ARGS=$*"
+EOF
+cat > "$tmp/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == app-server ]] || exit 2
+while IFS= read -r line; do
+  case "$line" in
+    *'"id":1'*) printf '%s\n' '{"id":1,"result":{"userAgent":"test","codexHome":"/tmp","platformFamily":"unix","platformOs":"linux"}}' ;;
+    *'"id":2'*) printf '%s\n' '{"id":2,"result":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":84,"windowDurationMins":10080,"resetsAt":1784666240},"secondary":null,"credits":{"hasCredits":false,"unlimited":false,"balance":"0"},"individualLimit":null,"planType":"pro","rateLimitReachedType":null},"rateLimitsByLimitId":{"codex":{"limitId":"codex","limitName":null,"primary":{"usedPercent":84,"windowDurationMins":10080,"resetsAt":1784666240},"secondary":null,"credits":null,"individualLimit":null,"planType":"pro","rateLimitReachedType":null}},"rateLimitResetCredits":{"availableCount":1,"credits":null}}}' ;;
+  esac
+done
 EOF
 cat > "$tmp/bin/cliproxyapi" <<'EOF'
 #!/usr/bin/env bash
@@ -119,6 +133,59 @@ auto_output=$(run_wrapper --auto --luna test-prompt)
 [[ "$auto_output" == *'--permission-mode auto'* ]]
 [[ "$auto_output" == *'--model gpt-5.6-luna'* ]]
 
+ultracode_output=$(run_wrapper --ultracode --sol test-prompt)
+[[ "$ultracode_output" == *'MODE=ultracode'* ]]
+[[ "$ultracode_output" == *'--effort xhigh'* ]]
+[[ "$ultracode_output" == *'"ultracode":true'* ]]
+[[ "$ultracode_output" == *'"workflows":true'* ]]
+
+max_output=$(run_wrapper --max-effort test-prompt)
+[[ "$max_output" == *'MODE=max'* ]]
+[[ "$max_output" == *'--effort max'* ]]
+
+bare_output=$(run_wrapper --bare --print test-prompt)
+[[ "$bare_output" != *'--agents'* ]]
+[[ "$bare_output" != *'--append-system-prompt'* ]]
+[[ "$bare_output" != *'--permission-mode'* ]]
+
+maintenance_output=$(run_wrapper mcp list)
+[[ "$maintenance_output" == *'BASE='* ]]
+[[ "$maintenance_output" != *"BASE=http"* ]]
+[[ "$maintenance_output" != *'--agents'* ]]
+
+for maintenance_command in agents auth auto-mode doctor gateway install mcp plugin plugins project setup-token ultrareview update upgrade; do
+  command_output=$(run_wrapper "$maintenance_command" --help)
+  [[ "$command_output" != *'--agents'* ]]
+  [[ "$command_output" != *'--append-system-prompt'* ]]
+  [[ "$command_output" != *'--permission-mode'* ]]
+  [[ "$command_output" != *'BASE=http'* ]]
+done
+
+passthrough_output=$(run_wrapper --continue --resume session-123 --fork-session --from-pr 42 \
+  --worktree audit-tree --tmux --ide --remote-control --plugin-dir /tmp/plugin \
+  --mcp-config /tmp/mcp.json --strict-mcp-config --output-format json \
+  --input-format stream-json --json-schema '{}' --session-id 00000000-0000-4000-8000-000000000000 \
+  --debug chrome --verbose --brief --bg --chrome --no-chrome test-prompt)
+for expected_argument in --continue '--resume session-123' --fork-session '--from-pr 42' \
+  '--worktree audit-tree' --tmux --ide --remote-control '--plugin-dir /tmp/plugin' \
+  '--mcp-config /tmp/mcp.json' --strict-mcp-config '--output-format json' \
+  '--input-format stream-json' '--json-schema {}' --session-id '--debug chrome' \
+  --verbose --brief --bg --chrome --no-chrome; do
+  [[ "$passthrough_output" == *"$expected_argument"* ]]
+done
+
+explicit_permission_output=$(run_wrapper --permission-mode plan test-prompt)
+[[ "$explicit_permission_output" == *'--permission-mode plan'* ]]
+[[ "$explicit_permission_output" != *'--permission-mode auto'* ]]
+
+explicit_agents_output=$(run_wrapper --agents '{}' test-prompt)
+[[ "$explicit_agents_output" == *'--agents {}'* ]]
+[[ "$explicit_agents_output" != *'"gpt-5-6-terra"'* ]]
+
+chrome_output=$(run_wrapper --claude-chrome --print chrome-test)
+[[ "$chrome_output" == *'ARGS=--chrome --print chrome-test'* ]]
+[[ "$chrome_output" == *$'CONFIG=\n'* ]]
+
 doctor_output=$(run_wrapper --doctor)
 [[ "$doctor_output" == *'CLIProxyAPI: CLIProxyAPI test'* ]]
 [[ "$doctor_output" == *'Default permission mode: auto'* ]]
@@ -164,9 +231,33 @@ fi
 [[ "$cache_dir_mode" == 700 ]]
 
 fallback_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
-  FAKE_USAGE_FAIL=1 "$root/claudex" --usage-limit 2>&1)
+  FAKE_USAGE_FAIL=1 CLAUDEX_USAGE_SOURCE=web "$root/claudex" --usage-limit 2>&1)
 [[ "$fallback_output" == *'live refresh failed; showing the last cached snapshot'* ]]
 [[ "$fallback_output" == *'Codex 7-day: 18% remaining (82% used)'* ]]
+
+appserver_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  FAKE_USAGE_FAIL=1 "$root/claudex" --usage-limit)
+[[ "$appserver_output" == *'Codex 7-day: 16% remaining (84% used)'* ]]
+[[ "$appserver_output" == *'Source: app-server'* ]]
+[[ "$appserver_output" == *'Warning: Codex capacity is at or below the configured 20% alert threshold.'* ]]
+
+changed_schema_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  FAKE_USAGE_CHANGED=1 "$root/claudex" --usage-limit)
+[[ "$changed_schema_output" == *'Source: app-server'* ]]
+[[ "$changed_schema_output" == *'Codex 7-day: 16% remaining (84% used)'* ]]
+
+cat > "$tmp/home/.cli-proxy-api/codex-alt.json" <<'EOF'
+{"type":"codex","access_token":"alternate-secret","account_id":"account-alt","email":"alternate@example.com"}
+EOF
+accounts_output=$(run_wrapper --accounts)
+[[ "$accounts_output" == *'private@example.com'* ]]
+[[ "$accounts_output" == *'alternate@example.com'* ]]
+selected_output=$(run_wrapper --account private@example.com)
+[[ "$selected_output" == *'Selected Codex usage account: private@example.com'* ]]
+[[ "$(<"$tmp/home/.config/claudex/codex-usage-account")" == codex-test.json ]]
+auto_account_output=$(run_wrapper --account auto)
+[[ "$auto_account_output" == *'automatic'* ]]
+[[ ! -e "$tmp/home/.config/claudex/codex-usage-account" ]]
 
 if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
   CLAUDEX_PERMISSION_MODE=broken "$root/claudex" >/dev/null 2>&1; then
@@ -199,7 +290,11 @@ status_output=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt
 [[ "$status_output" == *'GPT-5.6 Sol'* ]]
 [[ "$status_output" == *'xhigh effort'* ]]
 [[ "$status_output" == *'42% context'* ]]
-[[ "$status_output" == *'Codex 7d 18% left'* ]]
+[[ "$status_output" == *'Codex 7d 16% left'* ]]
+
+ultracode_status=$(printf '%s\n' '{"session_id":"ultracode-session","model":{"id":"gpt-5.6-sol"},"effort":{"level":"xhigh"},"context_window":{"used_percentage":10,"total_input_tokens":40000,"context_window_size":400000}}' | \
+  CLAUDEX_SESSION_MODE=ultracode CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+[[ "$ultracode_status" == *'ultracode effort'* ]]
 
 transient_status=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":0,"total_input_tokens":0,"context_window_size":400000,"current_usage":null}}' | \
   CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")

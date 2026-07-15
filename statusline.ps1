@@ -75,6 +75,7 @@ if (-not $effort) {
     }
 }
 if (-not $effort) { $effort = 'adaptive' }
+if ($env:CLAUDEX_SESSION_MODE) { $effort = $env:CLAUDEX_SESSION_MODE }
 
 $usageSummary = ''
 $usageDisplay = if ($env:CLAUDEX_USAGE_DISPLAY) { $env:CLAUDEX_USAGE_DISPLAY } else { 'on' }
