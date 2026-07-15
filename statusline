@@ -1,8 +1,8 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -u
 
-readonly input="$(<&0)"
-parsed=$(print -r -- "$input" | jq -ejr '[
+readonly input="$(cat)"
+parsed=$(printf '%s' "$input" | jq -ejr '[
   (.model.id // ""),
   (.model.display_name // ""),
   (.effort.level // ""),
