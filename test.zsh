@@ -48,7 +48,8 @@ run_wrapper() {
 zsh -n "$root/claudex"
 zsh -n "$root/statusline"
 jq -e '
-  .permissions.defaultMode == "auto"
+  .model == "opus"
+  and .permissions.defaultMode == "auto"
   and .autoCompactEnabled == true
   and .autoCompactWindow == 280000
   and .precomputeCompactionEnabled == true
