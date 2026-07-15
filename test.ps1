@@ -86,22 +86,34 @@ echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]
             Write-Output "CONFIG=$env:CLAUDE_CONFIG_DIR"
             Write-Output "ARGS=$($args -join ' ')"
         }
-        [IO.File]::WriteAllText((Join-Path $fakeBin 'cliproxyapi.cmd'), @'
-@echo off
-if "%1"=="-version" (
-  echo CLIProxyAPI test
-  echo extra version detail
-  exit /b 1
-)
-if not "%FAKE_PROXY_READY_FILE%"=="" (
-  type nul > "%FAKE_PROXY_READY_FILE%"
-  if not "%FAKE_PROXY_START_LOG%"=="" echo started>>"%FAKE_PROXY_START_LOG%"
-  exit /b 0
-)
-echo CLIProxyAPI test
-echo extra version detail
-exit /b 1
-'@, $utf8)
+        Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+
+public static class ClaudexTestProxy
+{
+    public static int Main(string[] args)
+    {
+        if (args.Length > 0 && args[0] == "-version")
+        {
+            Console.WriteLine("CLIProxyAPI test");
+            Console.WriteLine("extra version detail");
+            return 1;
+        }
+        string ready = Environment.GetEnvironmentVariable("FAKE_PROXY_READY_FILE");
+        if (!String.IsNullOrEmpty(ready))
+        {
+            File.WriteAllText(ready, String.Empty);
+            string log = Environment.GetEnvironmentVariable("FAKE_PROXY_START_LOG");
+            if (!String.IsNullOrEmpty(log)) File.AppendAllText(log, "started" + Environment.NewLine);
+            return 0;
+        }
+        Console.WriteLine("CLIProxyAPI test");
+        Console.WriteLine("extra version detail");
+        return 1;
+    }
+}
+'@ -OutputAssembly (Join-Path $fakeBin 'cliproxyapi.exe') -OutputType ConsoleApplication
         [IO.File]::WriteAllText((Join-Path $fakeBin 'codex.cmd'), @'
 @echo off
 if "%1"=="app-server" (
