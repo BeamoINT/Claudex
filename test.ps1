@@ -106,6 +106,9 @@ exit 1
     Assert-True ($output.Contains('--permission-mode auto')) 'auto permissions'
     Assert-True ($output.Contains('--model gpt-5.6-terra')) 'startup model'
     Assert-True ($output.Contains('Do not create a team, spawn or delegate to additional agents')) 'nested agent guard'
+    Assert-True ($output.Contains('Do not create, claim, or update entries in the shared task list')) 'subagent task ownership'
+    Assert-True ($output.Contains('Before every final answer, call TaskList and reconcile every entry')) 'leader task reconciliation'
+    Assert-True ($output.Contains('Never leave stale in_progress tasks after their work is done')) 'stale task guard'
     Assert-True (-not $output.Contains('"model":"gpt-5.6-sol"')) 'leader model is not delegated'
 
     $state = Get-Content -LiteralPath (Join-Path $testConfig '.claude.json') -Raw | ConvertFrom-Json
@@ -118,13 +121,28 @@ exit 1
     Assert-True ($doctor.Contains('CLIProxyAPI: CLIProxyAPI test')) 'proxy version first line'
     Assert-True (-not $doctor.Contains('extra version detail')) 'proxy version extra lines hidden'
     Assert-True ($doctor.Contains('Auto-compact window: 280000 tokens')) 'doctor compaction'
+    Assert-True ($doctor.Contains('Task lifecycle: Sol-owned with final-response reconciliation')) 'doctor task lifecycle'
+    Assert-True ($doctor.Contains('Context status: session-stabilized')) 'doctor context stabilization'
     Assert-True ($doctor.Contains('gpt-5.6-terra: advertised')) 'doctor models'
 
-    $statusJson = '{"model":{"id":"gpt-5.6-sol"},"effort":{"level":"xhigh"},"context_window":{"used_percentage":42.9}}'
+    $statusJson = '{"session_id":"stable-session","model":{"id":"gpt-5.6-sol"},"effort":{"level":"xhigh"},"context_window":{"used_percentage":42.9,"total_input_tokens":171600,"context_window_size":400000}}'
     $status = ($statusJson | & (Join-Path $root 'statusline.ps1') | Out-String)
     Assert-True ($status.Contains('GPT-5.6 Sol')) 'status model'
     Assert-True ($status.Contains('xhigh effort')) 'status effort'
     Assert-True ($status.Contains('42% context')) 'status context'
+
+    $transientJson = '{"session_id":"stable-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":0,"total_input_tokens":0,"context_window_size":400000,"current_usage":null}}'
+    $transientStatus = ($transientJson | & (Join-Path $root 'statusline.ps1') | Out-String)
+    Assert-True ($transientStatus.Contains('42% context')) 'transient zero uses session cache'
+    Assert-True (-not $transientStatus.Contains('0% context')) 'transient zero is hidden'
+
+    $freshJson = '{"session_id":"fresh-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":0,"total_input_tokens":0,"context_window_size":400000,"current_usage":null}}'
+    $freshStatus = ($freshJson | & (Join-Path $root 'statusline.ps1') | Out-String)
+    Assert-True (-not $freshStatus.Contains('% context')) 'fresh zero is omitted'
+
+    $smallJson = '{"session_id":"small-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":0,"total_input_tokens":100,"context_window_size":400000}}'
+    $smallStatus = ($smallJson | & (Join-Path $root 'statusline.ps1') | Out-String)
+    Assert-True ($smallStatus.Contains('<1% context')) 'real sub-percent usage is labeled accurately'
 
     $billingFrame = "GPT-5.6 Sol with high effort$([char]27)[41G$([char]0x00B7)$([char]27)[43GAPI$([char]27)[47GUsage$([char]27)[53GBilling`r"
     $filteredFrame = $billingFrame | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'

@@ -10,8 +10,10 @@ Private, portable setup for running Claude Code through a local CLIProxyAPI-back
 - a clean `/model` picker with exactly one Sol, Terra, and Luna entry
 - auto mode enabled by default
 - three concurrent tools and a guarded maximum of three active agents
+- Sol-owned task lifecycle with immediate agent-result reconciliation and no stale `in_progress` entries at final handoff
 - bounded retries to prevent 429 retry storms
 - 400k context accounting with automatic compaction around 280k tokens
+- session-scoped context stabilization that never flashes a misleading `0%` during startup or compaction refreshes
 - full-screen rendering that hides the shell launch command while Claudex is open
 - friendly model names, a normal mouse pointer, and a compact status line
 - removal of Claude Code's hardcoded `API Usage Billing` welcome label without modifying the signed Claude binary
@@ -26,7 +28,7 @@ Private, portable setup for running Claude Code through a local CLIProxyAPI-back
 | Windows 10 1809+, Windows 11, and Windows Server 2019+ (x64/ARM64) | PowerShell | `install.ps1` | Fully supported |
 | WSL 1/2 | Bash | `install.sh` | Supported as Linux |
 
-The model UI, status line, auto mode, compaction, agent policy, banner cleanup, and local proxy behavior are shared across platforms. Claude Code itself currently supports sandboxing on macOS, Linux, and WSL2; its native Windows build does not currently provide sandboxing. That upstream difference is not something Claudex can safely emulate.
+The model UI, stabilized status line, auto mode, compaction, task/agent policy, banner cleanup, and local proxy behavior are shared across platforms. Claude Code itself currently supports sandboxing on macOS, Linux, and WSL2; its native Windows build does not currently provide sandboxing. That upstream difference is not something Claudex can safely emulate.
 
 ## New macOS or Linux installation
 

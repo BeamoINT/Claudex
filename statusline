@@ -6,10 +6,66 @@ parsed=$(printf '%s' "$input" | jq -ejr '[
   (.model.id // ""),
   (.model.display_name // ""),
   (.effort.level // ""),
-  (if .context_window.used_percentage == null then "" else (.context_window.used_percentage | floor | tostring) end)
-] | join("\u001f")' 2>/dev/null) || parsed=$'\x1f\x1f\x1f'
+  (if .context_window.used_percentage == null then "" else (.context_window.used_percentage | floor | tostring) end),
+  (.session_id // ""),
+  (.context_window.total_input_tokens // 0 | tostring),
+  (.context_window.context_window_size // 0 | tostring)
+] | join("\u001f")' 2>/dev/null) || parsed=$'\x1f\x1f\x1f\x1f\x1f\x1f'
 
-IFS=$'\x1f' read -r model_id display_name effort context_percent <<< "$parsed"
+IFS=$'\x1f' read -r model_id display_name effort context_percent session_id total_input_tokens context_window_size <<< "$parsed"
+
+stabilize_context_percent() {
+  local candidate="$context_percent"
+  local config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.config/claudex}"
+  local cache_dir cache_file cached tmp_file computed
+
+  # A zero/null payload is transient before the first response and briefly
+  # after compaction. When token totals are usable, calculate the real value;
+  # otherwise retain only this session's last trustworthy percentage.
+  if [[ ! "$candidate" =~ ^[0-9]+$ || "$candidate" == 0 ]]; then
+    if [[ "$total_input_tokens" =~ ^[0-9]+$ \
+        && "$context_window_size" =~ ^[0-9]+$ \
+        && "$total_input_tokens" -gt 0 \
+        && "$context_window_size" -gt 0 ]]; then
+      computed=$(( total_input_tokens * 100 / context_window_size ))
+      if (( computed > 0 )); then
+        candidate="$computed"
+      else
+        candidate="<1"
+      fi
+    else
+      candidate=""
+    fi
+  fi
+
+  if [[ "$session_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    cache_dir="$config_dir/statusline-cache"
+    cache_file="$cache_dir/$session_id"
+    if [[ -n "$candidate" ]]; then
+      if mkdir -p "$cache_dir" 2>/dev/null; then
+        chmod 700 "$cache_dir" 2>/dev/null || true
+        tmp_file=$(mktemp "$cache_dir/.context.tmp.XXXXXX" 2>/dev/null || true)
+        if [[ -n "$tmp_file" ]]; then
+          umask 077
+          if printf '%s\n' "$candidate" > "$tmp_file" && mv -f "$tmp_file" "$cache_file"; then
+            chmod 600 "$cache_file" 2>/dev/null || true
+          else
+            rm -f "$tmp_file"
+          fi
+        fi
+      fi
+    elif [[ -r "$cache_file" ]]; then
+      IFS= read -r cached < "$cache_file" || cached=""
+      if [[ "$cached" =~ ^([1-9][0-9]{0,2}|<1)$ ]]; then
+        candidate="$cached"
+      fi
+    fi
+  fi
+
+  context_percent="$candidate"
+}
+
+stabilize_context_percent
 
 if [[ -z "$effort" ]]; then
   effort="${CLAUDE_CODE_EFFORT_LEVEL:-${CLAUDE_EFFORT:-}}"

@@ -188,9 +188,11 @@ function Invoke-Doctor {
     Write-Output "Subagent model: $subagentModel (Sol is reserved for the leader)"
     Write-Output "Tool concurrency: $toolConcurrencyNumber"
     Write-Output "Agent concurrency: $agentConcurrencyNumber"
+    Write-Output 'Task lifecycle: Sol-owned with final-response reconciliation'
     Write-Output "API retries: $maxRetriesNumber"
     Write-Output "Context window: $contextWindowNumber tokens"
     Write-Output "Auto-compact window: $compactWindowNumber tokens (precompute enabled)"
+    Write-Output 'Context status: session-stabilized (transient zero suppressed)'
     Write-Output 'Terminal UI: fullscreen (launch command hidden while Claudex is open)'
     Write-Output 'Header model name: GPT-5.6 Sol'
     Write-Output "Mouse pointer: $mousePointer"
@@ -236,7 +238,7 @@ $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = [string] $contextWindowNumber
 $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = [string] $compactWindowNumber
 $env:CLAUDE_CODE_USE_POWERSHELL_TOOL = '1'
 
-$noNestedAgents = "Do not create a team, spawn or delegate to additional agents, or send intermediate progress messages to the parent. Complete the assigned task yourself and return one final result through the normal agent result channel. If the provider reports a 429 or model cooldown, do not launch a replacement agent or start a retry loop."
+$noNestedAgents = "Do not create a team, spawn or delegate to additional agents, or send intermediate progress messages to the parent. Do not create, claim, or update entries in the shared task list; the Sol leader owns task lifecycle. Complete the assigned task yourself and return one final result through the normal agent result channel. If the provider reports a 429 or model cooldown, do not launch a replacement agent or start a retry loop."
 $agents = [ordered]@{
     'claudex-deep' = [ordered]@{ description = "Use for architecture, difficult debugging, security review, and the hardest quality-first work without consuming the leader's Sol capacity."; prompt = "Work as the deep-reasoning Claudex specialist. Investigate thoroughly, verify conclusions, and return concise evidence-backed results. $noNestedAgents"; model = 'gpt-5.6-terra'; effort = 'xhigh' }
     'claudex-builder' = [ordered]@{ description = 'Use for normal implementation, testing, refactoring, and code review.'; prompt = "Work as the balanced Claudex implementation specialist. Make robust, focused progress and verify the result. $noNestedAgents"; model = 'gpt-5.6-terra'; effort = 'high' }
@@ -244,6 +246,8 @@ $agents = [ordered]@{
 }
 $agentsJson = $agents | ConvertTo-Json -Depth 10 -Compress
 $capacityGuard = "Claudex capacity rule: keep at most $agentConcurrencyNumber Agent tasks active at once. Launch no more than $agentConcurrencyNumber agents in a wave, wait for one to finish before starting another, and never create an agent team. Sol capacity is reserved for the leader; use the configured Terra or Luna agents for delegated work. If a model reports a 429 or cooldown, do not launch replacement agents or create a retry storm; continue useful local work and retry at most once after active agents settle."
+$taskGuard = 'Claudex task lifecycle rule: the Sol leader is the sole owner of the shared task list. Keep it compact and create only tasks that represent real remaining deliverables, not duplicate discovery lanes or speculative work. Mark a task in_progress only while the leader or a currently active agent is working on it; queued or blocked work stays pending. After every agent result, immediately reconcile its parent task and mark it completed once its outcome is integrated and verified. Before every final answer, call TaskList and reconcile every entry: completed work must be completed, inactive work must not remain in_progress, and genuinely unfinished pending work must be explicitly reported instead of being hidden behind a completion claim. Never leave stale in_progress tasks after their work is done.'
+$leaderGuard = $capacityGuard + [Environment]::NewLine + [Environment]::NewLine + $taskGuard
 
 $startModel = ''
 $launchPermissionMode = $permissionMode
@@ -268,7 +272,7 @@ while ($index -lt $ClaudeArguments.Count) {
 while ($index -lt $ClaudeArguments.Count) { $forwardArguments.Add($ClaudeArguments[$index]); $index++ }
 
 $claudeLaunchArguments = New-Object 'System.Collections.Generic.List[string]'
-foreach ($value in @('--agents', $agentsJson, '--append-system-prompt', $capacityGuard, '--permission-mode', $launchPermissionMode)) {
+foreach ($value in @('--agents', $agentsJson, '--append-system-prompt', $leaderGuard, '--permission-mode', $launchPermissionMode)) {
     $claudeLaunchArguments.Add($value)
 }
 if ($settingsFile -ne (Join-Path $configDir 'settings.json')) {

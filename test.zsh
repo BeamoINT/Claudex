@@ -83,7 +83,10 @@ jq -e '
 [[ "$default_output" == *'--permission-mode auto'* ]]
 [[ "$default_output" == *'--model gpt-5.6-terra'* ]]
 [[ "$default_output" == *'Do not create a team, spawn or delegate to additional agents'* ]]
+[[ "$default_output" == *'Do not create, claim, or update entries in the shared task list'* ]]
 [[ "$default_output" == *'keep at most 3 Agent tasks active at once'* ]]
+[[ "$default_output" == *'Before every final answer, call TaskList and reconcile every entry'* ]]
+[[ "$default_output" == *'Never leave stale in_progress tasks after their work is done'* ]]
 [[ "$default_output" == *'"claudex-deep"'* ]]
 [[ "$default_output" == *"without consuming the leader's Sol capacity"* ]]
 [[ "$default_output" != *'"model":"gpt-5.6-sol"'* ]]
@@ -98,9 +101,11 @@ doctor_output=$(run_wrapper --doctor)
 [[ "$doctor_output" == *'Auto-mode classifier: gpt-5.6-luna'* ]]
 [[ "$doctor_output" == *'Subagent model: gpt-5.6-terra (Sol is reserved for the leader)'* ]]
 [[ "$doctor_output" == *'Agent concurrency: 3'* ]]
+[[ "$doctor_output" == *'Task lifecycle: Sol-owned with final-response reconciliation'* ]]
 [[ "$doctor_output" == *'API retries: 2'* ]]
 [[ "$doctor_output" == *'Context window: 400000 tokens'* ]]
 [[ "$doctor_output" == *'Auto-compact window: 280000 tokens (precompute enabled)'* ]]
+[[ "$doctor_output" == *'Context status: session-stabilized (transient zero suppressed)'* ]]
 [[ "$doctor_output" == *'Terminal UI: fullscreen (launch command hidden while Claudex is open)'* ]]
 [[ "$doctor_output" == *'Header model name: GPT-5.6 Sol'* ]]
 [[ "$doctor_output" == *'Mouse pointer: pointer'* ]]
@@ -133,11 +138,24 @@ if [[ "$(uname -s)" == Darwin ]]; then
   [[ "$cursor_output" == *$'\033]22;default\033\\'* ]]
 fi
 
-status_output=$(printf '%s\n' '{"model":{"id":"gpt-5.6-sol"},"effort":{"level":"xhigh"},"context_window":{"used_percentage":42.9}}' | \
+status_output=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt-5.6-sol"},"effort":{"level":"xhigh"},"context_window":{"used_percentage":42.9,"total_input_tokens":171600,"context_window_size":400000}}' | \
   CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
 [[ "$status_output" == *'GPT-5.6 Sol'* ]]
 [[ "$status_output" == *'xhigh effort'* ]]
 [[ "$status_output" == *'42% context'* ]]
+
+transient_status=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":0,"total_input_tokens":0,"context_window_size":400000,"current_usage":null}}' | \
+  CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+[[ "$transient_status" == *'42% context'* ]]
+[[ "$transient_status" != *'0% context'* ]]
+
+fresh_status=$(printf '%s\n' '{"session_id":"fresh-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":0,"total_input_tokens":0,"context_window_size":400000,"current_usage":null}}' | \
+  CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+[[ "$fresh_status" != *'% context'* ]]
+
+small_status=$(printf '%s\n' '{"session_id":"small-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":0,"total_input_tokens":100,"context_window_size":400000}}' | \
+  CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+[[ "$small_status" == *'<1% context'* ]]
 
 invalid_status=$(printf '%s\n' 'not-json' | CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
 [[ "$invalid_status" == *'Unknown model'* ]]
