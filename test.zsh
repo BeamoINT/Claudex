@@ -228,6 +228,7 @@ proxy_start_log="$tmp/proxy-start.log"
 : > "$proxy_ready_file"
 proxy_recovery_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
   CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=0 \
+  CLAUDEX_TEST_PROXY_REACHABLE_FILE="$proxy_ready_file" \
   FAKE_PROXY_READY_FILE="$proxy_ready_file" FAKE_PROXY_START_LOG="$proxy_start_log" \
   FAKE_PROXY_RECOVERY=1 "$root/claudex" recovery-test)
 [[ "$proxy_recovery_output" == *'PROXY_RECOVERED=1'* ]]

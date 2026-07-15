@@ -231,6 +231,21 @@ proxy_ready() {
   fetch_models 2>/dev/null | models_are_valid
 }
 
+proxy_reachable() {
+  if [[ -n "${CLAUDEX_TEST_PROXY_REACHABLE_FILE:-}" ]]; then
+    [[ -e "$CLAUDEX_TEST_PROXY_REACHABLE_FILE" ]]
+    return
+  fi
+  local authority host port
+  authority="${CLAUDEX_PROXY_URL#*://}"
+  authority="${authority%%/*}"
+  host="${authority%:*}"
+  port="${authority##*:}"
+  [[ "$host" == 127.0.0.1 || "$host" == localhost ]] || { proxy_ready; return; }
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  (exec 9<>"/dev/tcp/$host/$port") 2>/dev/null
+}
+
 proxy_executable() {
   if [[ -n "${CLAUDEX_PROXY_BIN:-}" && -x "$CLAUDEX_PROXY_BIN" ]]; then
     printf '%s\n' "$CLAUDEX_PROXY_BIN"
@@ -258,7 +273,7 @@ start_proxy_watcher() {
     while kill -0 "$parent_pid" 2>/dev/null; do
       sleep 1
       kill -0 "$parent_pid" 2>/dev/null || break
-      if ! proxy_ready; then ensure_proxy >/dev/null 2>&1 || true; fi
+      if ! proxy_reachable; then ensure_proxy >/dev/null 2>&1 || true; fi
     done
   ) &
   proxy_watcher_pid=$!

@@ -164,6 +164,18 @@ function Test-ProxyReady {
     } catch { return $false }
 }
 
+function Test-ProxyReachable {
+    $client = $null
+    try {
+        $uri = [Uri] $proxyUrl
+        if ($uri.Host -notin @('127.0.0.1', 'localhost', '::1')) { return (Test-ProxyReady) }
+        $client = New-Object Net.Sockets.TcpClient
+        $connection = $client.ConnectAsync($uri.Host, $uri.Port)
+        return $connection.Wait(500) -and $client.Connected
+    } catch { return $false }
+    finally { if ($client) { $client.Dispose() } }
+}
+
 function Find-ProxyExecutable {
     $configured = Env-OrDefault 'CLAUDEX_PROXY_BIN' ''
     if ($configured -and (Test-Path -LiteralPath $configured -PathType Leaf)) { return $configured }
@@ -257,7 +269,7 @@ function Invoke-ProxyWatchLoop([int] $ParentProcessId) {
     while (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue) {
         Start-Sleep -Seconds 1
         if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { break }
-        if (-not (Test-ProxyReady)) { Ensure-Proxy }
+        if (-not (Test-ProxyReachable)) { Ensure-Proxy }
     }
 }
 
