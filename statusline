@@ -141,6 +141,12 @@ case "$model_id" in
     esac
     ;;
 esac
+selected_model_mode="${CLAUDEX_MODEL_MODE:-}"
+if [[ -z "$selected_model_mode" && -r "${CLAUDE_CONFIG_DIR:-$HOME/.config/claudex}/settings.json" ]]; then
+  selected_model_mode=$(jq -r 'if .model == "opusplan" then "solplan" else "" end' \
+    "${CLAUDE_CONFIG_DIR:-$HOME/.config/claudex}/settings.json" 2>/dev/null) || selected_model_mode=""
+fi
+if [[ "$selected_model_mode" == solplan ]]; then model_name="GPT-5.6 Solplan"; fi
 
 # Keep the terminal tab title accurate as /model and /effort change.
 printf '\033]0;%s\007' "Claudex · ${model_name} · ${effort} effort"

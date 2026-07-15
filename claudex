@@ -5,6 +5,7 @@ readonly claudex_config_dir="${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}"
 readonly config_file="$claudex_config_dir/env"
 readonly settings_file="${CLAUDEX_SETTINGS_FILE:-$claudex_config_dir/settings.json}"
 readonly curl_bin="${CLAUDEX_CURL_BIN:-curl}"
+readonly codex_session_helper="${CLAUDEX_CODEX_SESSION_HELPER:-$claudex_config_dir/codex-session}"
 
 if [[ ! -r "$config_file" ]]; then
   printf '%s\n' "claudex: missing $config_file; reinstall or restore the Claudex configuration." >&2
@@ -42,6 +43,9 @@ source "$config_file"
 : "${CLAUDEX_USAGE_MAX_STALE_SECONDS:=86400}"
 : "${CLAUDEX_USAGE_SOURCE:=auto}"
 : "${CLAUDEX_USAGE_ALERT_PERCENT:=20}"
+: "${CLAUDEX_CLAUDE_AUTO_UPDATE:=on}"
+: "${CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS:=86400}"
+: "${CLAUDEX_PLAN_MODE_POLICY:=conservative}"
 
 case "$CLAUDEX_PROXY_TOKEN" in
   *$'\n'*|*$'\r'*)
@@ -121,6 +125,16 @@ if [[ ! "$CLAUDEX_USAGE_ALERT_PERCENT" =~ ^[0-9]+$ ]] || (( CLAUDEX_USAGE_ALERT_
   printf '%s\n' 'claudex: CLAUDEX_USAGE_ALERT_PERCENT must be an integer from 0 to 100.' >&2
   exit 2
 fi
+case "$CLAUDEX_CLAUDE_AUTO_UPDATE" in on|off) ;;
+  *) printf '%s\n' 'claudex: CLAUDEX_CLAUDE_AUTO_UPDATE must be on or off.' >&2; exit 2 ;;
+esac
+if [[ ! "$CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || (( CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS < 3600 || CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS > 2592000 )); then
+  printf '%s\n' 'claudex: CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS must be from 3600 to 2592000.' >&2
+  exit 2
+fi
+case "$CLAUDEX_PLAN_MODE_POLICY" in conservative|normal) ;;
+  *) printf '%s\n' 'claudex: CLAUDEX_PLAN_MODE_POLICY must be conservative or normal.' >&2; exit 2 ;;
+esac
 
 export CLAUDEX_USAGE_DISPLAY CLAUDEX_USAGE_REFRESH_SECONDS CLAUDEX_USAGE_TIMEOUT_SECONDS CLAUDEX_USAGE_MAX_STALE_SECONDS
 export CLAUDEX_USAGE_SOURCE CLAUDEX_USAGE_ALERT_PERCENT
@@ -135,6 +149,7 @@ ensure_model_display_names() {
   local state_file="$CLAUDE_CONFIG_DIR/.claude.json"
   local tmp_file
   local managed_options='[
+    {"value":"opusplan","label":"GPT-5.6 Solplan","description":"GPT-5.6 Sol in plan mode, GPT-5.6 Terra for implementation"},
     {"value":"gpt-5.6-sol","label":"GPT-5.6 Sol","description":"Frontier capability for planning and the hardest engineering work"},
     {"value":"gpt-5.6-terra","label":"GPT-5.6 Terra","description":"Balanced intelligence, speed, and cost for everyday coding"},
     {"value":"gpt-5.6-luna","label":"GPT-5.6 Luna","description":"Fast, efficient model for search, triage, and mechanical tasks"}
@@ -193,7 +208,11 @@ proxy_ready() {
 }
 
 proxy_executable() {
-  if command -v cliproxyapi >/dev/null 2>&1; then
+  if [[ -n "${CLAUDEX_PROXY_BIN:-}" && -x "$CLAUDEX_PROXY_BIN" ]]; then
+    printf '%s\n' "$CLAUDEX_PROXY_BIN"
+  elif [[ -x "$CLAUDE_CONFIG_DIR/bin/cliproxyapi" ]]; then
+    printf '%s\n' "$CLAUDE_CONFIG_DIR/bin/cliproxyapi"
+  elif command -v cliproxyapi >/dev/null 2>&1; then
     command -v cliproxyapi
   elif command -v cli-proxy-api >/dev/null 2>&1; then
     command -v cli-proxy-api
@@ -203,6 +222,13 @@ proxy_executable() {
 }
 
 ensure_proxy() {
+  if [[ ! -x "$codex_session_helper" ]]; then
+    printf '%s\n' "claudex: authentication helper is missing: $codex_session_helper" >&2
+    printf '%s\n' 'claudex: reinstall Claudex to repair the installation.' >&2
+    return 1
+  fi
+  "$codex_session_helper" sync || return $?
+
   if proxy_ready; then
     return 0
   fi
@@ -244,8 +270,57 @@ ensure_proxy() {
   return 1
 }
 
+maybe_update_claude() {
+  [[ "$CLAUDEX_CLAUDE_AUTO_UPDATE" == on ]] || return 0
+  [[ "${CLAUDEX_SKIP_AUTO_UPDATE:-0}" != 1 ]] || return 0
+  command -v claude >/dev/null 2>&1 || return 0
+
+  local update_dir="$CLAUDE_CONFIG_DIR/update" stamp="$CLAUDE_CONFIG_DIR/update/last-success" now last=0
+  now=$(date +%s)
+  if [[ -r "$stamp" ]]; then
+    read -r last < "$stamp" || last=0
+  fi
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  (( now - last >= CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS )) || return 0
+  mkdir -p "$update_dir"
+  if mkdir "$update_dir/lock" 2>/dev/null; then
+    (
+      if claude update >"$update_dir/claude-update.log" 2>&1; then
+        local completed temporary
+        completed=$(date +%s)
+        temporary="$update_dir/.last-success.$$"
+        printf '%s\n' "$completed" > "$temporary"
+        mv -f "$temporary" "$stamp"
+      fi
+      rmdir "$update_dir/lock" 2>/dev/null || true
+    ) &
+  fi
+}
+
+claude_supports() {
+  local option="$1"
+  [[ "${claude_help_cache:-}" == *"$option"* ]]
+}
+
+load_claude_capabilities() {
+  command -v claude >/dev/null 2>&1 || {
+    printf '%s\n' 'claudex: Claude Code was not found. Install Claude Code and retry.' >&2
+    return 1
+  }
+  claude_help_cache=$(claude --help 2>/dev/null || true)
+  [[ -n "$claude_help_cache" ]] || {
+    printf '%s\n' 'claudex: Claude Code did not return its capability list.' >&2
+    return 1
+  }
+  if ! claude_supports '--model'; then
+    printf '%s\n' 'claudex: this Claude Code build does not support custom models; run `claude update`.' >&2
+    return 1
+  fi
+}
+
 model_name() {
   case "$1" in
+    opusplan|solplan) printf '%s\n' "GPT-5.6 Solplan" ;;
     gpt-5.6-terra|sonnet) printf '%s\n' "GPT-5.6 Terra" ;;
     gpt-5.6-luna|haiku) printf '%s\n' "GPT-5.6 Luna" ;;
     *) printf '%s\n' "GPT-5.6 Sol" ;;
@@ -270,6 +345,7 @@ doctor() {
 
   printf '%s\n' "Claude Code: $(claude --version 2>/dev/null || printf unavailable)"
   printf '%s\n' "CLIProxyAPI: ${proxy_version}"
+  "$codex_session_helper" status
   printf '%s\n' "Proxy: healthy at ${CLAUDEX_PROXY_URL}"
   printf '%s\n' "Saved model: $(model_name "$saved_model") (${saved_model})"
   printf '%s\n' "Default permission mode: ${CLAUDEX_PERMISSION_MODE}"
@@ -287,6 +363,8 @@ doctor() {
   printf '%s\n' "Low-quota alert: ${CLAUDEX_USAGE_ALERT_PERCENT}% remaining (0 disables)"
   printf '%s\n' 'Effort shortcuts: --max-effort and --ultracode (xhigh plus dynamic workflows)'
   printf '%s\n' 'Claude in Chrome: use --claude-chrome for the direct Anthropic profile required by the extension'
+  printf '%s\n' "Claude Code updates: ${CLAUDEX_CLAUDE_AUTO_UPDATE} (checked every ${CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS}s)"
+  printf '%s\n' "Plan mode policy: ${CLAUDEX_PLAN_MODE_POLICY} (implementation-first unless planning is genuinely required)"
   printf '%s\n' "Rendering: no-flicker mode with native terminal cursor"
   printf '%s\n' "Terminal UI: fullscreen (launch command hidden while Claudex is open)"
   printf '%s\n' "Header model name: GPT-5.6 Sol"
@@ -305,6 +383,30 @@ doctor() {
 
   return "$missing"
 }
+
+if [[ "${1:-}" == "--login" ]]; then
+  [[ -x "$codex_session_helper" ]] || {
+    printf '%s\n' 'claudex: authentication helper is missing; reinstall Claudex.' >&2
+    exit 1
+  }
+  exec "$codex_session_helper" login
+fi
+
+if [[ "${1:-}" == "--logout" ]]; then
+  [[ -x "$codex_session_helper" ]] || {
+    printf '%s\n' 'claudex: authentication helper is missing; reinstall Claudex.' >&2
+    exit 1
+  }
+  exec "$codex_session_helper" logout
+fi
+
+if [[ "${1:-}" == "--auth-status" ]]; then
+  [[ -x "$codex_session_helper" ]] || {
+    printf '%s\n' 'claudex: authentication helper is missing; reinstall Claudex.' >&2
+    exit 1
+  }
+  exec "$codex_session_helper" status
+fi
 
 if [[ "${1:-}" == "--doctor" ]]; then
   doctor
@@ -354,6 +456,7 @@ while (( $# > 0 )); do
     --sol) start_model="gpt-5.6-sol" ;;
     --terra) start_model="gpt-5.6-terra" ;;
     --luna) start_model="gpt-5.6-luna" ;;
+    --solplan) start_model="opusplan" ;;
     --manual) permission_mode="manual" ;;
     --auto) permission_mode="auto" ;;
     --accept-edits) permission_mode="acceptEdits" ;;
@@ -415,7 +518,7 @@ done
 
 if (( direct_chrome )); then
   [[ -z "$start_model" ]] || {
-    printf '%s\n' 'claudex: --sol, --terra, and --luna cannot be combined with --claude-chrome because Chrome requires a first-party Anthropic model.' >&2
+    printf '%s\n' 'claudex: --sol, --terra, --luna, and --solplan cannot be combined with --claude-chrome because Chrome requires a first-party Anthropic model.' >&2
     exit 2
   }
   use_proxy=0
@@ -429,6 +532,9 @@ if (( direct_chrome )); then
   unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
   forwarded_args=(--chrome "${forwarded_args[@]}")
 fi
+
+load_claude_capabilities
+maybe_update_claude
 
 if (( use_proxy )); then
   ensure_proxy
@@ -482,15 +588,30 @@ readonly no_nested_agents="Do not create a team, spawn or delegate to additional
 readonly claudex_agents="{\"gpt-5-6-terra\":{\"description\":\"GPT-5.6 Terra for delegated architecture, debugging, implementation, testing, security review, and other substantial engineering work.\",\"prompt\":\"You are GPT-5.6 Terra. Investigate thoroughly, make robust focused progress, verify the result, and return concise evidence-backed findings. ${no_nested_agents}\",\"model\":\"gpt-5.6-terra\",\"effort\":\"high\"},\"gpt-5-6-luna\":{\"description\":\"GPT-5.6 Luna for delegated search, triage, inventory, and bounded mechanical tasks.\",\"prompt\":\"You are GPT-5.6 Luna. Complete the scoped task efficiently and report only relevant verified findings. ${no_nested_agents}\",\"model\":\"gpt-5.6-luna\",\"effort\":\"medium\"}}"
 readonly claudex_capacity_guard="Claudex capacity rule: keep at most ${CLAUDEX_MAX_AGENT_CONCURRENCY} Agent tasks active at once. Launch no more than ${CLAUDEX_MAX_AGENT_CONCURRENCY} agents in a wave, wait for one to finish before starting another, and never create an agent team. Sol capacity is reserved for the leader; use the configured Terra or Luna agents for delegated work. If a model reports a 429 or cooldown, do not launch replacement agents or create a retry storm; continue useful local work and retry at most once after active agents settle."
 readonly claudex_task_guard="Claudex task lifecycle rule: the Sol leader is the sole owner of the shared task list. Keep it compact and create only tasks that represent real remaining deliverables, not duplicate discovery lanes or speculative work. Mark a task in_progress only while the leader or a currently active agent is working on it; queued or blocked work stays pending. After every agent result, immediately reconcile its parent task and mark it completed once its outcome is integrated and verified. Before every final answer, call TaskList and reconcile every entry: completed work must be completed, inactive work must not remain in_progress, and genuinely unfinished pending work must be explicitly reported instead of being hidden behind a completion claim. Never leave stale in_progress tasks after their work is done."
+readonly claudex_codex_guard="Claudex Codex-model rule: operate as a Codex coding agent inside Claude Code's interface. Treat the available Claude Code tools and their schemas as the authoritative execution protocol. Prefer direct implementation and verification for concrete change requests. Do not invent unsupported provider behavior, do not expose raw internal tool protocol, and keep progress updates concise and evidence-based."
+if [[ "$CLAUDEX_PLAN_MODE_POLICY" == conservative ]]; then
+  readonly claudex_plan_guard="Claudex plan-mode rule: remain in the current execution mode by default. Do not call EnterPlanMode or switch into plan permission mode merely because work is large, multi-step, unfamiliar, or benefits from private reasoning. Enter plan mode only when the user explicitly asks for a plan/design-only response, when a required user decision would materially change the implementation, or when the requested action is irreversible and needs approval before execution. For ordinary bug fixes and implementation requests, inspect, implement, test, and report directly."
+else
+  readonly claudex_plan_guard=""
+fi
 readonly claudex_leader_guard="${claudex_capacity_guard}
 
-${claudex_task_guard}"
+${claudex_task_guard}
+
+${claudex_codex_guard}
+
+${claudex_plan_guard}"
 
 claude_args=()
 if (( inject_session_customizations )); then
-  claude_args+=(--agents "$claudex_agents" --append-system-prompt "$claudex_leader_guard")
+  if claude_supports '--agents'; then
+    claude_args+=(--agents "$claudex_agents")
+  fi
+  if claude_supports '--append-system-prompt'; then
+    claude_args+=(--append-system-prompt "$claudex_leader_guard")
+  fi
 fi
-if (( inject_permission )); then
+if (( inject_permission )) && claude_supports '--permission-mode'; then
   claude_args+=(--permission-mode "$permission_mode")
 fi
 if (( ! direct_chrome )) && [[ "$settings_file" != "$CLAUDE_CONFIG_DIR/settings.json" && "$effort_mode" != ultracode ]]; then
@@ -498,9 +619,14 @@ if (( ! direct_chrome )) && [[ "$settings_file" != "$CLAUDE_CONFIG_DIR/settings.
 fi
 if [[ -n "$start_model" ]]; then
   claude_args+=(--model "$start_model")
+  if [[ "$start_model" == opusplan ]]; then export CLAUDEX_MODEL_MODE=solplan; fi
 fi
 case "$effort_mode" in
   ultracode)
+    claude_supports '--effort' || {
+      printf '%s\n' 'claudex: this Claude Code build lacks --effort; run `claude update`.' >&2
+      exit 1
+    }
     if (( direct_chrome )); then
       ultracode_settings='{"ultracode":true,"workflows":true}'
     else
@@ -510,6 +636,10 @@ case "$effort_mode" in
     export CLAUDEX_SESSION_MODE=ultracode CLAUDE_CODE_EFFORT_LEVEL=xhigh
     ;;
   max)
+    claude_supports '--effort' || {
+      printf '%s\n' 'claudex: this Claude Code build lacks --effort; run `claude update`.' >&2
+      exit 1
+    }
     claude_args+=(--effort max)
     export CLAUDEX_SESSION_MODE=max CLAUDE_CODE_EFFORT_LEVEL=max
     ;;

@@ -8,6 +8,7 @@ This audit targets Claude Code 2.1.210, the version used for the July 2026 produ
 | --- | --- | --- |
 | Interactive and print sessions | GPT-5.6 model aliases, status line, auto permissions, context controls, bounded retries, and leader guard are injected | Isolated argument tests and live Sol prompts |
 | Sol, Terra, and Luna | Friendly names and one picker entry per real model | Proxy model inventory, launcher tests, and live Sol calls |
+| Solplan | Friendly `/model solplan` entry backed by Claude Code's `opusplan` selector; Sol plans and Terra implements | Model-cache, alias-environment, and launcher regressions |
 | Max effort | `--max-effort` maps to native `--effort max` and labels the session `max` | Isolated launcher test and live exact-output prompt |
 | Ultracode | `--ultracode` enables session-only `ultracode`, `workflows`, and xhigh effort | Isolated launcher test and live exact-output prompt |
 | Auto mode | Luna classifier is pinned so safety classification does not accidentally call Terra or Sol | Environment and doctor tests |
@@ -18,6 +19,9 @@ This audit targets Claude Code 2.1.210, the version used for the July 2026 produ
 | Cursor and mouse | Native terminal cursor plus application pointer OSC with cleanup | Pseudo-terminal regression on macOS |
 | macOS/Linux install | Bash installer, dependency selection, service startup, backups, and private permissions | Isolated install test and GitHub matrix |
 | Native Windows install | PowerShell tool mode, CMD shim, native installer, backups, and private config | PowerShell isolated suite and GitHub Windows runner |
+| Codex authentication | Standard Codex file-backed session is synchronized atomically; logout removes the bridge and login recovery stays in Codex | Logged-in, refreshed-session, missing-file, and logged-out regressions |
+| Claude Code updates | Installer checks immediately; launcher checks daily without blocking and negotiates optional flags from current `--help` | Capability and update scheduling regressions |
+| Resume hints | Claude's generated resume footer is rewritten to the Claudex launcher | Byte-stream regression |
 
 ## Transparent Claude Code features
 
@@ -32,7 +36,9 @@ Maintenance and management subcommands (`agents`, `auth`, `auto-mode`, `doctor`,
 - Native Windows Claude Code does not currently provide the same sandbox implementation as macOS, Linux, and WSL2. Claudex does not pretend to emulate an unavailable sandbox.
 - Claude-hosted features such as remote control and Ultrareview can require a first-party Claude login. Their management commands bypass the GPT proxy, but account entitlements and service availability remain upstream concerns.
 - Plugin, MCP, IDE, worktree, Git, hook, and cloud behavior can depend on project configuration and external services. Claudex preserves those interfaces; it cannot make an unavailable external service succeed.
+- Codex intentionally does not export access tokens through `account/read`. When Codex uses an OS keyring and no standard `auth.json` is present, `claudex --login` asks Codex itself to create a file-backed local session. Claudex does not scrape undocumented keychain entries.
+- Future Claude Code releases can remove or fundamentally change interfaces. Claudex detects supported optional flags and fails with an actionable update message if the essential custom-model interface disappears; it does not claim to predict arbitrary future breaking changes.
 
 ## Regression policy
 
-The repository's cross-platform tests verify wrapper arguments, environment isolation, effort modes, permissions, task/agent policy, model labels, quota sanitization, fallback behavior, status rendering, compaction stabilization, cursor behavior, and installers. New Claude Code releases should be audited by comparing `claude --help` and subcommand help with this document, then extending the argument matrix for any newly introduced global flags or management commands.
+The repository's cross-platform tests verify wrapper arguments, authentication lifecycle, environment isolation, effort and Solplan modes, conservative plan policy, permissions, task/agent policy, model labels, quota sanitization, fallback behavior, resume rewriting, status rendering, compaction stabilization, cursor behavior, and installers. The runtime capability check handles additive CLI changes automatically; the matrix is extended whenever a release introduces a new behavior that needs Claudex-specific adaptation.

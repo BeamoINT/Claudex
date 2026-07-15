@@ -8,6 +8,7 @@ Set-StrictMode -Version 2.0
 $ClaudeArguments = @($ClaudeArguments)
 $previousSessionMode = [Environment]::GetEnvironmentVariable('CLAUDEX_SESSION_MODE', 'Process')
 $previousEffortLevel = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_EFFORT_LEVEL', 'Process')
+$previousModelMode = [Environment]::GetEnvironmentVariable('CLAUDEX_MODEL_MODE', 'Process')
 
 $configDir = if ($env:CLAUDEX_CONFIG_DIR) { $env:CLAUDEX_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.config\claudex' }
 $configFile = Join-Path $configDir 'env'
@@ -48,7 +49,7 @@ function Env-OrDefault([string] $Name, [string] $Default) {
 $proxyToken = Env-OrDefault 'CLAUDEX_PROXY_TOKEN' ''
 if (-not $proxyToken) { Fail 'CLAUDEX_PROXY_TOKEN is not configured' }
 if ($proxyToken.Contains("`r") -or $proxyToken.Contains("`n")) { Fail 'CLAUDEX_PROXY_TOKEN contains an unsupported newline.' 2 }
-$proxyUrl = Env-OrDefault 'CLAUDEX_PROXY_URL' 'http://127.0.0.1:8317'
+$proxyUrl = Env-OrDefault 'CLAUDEX_PROXY_URL' 'http://127.0.0.1:8318'
 $model = Env-OrDefault 'CLAUDEX_MODEL' 'gpt-5.6-sol'
 $permissionMode = Env-OrDefault 'CLAUDEX_PERMISSION_MODE' 'auto'
 $autoModeModel = Env-OrDefault 'CLAUDEX_AUTO_MODE_MODEL' 'gpt-5.6-luna'
@@ -66,6 +67,10 @@ $usageTimeout = Env-OrDefault 'CLAUDEX_USAGE_TIMEOUT_SECONDS' '8'
 $usageMaxStale = Env-OrDefault 'CLAUDEX_USAGE_MAX_STALE_SECONDS' '86400'
 $usageSource = Env-OrDefault 'CLAUDEX_USAGE_SOURCE' 'auto'
 $usageAlert = Env-OrDefault 'CLAUDEX_USAGE_ALERT_PERCENT' '20'
+$claudeAutoUpdate = Env-OrDefault 'CLAUDEX_CLAUDE_AUTO_UPDATE' 'on'
+$claudeUpdateInterval = Env-OrDefault 'CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS' '86400'
+$planModePolicy = Env-OrDefault 'CLAUDEX_PLAN_MODE_POLICY' 'conservative'
+$codexSessionHelper = Env-OrDefault 'CLAUDEX_CODEX_SESSION_HELPER' (Join-Path $configDir 'codex-session.ps1')
 
 if ($permissionMode -notin @('manual', 'auto', 'acceptEdits', 'dontAsk', 'plan')) {
     Fail "invalid CLAUDEX_PERMISSION_MODE '$permissionMode'; expected manual, auto, acceptEdits, dontAsk, or plan." 2
@@ -88,15 +93,19 @@ $usageRefreshNumber = Require-Integer 'CLAUDEX_USAGE_REFRESH_SECONDS' $usageRefr
 $usageTimeoutNumber = Require-Integer 'CLAUDEX_USAGE_TIMEOUT_SECONDS' $usageTimeout 1 30
 $usageMaxStaleNumber = Require-Integer 'CLAUDEX_USAGE_MAX_STALE_SECONDS' $usageMaxStale $usageRefreshNumber 604800
 $usageAlertNumber = Require-Integer 'CLAUDEX_USAGE_ALERT_PERCENT' $usageAlert 0 100
+$claudeUpdateIntervalNumber = Require-Integer 'CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS' $claudeUpdateInterval 3600 2592000
 if ($mousePointer -notin @('pointer', 'default', 'off')) {
     Fail 'CLAUDEX_MOUSE_POINTER_SHAPE must be pointer, default, or off.' 2
 }
 if ($usageDisplay -notin @('on', 'off')) { Fail 'CLAUDEX_USAGE_DISPLAY must be on or off.' 2 }
 if ($usageSource -notin @('auto', 'web', 'app-server')) { Fail 'CLAUDEX_USAGE_SOURCE must be auto, web, or app-server.' 2 }
+if ($claudeAutoUpdate -notin @('on', 'off')) { Fail 'CLAUDEX_CLAUDE_AUTO_UPDATE must be on or off.' 2 }
+if ($planModePolicy -notin @('conservative', 'normal')) { Fail 'CLAUDEX_PLAN_MODE_POLICY must be conservative or normal.' 2 }
 
 $env:CLAUDE_CONFIG_DIR = $configDir
 $stateFile = Join-Path $configDir '.claude.json'
 $managedModels = @(
+    [pscustomobject]@{ value = 'opusplan'; label = 'GPT-5.6 Solplan'; description = 'GPT-5.6 Sol in plan mode, GPT-5.6 Terra for implementation' },
     [pscustomobject]@{ value = 'gpt-5.6-sol'; label = 'GPT-5.6 Sol'; description = 'Frontier capability for planning and the hardest engineering work' },
     [pscustomobject]@{ value = 'gpt-5.6-terra'; label = 'GPT-5.6 Terra'; description = 'Balanced intelligence, speed, and cost for everyday coding' },
     [pscustomobject]@{ value = 'gpt-5.6-luna'; label = 'GPT-5.6 Luna'; description = 'Fast, efficient model for search, triage, and mechanical tasks' }
@@ -145,6 +154,10 @@ function Test-ProxyReady {
 }
 
 function Find-ProxyExecutable {
+    $configured = Env-OrDefault 'CLAUDEX_PROXY_BIN' ''
+    if ($configured -and (Test-Path -LiteralPath $configured -PathType Leaf)) { return $configured }
+    $managed = Join-Path $configDir 'bin\cliproxyapi.exe'
+    if (Test-Path -LiteralPath $managed -PathType Leaf) { return $managed }
     foreach ($name in @('cliproxyapi.exe', 'cli-proxy-api.exe', 'cliproxyapi', 'cli-proxy-api')) {
         $command = Get-Command $name -ErrorAction SilentlyContinue
         if ($command) { return $command.Source }
@@ -153,6 +166,11 @@ function Find-ProxyExecutable {
 }
 
 function Ensure-Proxy {
+    if (-not (Test-Path -LiteralPath $codexSessionHelper -PathType Leaf)) {
+        Fail "authentication helper is missing: $codexSessionHelper; reinstall Claudex."
+    }
+    & $codexSessionHelper sync
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if (Test-ProxyReady) { return }
     $proxyBinary = Find-ProxyExecutable
     if (-not $proxyBinary) { Fail 'CLIProxyAPI is not reachable and no proxy executable was found.' }
@@ -174,8 +192,50 @@ function Ensure-Proxy {
     Fail 'local proxy did not become healthy. Run: claudex --doctor'
 }
 
+function Load-ClaudeCapabilities {
+    $claudeCommand = Get-Command claude -ErrorAction SilentlyContinue
+    if (-not $claudeCommand) { Fail 'Claude Code was not found. Install Claude Code and retry.' }
+    $script:claudeInvocation = if ($claudeCommand.CommandType -eq 'Function') { $claudeCommand.Name } else { $claudeCommand.Source }
+    $script:claudeHelp = (& $script:claudeInvocation --help 2>$null | Out-String)
+    if ([string]::IsNullOrWhiteSpace($script:claudeHelp)) { Fail 'Claude Code did not return its capability list.' }
+    if (-not $script:claudeHelp.Contains('--model')) {
+        Fail 'this Claude Code build does not support custom models; run `claude update`.'
+    }
+}
+
+function Test-ClaudeOption([string] $Option) {
+    return $script:claudeHelp.Contains($Option)
+}
+
+function Start-ClaudeUpdateCheck {
+    if ($claudeAutoUpdate -ne 'on' -or $env:CLAUDEX_SKIP_AUTO_UPDATE -eq '1') { return }
+    $updateDir = Join-Path $configDir 'update'
+    $stamp = Join-Path $updateDir 'last-success'
+    $last = 0L
+    if (Test-Path -LiteralPath $stamp -PathType Leaf) {
+        [long]::TryParse(([IO.File]::ReadAllText($stamp).Trim()), [ref] $last) | Out-Null
+    }
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    if ($now - $last -lt $claudeUpdateIntervalNumber) { return }
+    [IO.Directory]::CreateDirectory($updateDir) | Out-Null
+    $lock = Join-Path $updateDir 'lock'
+    try { New-Item -LiteralPath $lock -ItemType Directory -ErrorAction Stop | Out-Null } catch { return }
+    $claudePath = $script:claudeInvocation
+    $log = Join-Path $updateDir 'claude-update.log'
+    Start-Job -ScriptBlock {
+        param($ClaudePath, $Log, $Stamp, $Lock)
+        try {
+            & $ClaudePath update *> $Log
+            if ($LASTEXITCODE -eq 0) {
+                [IO.File]::WriteAllText($Stamp, ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString() + "`n"))
+            }
+        } finally { Remove-Item -LiteralPath $Lock -Recurse -Force -ErrorAction SilentlyContinue }
+    } -ArgumentList $claudePath, $log, $stamp, $lock | Out-Null
+}
+
 function Model-Name([string] $Id) {
     switch ($Id) {
+        { $_ -in @('opusplan', 'solplan') } { return 'GPT-5.6 Solplan' }
         { $_ -in @('gpt-5.6-terra', 'sonnet') } { return 'GPT-5.6 Terra' }
         { $_ -in @('gpt-5.6-luna', 'haiku') } { return 'GPT-5.6 Luna' }
         default { return 'GPT-5.6 Sol' }
@@ -196,6 +256,8 @@ function Invoke-Doctor {
     $claudeVersion = try { (& claude --version 2>$null | Select-Object -First 1) } catch { 'unavailable' }
     Write-Output "Claude Code: $claudeVersion"
     Write-Output "CLIProxyAPI: $proxyVersion"
+    & $codexSessionHelper status
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Output "Proxy: healthy at $proxyUrl"
     Write-Output "Saved model: $(Model-Name $savedModel) ($savedModel)"
     Write-Output "Default permission mode: $permissionMode"
@@ -213,6 +275,8 @@ function Invoke-Doctor {
     Write-Output "Low-quota alert: $usageAlertNumber% remaining (0 disables)"
     Write-Output 'Effort shortcuts: --max-effort and --ultracode (xhigh plus dynamic workflows)'
     Write-Output 'Claude in Chrome: use --claude-chrome for the direct Anthropic profile required by the extension'
+    Write-Output "Claude Code updates: $claudeAutoUpdate (checked every ${claudeUpdateIntervalNumber}s)"
+    Write-Output "Plan mode policy: $planModePolicy (implementation-first unless planning is genuinely required)"
     Write-Output 'Rendering: no-flicker mode with native terminal cursor'
     Write-Output 'Terminal UI: fullscreen (launch command hidden while Claudex is open)'
     Write-Output 'Header model name: GPT-5.6 Sol'
@@ -225,6 +289,13 @@ function Invoke-Doctor {
         else { [Console]::Error.WriteLine("${id}: not advertised by the authenticated Codex account"); $missing = $true }
     }
     if ($missing) { exit 1 }
+}
+
+if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('--login', '--logout', '--auth-status')) {
+    if (-not (Test-Path -LiteralPath $codexSessionHelper -PathType Leaf)) { Fail 'authentication helper is missing; reinstall Claudex.' }
+    $action = switch ($ClaudeArguments[0]) { '--login' { 'login' } '--logout' { 'logout' } default { 'status' } }
+    & $codexSessionHelper $action
+    exit $LASTEXITCODE
 }
 
 if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '--doctor') {
@@ -268,6 +339,7 @@ while ($index -lt $ClaudeArguments.Count) {
         '--sol' { $startModel = 'gpt-5.6-sol' }
         '--terra' { $startModel = 'gpt-5.6-terra' }
         '--luna' { $startModel = 'gpt-5.6-luna' }
+        '--solplan' { $startModel = 'opusplan' }
         '--manual' { $launchPermissionMode = 'manual' }
         '--auto' { $launchPermissionMode = 'auto' }
         '--accept-edits' { $launchPermissionMode = 'acceptEdits' }
@@ -313,7 +385,7 @@ foreach ($argument in $forwardArguments) {
 }
 
 if ($directChrome) {
-    if ($startModel) { Fail '--sol, --terra, and --luna cannot be combined with --claude-chrome because Chrome requires a first-party Anthropic model.' 2 }
+    if ($startModel) { Fail '--sol, --terra, --luna, and --solplan cannot be combined with --claude-chrome because Chrome requires a first-party Anthropic model.' 2 }
     $useProxy = $false
     $injectSessionCustomizations = $false
     $injectPermission = $false
@@ -323,6 +395,9 @@ if ($directChrome) {
     Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue
     $forwardArguments.Insert(0, '--chrome')
 }
+
+Load-ClaudeCapabilities
+Start-ClaudeUpdateCheck
 
 if ($useProxy) {
     Ensure-Proxy
@@ -372,20 +447,27 @@ $agents = [ordered]@{
 $agentsJson = $agents | ConvertTo-Json -Depth 10 -Compress
 $capacityGuard = "Claudex capacity rule: keep at most $agentConcurrencyNumber Agent tasks active at once. Launch no more than $agentConcurrencyNumber agents in a wave, wait for one to finish before starting another, and never create an agent team. Sol capacity is reserved for the leader; use the configured Terra or Luna agents for delegated work. If a model reports a 429 or cooldown, do not launch replacement agents or create a retry storm; continue useful local work and retry at most once after active agents settle."
 $taskGuard = 'Claudex task lifecycle rule: the Sol leader is the sole owner of the shared task list. Keep it compact and create only tasks that represent real remaining deliverables, not duplicate discovery lanes or speculative work. Mark a task in_progress only while the leader or a currently active agent is working on it; queued or blocked work stays pending. After every agent result, immediately reconcile its parent task and mark it completed once its outcome is integrated and verified. Before every final answer, call TaskList and reconcile every entry: completed work must be completed, inactive work must not remain in_progress, and genuinely unfinished pending work must be explicitly reported instead of being hidden behind a completion claim. Never leave stale in_progress tasks after their work is done.'
-$leaderGuard = $capacityGuard + [Environment]::NewLine + [Environment]::NewLine + $taskGuard
+$codexGuard = "Claudex Codex-model rule: operate as a Codex coding agent inside Claude Code's interface. Treat the available Claude Code tools and their schemas as the authoritative execution protocol. Prefer direct implementation and verification for concrete change requests. Do not invent unsupported provider behavior, do not expose raw internal tool protocol, and keep progress updates concise and evidence-based."
+$planGuard = if ($planModePolicy -eq 'conservative') { 'Claudex plan-mode rule: remain in the current execution mode by default. Do not call EnterPlanMode or switch into plan permission mode merely because work is large, multi-step, unfamiliar, or benefits from private reasoning. Enter plan mode only when the user explicitly asks for a plan/design-only response, when a required user decision would materially change the implementation, or when the requested action is irreversible and needs approval before execution. For ordinary bug fixes and implementation requests, inspect, implement, test, and report directly.' } else { '' }
+$leaderGuard = @($capacityGuard, $taskGuard, $codexGuard, $planGuard) -join ([Environment]::NewLine + [Environment]::NewLine)
 
 $claudeLaunchArguments = New-Object 'System.Collections.Generic.List[string]'
 if ($injectSessionCustomizations) {
-    foreach ($value in @('--agents', $agentsJson, '--append-system-prompt', $leaderGuard)) { $claudeLaunchArguments.Add($value) }
+    if (Test-ClaudeOption '--agents') { foreach ($value in @('--agents', $agentsJson)) { $claudeLaunchArguments.Add($value) } }
+    if (Test-ClaudeOption '--append-system-prompt') { foreach ($value in @('--append-system-prompt', $leaderGuard)) { $claudeLaunchArguments.Add($value) } }
 }
-if ($injectPermission) {
+if ($injectPermission -and (Test-ClaudeOption '--permission-mode')) {
     $claudeLaunchArguments.Add('--permission-mode'); $claudeLaunchArguments.Add($launchPermissionMode)
 }
 if ($settingsFile -ne (Join-Path $configDir 'settings.json') -and $effortMode -ne 'ultracode') {
     $claudeLaunchArguments.Add('--settings'); $claudeLaunchArguments.Add($settingsFile)
 }
-if ($startModel) { $claudeLaunchArguments.Add('--model'); $claudeLaunchArguments.Add($startModel) }
+if ($startModel) {
+    $claudeLaunchArguments.Add('--model'); $claudeLaunchArguments.Add($startModel)
+    if ($startModel -eq 'opusplan') { $env:CLAUDEX_MODEL_MODE = 'solplan' }
+}
 if ($effortMode -eq 'ultracode') {
+    if (-not (Test-ClaudeOption '--effort')) { Fail 'this Claude Code build lacks --effort; run `claude update`.' }
     if ($directChrome) { $ultracodeSettings = [pscustomobject]@{ ultracode = $true; workflows = $true } }
     else {
         $ultracodeSettings = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
@@ -397,6 +479,7 @@ if ($effortMode -eq 'ultracode') {
     $env:CLAUDEX_SESSION_MODE = 'ultracode'
     $env:CLAUDE_CODE_EFFORT_LEVEL = 'xhigh'
 } elseif ($effortMode -eq 'max') {
+    if (-not (Test-ClaudeOption '--effort')) { Fail 'this Claude Code build lacks --effort; run `claude update`.' }
     $claudeLaunchArguments.Add('--effort'); $claudeLaunchArguments.Add('max')
     $env:CLAUDEX_SESSION_MODE = 'max'
     $env:CLAUDE_CODE_EFFORT_LEVEL = 'max'
@@ -418,5 +501,7 @@ try {
     else { $env:CLAUDEX_SESSION_MODE = $previousSessionMode }
     if ($null -eq $previousEffortLevel) { Remove-Item Env:CLAUDE_CODE_EFFORT_LEVEL -ErrorAction SilentlyContinue }
     else { $env:CLAUDE_CODE_EFFORT_LEVEL = $previousEffortLevel }
+    if ($null -eq $previousModelMode) { Remove-Item Env:CLAUDEX_MODEL_MODE -ErrorAction SilentlyContinue }
+    else { $env:CLAUDEX_MODEL_MODE = $previousModelMode }
 }
 exit $exitCode

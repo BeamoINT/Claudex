@@ -5,10 +5,15 @@ readonly root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-mkdir -p "$tmp/home/.config/claudex" "$tmp/home/.cli-proxy-api" "$tmp/bin"
+mkdir -p "$tmp/home/.config/claudex" "$tmp/home/.cli-proxy-api" "$tmp/home/.codex" "$tmp/bin"
 printf '%s\n' 'CLAUDEX_PROXY_TOKEN=test-token' "CLAUDEX_CODEX_AUTH_DIR=$tmp/home/.cli-proxy-api" > "$tmp/home/.config/claudex/env"
 cp "$root/settings.json" "$tmp/home/.config/claudex/settings.json"
 cp "$root/usage-limit" "$tmp/home/.config/claudex/usage-limit"
+cp "$root/codex-session" "$tmp/home/.config/claudex/codex-session"
+chmod +x "$tmp/home/.config/claudex/codex-session"
+cat > "$tmp/home/.codex/auth.json" <<'EOF'
+{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T01:00:00Z","tokens":{"access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"codex-source-id","account_id":"account-test"}}
+EOF
 cat > "$tmp/home/.cli-proxy-api/codex-test.json" <<'EOF'
 {"type":"codex","access_token":"secret-access-token","refresh_token":"secret-refresh-token","account_id":"account-test","email":"private@example.com"}
 EOF
@@ -35,6 +40,11 @@ if [[ "${1:-}" == "--version" ]]; then
   printf '%s\n' '2.1.210 (test)'
   exit
 fi
+if [[ "${1:-}" == "--help" ]]; then
+  printf '%s\n' '--model --agents --append-system-prompt --permission-mode --settings --effort'
+  exit
+fi
+if [[ "${1:-}" == "update" ]]; then exit 0; fi
 printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
 printf '%s\n' "BG=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
 printf '%s\n' "SUBAGENT=${CLAUDE_CODE_SUBAGENT_MODEL}"
@@ -53,6 +63,10 @@ printf '%s\n' "ARGS=$*"
 EOF
 cat > "$tmp/bin/codex" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${FAKE_CODEX_LOGGED_OUT:-0}" == 1 ]]; then exit 1; fi
+if [[ "${1:-}" == login && "${2:-}" == status ]]; then exit 0; fi
+if [[ "${1:-}" == logout ]]; then exit 0; fi
+if [[ "${1:-}" == -c && "${3:-}" == login ]]; then exit 0; fi
 [[ "${1:-}" == app-server ]] || exit 2
 while IFS= read -r line; do
   case "$line" in
@@ -70,7 +84,7 @@ EOF
 chmod +x "$tmp/bin/"*
 
 run_wrapper() {
-  HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
     "$root/claudex" "$@"
 }
 
@@ -80,6 +94,15 @@ bash -n "$root/usage-limit"
 bash -n "$root/install.sh"
 sh -n "$root/install.zsh"
 node --check "$root/preload.cjs"
+input_alias_output=$(CLAUDEX_TEST_TTY_INPUT=1 node -e '
+  const preload = require(process.argv[1]);
+  process.stdout.write(preload.rewriteSolplanInput("/model solplan\r"));
+' "$root/preload.cjs")
+[[ "$input_alias_output" == $'/model opusplan\r' ]]
+input_listener_output=$(printf '/model solplan\r' | CLAUDEX_TEST_TTY_INPUT=1 node --require "$root/preload.cjs" -e '
+  process.stdin.once("data", (chunk) => process.stdout.write(chunk));
+')
+[[ "$input_listener_output" == $'/model opusplan\r' ]]
 jq -e '
   .model == "opus"
   and .permissions.defaultMode == "auto"
@@ -92,6 +115,7 @@ jq -e '
   and (.availableModels | index("gpt-5.6-sol") != null)
   and (.availableModels | index("gpt-5.6-terra") != null)
   and (.availableModels | index("gpt-5.6-luna") != null)
+  and (.availableModels | index("opusplan") != null)
   and .statusLine.command == "__CLAUDEX_STATUSLINE_COMMAND__"
   and (.env | not)
 ' "$root/settings.json" >/dev/null
@@ -102,6 +126,7 @@ jq -e '
   any(.additionalModelOptionsCache[]?; .value == "gpt-5.6-sol" and .label == "GPT-5.6 Sol")
   and any(.additionalModelOptionsCache[]?; .value == "gpt-5.6-terra" and .label == "GPT-5.6 Terra")
   and any(.additionalModelOptionsCache[]?; .value == "gpt-5.6-luna" and .label == "GPT-5.6 Luna")
+  and any(.additionalModelOptionsCache[]?; .value == "opusplan" and .label == "GPT-5.6 Solplan")
 ' "$state_file" >/dev/null
 [[ "$default_output" == *'AUTO=gpt-5.6-luna'* ]]
 [[ "$default_output" == *'BG=gpt-5.6-luna'* ]]
@@ -121,6 +146,8 @@ jq -e '
 [[ "$default_output" == *'keep at most 3 Agent tasks active at once'* ]]
 [[ "$default_output" == *'Before every final answer, call TaskList and reconcile every entry'* ]]
 [[ "$default_output" == *'Never leave stale in_progress tasks after their work is done'* ]]
+[[ "$default_output" == *'operate as a Codex coding agent inside Claude Code'* ]]
+[[ "$default_output" == *'Do not call EnterPlanMode'* ]]
 [[ "$default_output" == *'"gpt-5-6-terra"'* ]]
 [[ "$default_output" == *'"gpt-5-6-luna"'* ]]
 [[ "$default_output" != *'"claudex-deep"'* ]]
@@ -142,6 +169,11 @@ ultracode_output=$(run_wrapper --ultracode --sol test-prompt)
 max_output=$(run_wrapper --max-effort test-prompt)
 [[ "$max_output" == *'MODE=max'* ]]
 [[ "$max_output" == *'--effort max'* ]]
+
+solplan_output=$(run_wrapper --solplan test-prompt)
+[[ "$solplan_output" == *'--model opusplan'* ]]
+[[ "$solplan_output" == *'OPUS=gpt-5.6-sol'* ]]
+[[ "$solplan_output" == *'SUBAGENT=gpt-5.6-terra'* ]]
 
 bare_output=$(run_wrapper --bare --print test-prompt)
 [[ "$bare_output" != *'--agents'* ]]
@@ -199,6 +231,9 @@ doctor_output=$(run_wrapper --doctor)
 [[ "$doctor_output" == *'Context status: session-stabilized (transient zero suppressed)'* ]]
 [[ "$doctor_output" == *'Codex usage: status-line refresh every 300s'* ]]
 [[ "$doctor_output" == *'Rendering: no-flicker mode with native terminal cursor'* ]]
+[[ "$doctor_output" == *'Codex authentication: ready (shared ChatGPT session)'* ]]
+[[ "$doctor_output" == *'Claude Code updates: on'* ]]
+[[ "$doctor_output" == *'Plan mode policy: conservative'* ]]
 [[ "$doctor_output" == *'Terminal UI: fullscreen (launch command hidden while Claudex is open)'* ]]
 [[ "$doctor_output" == *'Header model name: GPT-5.6 Sol'* ]]
 [[ "$doctor_output" == *'Mouse pointer: pointer'* ]]
@@ -292,6 +327,15 @@ status_output=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt
 [[ "$status_output" == *'42% context'* ]]
 [[ "$status_output" == *'Codex 7d 16% left'* ]]
 
+solplan_settings="$tmp/home/.config/claudex/settings.json"
+solplan_settings_backup="$tmp/settings-before-solplan.json"
+cp "$solplan_settings" "$solplan_settings_backup"
+jq '.model = "opusplan"' "$solplan_settings_backup" > "$solplan_settings"
+solplan_status=$(printf '%s\n' '{"session_id":"solplan-session","model":{"id":"gpt-5.6-terra"},"effort":{"level":"high"},"context_window":{"used_percentage":12}}' | \
+  CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+[[ "$solplan_status" == *'GPT-5.6 Solplan'* ]]
+mv "$solplan_settings_backup" "$solplan_settings"
+
 ultracode_status=$(printf '%s\n' '{"session_id":"ultracode-session","model":{"id":"gpt-5.6-sol"},"effort":{"level":"xhigh"},"context_window":{"used_percentage":10,"total_input_tokens":40000,"context_window_size":400000}}' | \
   CLAUDEX_SESSION_MODE=ultracode CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
 [[ "$ultracode_status" == *'ultracode effort'* ]]
@@ -319,8 +363,27 @@ filtered_frame=$(printf '%s' "$billing_frame" | \
 [[ "$filtered_frame" != *'API Usage Billing'* ]]
 [[ "$filtered_frame" != *$'·\033[43GAPI'* ]]
 
+resume_frame='Resume this session with: claude --resume 123e4567-e89b-12d3-a456-426614174000'
+filtered_resume=$(printf '%s' "$resume_frame" | node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
+[[ "$filtered_resume" == *'claudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
+[[ "$filtered_resume" != *'claude --resume'* ]]
+filtered_resume_stderr=$(node --require "$root/preload.cjs" -e 'process.stderr.write(process.argv[1])' "$resume_frame" 2>&1)
+[[ "$filtered_resume_stderr" == *'claudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
+
+solplan_picker='Opus Plan Mode · Use Opus in plan mode, Sonnet otherwise'
+filtered_solplan=$(printf '%s' "$solplan_picker" | node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
+[[ "$filtered_solplan" == *'GPT-5.6 Solplan'* ]]
+[[ "$filtered_solplan" == *'GPT-5.6 Sol in plan mode, GPT-5.6 Terra otherwise'* ]]
+ansi_solplan_picker=$'Opus\033[5G Plan · Opus\033[20G in plan mode, else Sonnet · API\033[70G Usage Billing'
+filtered_ansi_solplan=$(printf '%s' "$ansi_solplan_picker" | node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
+plain_ansi_solplan=$(printf '%s' "$filtered_ansi_solplan" | sed $'s/\033\\[[0-9;?]*[ -\\/]*[@-~]//g')
+[[ "$plain_ansi_solplan" == *'GPT-5.6 Solplan'* ]]
+[[ "$plain_ansi_solplan" == *'GPT-5.6 Sol in plan mode, else GPT-5.6 Terra'* ]]
+[[ "$plain_ansi_solplan" != *'API Usage Billing'* ]]
+
 install_home="$tmp/install home"
-mkdir -p "$install_home"
+mkdir -p "$install_home/.codex"
+cp "$tmp/home/.codex/auth.json" "$install_home/.codex/auth.json"
 install_output=$(HOME="$install_home" PATH="$tmp/bin:$PATH" \
   CLAUDEX_PROXY_TOKEN='installer-test-token' \
   CLAUDEX_PROXY_CONFIG="$install_home/.config/claudex/cliproxyapi.yaml" \
@@ -329,6 +392,7 @@ install_output=$(HOME="$install_home" PATH="$tmp/bin:$PATH" \
 [[ -x "$install_home/.local/bin/claudex" ]]
 [[ -x "$install_home/.config/claudex/statusline" ]]
 [[ -x "$install_home/.config/claudex/usage-limit" ]]
+[[ -x "$install_home/.config/claudex/codex-session" ]]
 [[ -r "$install_home/.config/claudex/preload.cjs" ]]
 [[ -r "$install_home/.config/claudex/skills/usage-limit/SKILL.md" ]]
 [[ -r "$install_home/.config/claudex/settings.json" ]]
@@ -341,7 +405,19 @@ jq -e --arg expected "/usr/bin/env bash $expected_statusline" \
 installed_env=$(<"$install_home/.config/claudex/env")
 [[ "$installed_env" == *'CLAUDEX_PROXY_TOKEN=installer-test-token'* ]]
 [[ "$installed_env" == *'CLAUDEX_PROXY_CONFIG='* ]]
+[[ "$installed_env" == *'CLAUDEX_PROXY_URL=http://127.0.0.1:8318'* ]]
+[[ "$installed_env" == *'CLAUDEX_CODEX_AUTH_DIR='* ]]
 [[ -r "$install_home/.config/claudex/cliproxyapi.yaml" ]]
 [[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'host: "127.0.0.1"'* ]]
+[[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'port: 8318'* ]]
+
+auth_status=$(run_wrapper --auth-status)
+[[ "$auth_status" == *'Codex authentication: ready (shared ChatGPT session)'* ]]
+if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 FAKE_CODEX_LOGGED_OUT=1 \
+  "$root/claudex" --sol test-prompt >"$tmp/logged-out.stdout" 2>"$tmp/logged-out.stderr"; then
+  printf '%s\n' 'expected logged-out Codex session to fail' >&2
+  exit 1
+fi
+grep -F 'Codex is logged out. Run `codex login` (or `claudex --login`) and retry.' "$tmp/logged-out.stderr" >/dev/null
 
 printf '%s\n' 'all Claudex tests passed'

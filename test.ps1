@@ -18,11 +18,15 @@ try {
     [IO.Directory]::CreateDirectory($fakeBin) | Out-Null
     $testAuthDir = Join-Path $testHome '.cli-proxy-api'
     [IO.Directory]::CreateDirectory($testAuthDir) | Out-Null
+    $testCodexDir = Join-Path $testHome '.codex'
+    [IO.Directory]::CreateDirectory($testCodexDir) | Out-Null
     [IO.File]::WriteAllText((Join-Path $testConfig 'env'), "CLAUDEX_PROXY_TOKEN=test-token`nCLAUDEX_CODEX_AUTH_DIR=$testAuthDir`n", $utf8)
     [IO.File]::WriteAllText((Join-Path $testAuthDir 'codex-test.json'), '{"type":"codex","access_token":"secret-access-token","refresh_token":"secret-refresh-token","account_id":"account-test","email":"private@example.com"}', $utf8)
     Copy-Item -LiteralPath (Join-Path $root 'settings.json') -Destination (Join-Path $testConfig 'settings.json')
     Copy-Item -LiteralPath (Join-Path $root 'preload.cjs') -Destination (Join-Path $testConfig 'preload.cjs')
     Copy-Item -LiteralPath (Join-Path $root 'usage-limit.ps1') -Destination (Join-Path $testConfig 'usage-limit.ps1')
+    Copy-Item -LiteralPath (Join-Path $root 'codex-session.ps1') -Destination (Join-Path $testConfig 'codex-session.ps1')
+    [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T01:00:00Z","tokens":{"access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"codex-source-id","account_id":"account-test"}}', $utf8)
 
     if ($isWindowsPlatform) {
         $fakeCurl = Join-Path $fakeBin 'curl.cmd'
@@ -40,6 +44,8 @@ echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]
 '@, $utf8)
         function global:claude {
             if ($args.Count -gt 0 -and $args[0] -eq '--version') { Write-Output '2.1.210 (test)'; return }
+            if ($args.Count -gt 0 -and $args[0] -eq '--help') { Write-Output '--model --agents --append-system-prompt --permission-mode --settings --effort'; return }
+            if ($args.Count -gt 0 -and $args[0] -eq 'update') { return }
             Write-Output "AUTO=$env:CLAUDE_CODE_AUTO_MODE_MODEL"
             Write-Output "BG=$env:CLAUDE_CODE_BG_CLASSIFIER_MODEL"
             Write-Output "SUBAGENT=$env:CLAUDE_CODE_SUBAGENT_MODEL"
@@ -63,6 +69,14 @@ echo CLIProxyAPI test
 echo extra version detail
 exit /b 1
 '@, $utf8)
+        [IO.File]::WriteAllText((Join-Path $fakeBin 'codex.cmd'), @'
+@echo off
+if "%FAKE_CODEX_LOGGED_OUT%"=="1" exit /b 1
+if "%1"=="login" if "%2"=="status" exit /b 0
+if "%1"=="logout" exit /b 0
+if "%1"=="-c" exit /b 0
+exit /b 2
+'@, $utf8)
     } else {
         $fakeCurl = Join-Path $fakeBin 'curl.exe'
         [IO.File]::WriteAllText($fakeCurl, @'
@@ -81,6 +95,11 @@ if [ "${1:-}" = "--version" ]; then
   printf '%s\n' '2.1.210 (test)'
   exit 0
 fi
+if [ "${1:-}" = "--help" ]; then
+  printf '%s\n' '--model --agents --append-system-prompt --permission-mode --settings --effort'
+  exit 0
+fi
+if [ "${1:-}" = "update" ]; then exit 0; fi
 printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
 printf '%s\n' "BG=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
 printf '%s\n' "SUBAGENT=${CLAUDE_CODE_SUBAGENT_MODEL}"
@@ -98,13 +117,21 @@ printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
 printf 'ARGS='; printf ' %s' "$@"; printf '\n'
 '@, $utf8)
+        [IO.File]::WriteAllText((Join-Path $fakeBin 'codex'), @'
+#!/bin/sh
+if [ "${FAKE_CODEX_LOGGED_OUT:-0}" = 1 ]; then exit 1; fi
+if [ "${1:-}" = login ] && [ "${2:-}" = status ]; then exit 0; fi
+if [ "${1:-}" = logout ]; then exit 0; fi
+if [ "${1:-}" = -c ]; then exit 0; fi
+exit 2
+'@, $utf8)
         [IO.File]::WriteAllText((Join-Path $fakeBin 'cliproxyapi'), @'
 #!/bin/sh
 printf '%s\n' 'CLIProxyAPI test'
 printf '%s\n' 'extra version detail'
 exit 1
 '@, $utf8)
-        & chmod +x $fakeCurl (Join-Path $fakeBin 'claude') (Join-Path $fakeBin 'cliproxyapi')
+        & chmod +x $fakeCurl (Join-Path $fakeBin 'claude') (Join-Path $fakeBin 'codex') (Join-Path $fakeBin 'cliproxyapi')
         if ($LASTEXITCODE -ne 0) { throw 'failed to make PowerShell test doubles executable' }
     }
 
@@ -112,6 +139,7 @@ exit 1
     $env:CLAUDEX_CONFIG_DIR = $testConfig
     $env:CLAUDEX_CURL_BIN = $fakeCurl
     $env:PATH = "$fakeBin$([IO.Path]::PathSeparator)$env:PATH"
+    $env:CLAUDEX_SKIP_AUTO_UPDATE = '1'
     Remove-Item Env:CLAUDEX_PERMISSION_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:CLAUDEX_AUTO_COMPACT_WINDOW -ErrorAction SilentlyContinue
     Remove-Item Env:CLAUDEX_MOUSE_POINTER_SHAPE -ErrorAction SilentlyContinue
@@ -135,6 +163,8 @@ exit 1
     Assert-True ($output.Contains('Do not create, claim, or update entries in the shared task list')) 'subagent task ownership'
     Assert-True ($output.Contains('Before every final answer, call TaskList and reconcile every entry')) 'leader task reconciliation'
     Assert-True ($output.Contains('Never leave stale in_progress tasks after their work is done')) 'stale task guard'
+    Assert-True ($output.Contains('operate as a Codex coding agent inside Claude Code')) 'Codex tuning guard'
+    Assert-True ($output.Contains('Do not call EnterPlanMode')) 'conservative plan mode guard'
     Assert-True ($output.Contains('"gpt-5-6-terra"')) 'transparent Terra agent name'
     Assert-True ($output.Contains('"gpt-5-6-luna"')) 'transparent Luna agent name'
     Assert-True (-not $output.Contains('"claudex-deep"')) 'legacy deep alias removed'
@@ -152,6 +182,11 @@ exit 1
     Assert-True ($maxEffort.Contains('MODE=max')) 'max effort session label'
     Assert-True ($maxEffort.Contains('--effort max')) 'max effort flag'
 
+    $solplan = (& (Join-Path $root 'claudex.ps1') --solplan test-prompt | Out-String)
+    Assert-True ($solplan.Contains('--model opusplan')) 'Solplan built-in selector'
+    Assert-True ($solplan.Contains('OPUS=gpt-5.6-sol')) 'Solplan planning model'
+    Assert-True ($solplan.Contains('SUBAGENT=gpt-5.6-terra')) 'Solplan implementation family'
+
     $bare = (& (Join-Path $root 'claudex.ps1') --bare --print test-prompt | Out-String)
     Assert-True (-not $bare.Contains('--agents')) 'bare mode custom agents suppressed'
     Assert-True (-not $bare.Contains('--append-system-prompt')) 'bare mode leader prompt suppressed'
@@ -166,6 +201,7 @@ exit 1
     Assert-True (@($stateIds | Where-Object { $_ -eq 'gpt-5.6-sol' }).Count -eq 1) 'one Sol cache entry'
     Assert-True (@($stateIds | Where-Object { $_ -eq 'gpt-5.6-terra' }).Count -eq 1) 'one Terra cache entry'
     Assert-True (@($stateIds | Where-Object { $_ -eq 'gpt-5.6-luna' }).Count -eq 1) 'one Luna cache entry'
+    Assert-True (@($stateIds | Where-Object { $_ -eq 'opusplan' }).Count -eq 1) 'one Solplan cache entry'
 
     $doctor = (& (Join-Path $root 'claudex.ps1') --doctor | Out-String)
     Assert-True ($doctor.Contains('CLIProxyAPI: CLIProxyAPI test')) 'proxy version first line'
@@ -175,6 +211,9 @@ exit 1
     Assert-True ($doctor.Contains('Context status: session-stabilized')) 'doctor context stabilization'
     Assert-True ($doctor.Contains('Codex usage: status-line refresh every 300s')) 'doctor usage refresh'
     Assert-True ($doctor.Contains('Rendering: no-flicker mode with native terminal cursor')) 'doctor rendering hardening'
+    Assert-True ($doctor.Contains('Codex authentication: ready (shared ChatGPT session)')) 'doctor shared Codex auth'
+    Assert-True ($doctor.Contains('Claude Code updates: on')) 'doctor auto updates'
+    Assert-True ($doctor.Contains('Plan mode policy: conservative')) 'doctor plan policy'
     Assert-True ($doctor.Contains('gpt-5.6-terra: advertised')) 'doctor models'
 
     $usage = (& (Join-Path $root 'claudex.ps1') --usage-limit | Out-String)
@@ -211,6 +250,11 @@ exit 1
     Assert-True ($status.Contains('42% context')) 'status context'
     Assert-True ($status.Contains('Codex 7d 18% left')) 'status usage limits'
 
+    $env:CLAUDEX_MODEL_MODE = 'solplan'
+    $solplanStatus = ($statusJson | & (Join-Path $root 'statusline.ps1') | Out-String)
+    Remove-Item Env:CLAUDEX_MODEL_MODE
+    Assert-True ($solplanStatus.Contains('GPT-5.6 Solplan')) 'Solplan status model'
+
     $transientJson = '{"session_id":"stable-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":0,"total_input_tokens":0,"context_window_size":400000,"current_usage":null}}'
     $transientStatus = ($transientJson | & (Join-Path $root 'statusline.ps1') | Out-String)
     Assert-True ($transientStatus.Contains('42% context')) 'transient zero uses session cache'
@@ -228,8 +272,23 @@ exit 1
     $filteredFrame = $billingFrame | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
     Assert-True (($filteredFrame | Out-String).Contains('GPT-5.6 Sol with high effort')) 'banner retained'
     Assert-True (-not ($filteredFrame | Out-String).Contains('API Usage Billing')) 'billing label removed'
+    $resumeFrame = 'Resume this session with: claude --resume 123e4567-e89b-12d3-a456-426614174000'
+    $filteredResume = $resumeFrame | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
+    Assert-True (($filteredResume | Out-String).Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'resume command rewritten'
+    $filteredResumeError = & node --require (Join-Path $root 'preload.cjs') -e 'process.stderr.write(process.argv[1])' $resumeFrame 2>&1
+    Assert-True (($filteredResumeError | Out-String).Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'stderr resume command rewritten'
+    $solplanPicker = 'Opus Plan Mode - Use Opus in plan mode, Sonnet otherwise'
+    $filteredSolplan = $solplanPicker | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
+    Assert-True (($filteredSolplan | Out-String).Contains('GPT-5.6 Solplan')) 'Solplan picker label'
+    Assert-True (($filteredSolplan | Out-String).Contains('GPT-5.6 Sol in plan mode, GPT-5.6 Terra otherwise')) 'Solplan picker description'
+    $env:CLAUDEX_TEST_TTY_INPUT = '1'
+    $inputAlias = & node -e 'const p=require(process.argv[1]); process.stdout.write(p.rewriteSolplanInput("/model solplan\r"));' (Join-Path $root 'preload.cjs')
+    Remove-Item Env:CLAUDEX_TEST_TTY_INPUT
+    Assert-True (($inputAlias | Out-String).Contains('/model opusplan')) 'Solplan slash-command alias'
 
     $installHome = Join-Path $temporary 'install home'
+    [IO.Directory]::CreateDirectory((Join-Path $installHome '.codex')) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $testCodexDir 'auth.json') -Destination (Join-Path $installHome '.codex\auth.json')
     $env:USERPROFILE = $installHome
     $env:CLAUDEX_CONFIG_DIR = Join-Path $installHome '.config\claudex'
     $env:CLAUDEX_BIN_DIR = Join-Path $installHome '.local\bin'
@@ -241,6 +300,7 @@ exit 1
     Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDEX_BIN_DIR 'claudex.ps1') -PathType Leaf) 'PowerShell launcher installed'
     Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'statusline.ps1') -PathType Leaf) 'statusline installed'
     Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'usage-limit.ps1') -PathType Leaf) 'usage helper installed'
+    Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'codex-session.ps1') -PathType Leaf) 'Codex session helper installed'
     Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'preload.cjs') -PathType Leaf) 'preload installed'
     Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'skills\usage-limit\SKILL.md') -PathType Leaf) 'usage skill installed'
     $installedSettings = Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'settings.json') -Raw | ConvertFrom-Json
@@ -249,6 +309,8 @@ exit 1
     $installedEnv = Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'env') -Raw
     Assert-True ($installedEnv.Contains('CLAUDEX_PROXY_TOKEN=installer-test-token')) 'installer token'
     Assert-True ($installedEnv.Contains('CLAUDEX_PROXY_CONFIG=')) 'managed proxy config path'
+    Assert-True ($installedEnv.Contains('CLAUDEX_PROXY_URL=http://127.0.0.1:8318')) 'dedicated proxy port'
+    Assert-True ($installedEnv.Contains('CLAUDEX_CODEX_AUTH_DIR=')) 'managed Codex auth directory'
 
     [Console]::WriteLine('all Claudex Windows tests passed')
 } finally {
