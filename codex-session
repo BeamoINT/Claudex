@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly config_dir="${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}"
+readonly codex_home="${CODEX_HOME:-$HOME/.codex}"
+readonly codex_auth_file="${CLAUDEX_CODEX_SOURCE_AUTH_FILE:-$codex_home/auth.json}"
+readonly bridge_auth_dir="${CLAUDEX_CODEX_AUTH_DIR:-$config_dir/codex-accounts}"
+readonly bridge_auth_file="$bridge_auth_dir/codex-claudex-managed.json"
+
+fail() {
+  printf 'claudex: %s\n' "$*" >&2
+}
+
+clear_bridge_session() {
+  rm -f "$bridge_auth_file"
+}
+
+codex_is_logged_in() {
+  command -v codex >/dev/null 2>&1 && codex login status >/dev/null 2>&1
+}
+
+sync_session() {
+  command -v codex >/dev/null 2>&1 || {
+    clear_bridge_session
+    fail 'Codex CLI was not found. Install Codex, run `codex login`, and retry.'
+    return 10
+  }
+  if ! codex_is_logged_in; then
+    clear_bridge_session
+    fail 'Codex is logged out. Run `codex login` (or `claudex --login`) and retry.'
+    return 11
+  fi
+  command -v jq >/dev/null 2>&1 || {
+    fail 'jq is required for secure local Codex session synchronization.'
+    return 12
+  }
+  if [[ ! -r "$codex_auth_file" ]]; then
+    clear_bridge_session
+    fail 'Codex is logged in, but its credentials are stored in the OS keyring.'
+    fail 'Run `claudex --login` once so Codex can create a reusable file-backed local session.'
+    return 13
+  fi
+  if ! jq -e '
+    .auth_mode == "chatgpt"
+    and (.tokens.access_token | type == "string" and length > 0)
+    and (.tokens.refresh_token | type == "string" and length > 0)
+    and (.tokens.account_id | type == "string" and length > 0)
+  ' "$codex_auth_file" >/dev/null 2>&1; then
+    clear_bridge_session
+    fail 'Claudex requires Codex ChatGPT sign-in. Run `claudex --login` and choose ChatGPT.'
+    return 14
+  fi
+
+  mkdir -p "$bridge_auth_dir"
+  chmod 700 "$bridge_auth_dir" 2>/dev/null || true
+
+  local should_write=1
+  if [[ -s "$bridge_auth_file" ]] && jq -e --slurpfile source "$codex_auth_file" '
+    .type == "codex"
+    and (.access_token | type == "string" and length > 0)
+    and .account_id == $source[0].tokens.account_id
+    and ((.last_refresh // "") | tostring) >= (($source[0].last_refresh // "") | tostring)
+  ' "$bridge_auth_file" >/dev/null 2>&1; then
+    should_write=0
+  fi
+
+  if (( should_write )); then
+    local temporary
+    umask 077
+    temporary=$(mktemp "$bridge_auth_dir/.codex-session.tmp.XXXXXX")
+    jq '{
+      type: "codex",
+      access_token: .tokens.access_token,
+      refresh_token: .tokens.refresh_token,
+      id_token: (.tokens.id_token // ""),
+      account_id: .tokens.account_id,
+      last_refresh: (.last_refresh // ""),
+      disabled: false,
+      expired: false
+    }' "$codex_auth_file" > "$temporary"
+    chmod 600 "$temporary"
+    mv -f "$temporary" "$bridge_auth_file"
+  fi
+}
+
+login() {
+  command -v codex >/dev/null 2>&1 || {
+    fail 'Codex CLI was not found. Install Codex and retry.'
+    return 10
+  }
+  printf '%s\n' 'Claudex is opening the official Codex sign-in flow...'
+  codex -c 'cli_auth_credentials_store="file"' login
+  sync_session
+  printf '%s\n' 'Codex authentication is ready for Claudex.'
+}
+
+logout() {
+  command -v codex >/dev/null 2>&1 || {
+    clear_bridge_session
+    fail 'Codex CLI was not found; the local Claudex bridge session was cleared.'
+    return 10
+  }
+  codex logout
+  clear_bridge_session
+  printf '%s\n' 'Codex and Claudex are logged out.'
+}
+
+status() {
+  if sync_session; then
+    printf '%s\n' 'Codex authentication: ready (shared ChatGPT session)'
+    printf '%s\n' "Credential source: $codex_auth_file"
+    printf '%s\n' 'Credential handling: local synchronization only; secrets are never printed or committed'
+  else
+    return $?
+  fi
+}
+
+case "${1:-sync}" in
+  sync) sync_session ;;
+  login) login ;;
+  logout) logout ;;
+  status) status ;;
+  *) fail 'usage: codex-session [sync|login|logout|status]'; exit 2 ;;
+esac

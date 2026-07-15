@@ -146,6 +146,17 @@ $modelName = switch -Wildcard ($modelId) {
         }
     }
 }
+$selectedModelMode = $env:CLAUDEX_MODEL_MODE
+if (-not $selectedModelMode) {
+    $settingsPath = Join-Path $configDir 'settings.json'
+    if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+        try {
+            $savedModel = [string] ((Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json).model)
+            if ($savedModel -eq 'opusplan') { $selectedModelMode = 'solplan' }
+        } catch { }
+    }
+}
+if ($selectedModelMode -eq 'solplan') { $modelName = 'GPT-5.6 Solplan' }
 
 $escape = [char] 27
 $separator = [char] 0x00B7
