@@ -33,6 +33,7 @@ try {
         [IO.File]::WriteAllText($fakeCurl, @'
 @echo off
 if not "%CLAUDEX_TEST_CURL_ARGUMENT_FILE%"=="" echo %*>>"%CLAUDEX_TEST_CURL_ARGUMENT_FILE%"
+echo CLAUDEX_TEST_CURL_ARGS=%* 1>&2
 echo %* | findstr /c:"test-token" /c:"secret-access-token" >nul
 if not errorlevel 1 exit /b 90
 echo %* | findstr /c:"/wham/usage" >nul
