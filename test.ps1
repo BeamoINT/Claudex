@@ -52,10 +52,10 @@ echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]
                 $sessionConfig = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
                 $projectDirectory = Join-Path (Join-Path $sessionConfig 'projects') $projectKey
                 [IO.Directory]::CreateDirectory($projectDirectory) | Out-Null
-                [IO.File]::WriteAllText((Join-Path $projectDirectory '123e4567-e89b-12d3-a456-426614174000.jsonl'), "{}`n", $utf8)
                 if ($env:FAKE_FOREIGN_RESUME -eq '1') {
                     [IO.File]::WriteAllText((Join-Path $projectDirectory '223e4567-e89b-12d3-a456-426614174001.jsonl'), "{}`n", $utf8)
-                }
+                    [IO.File]::WriteAllText((Join-Path $projectDirectory '323e4567-e89b-12d3-a456-426614174002.jsonl'), "{}`n", $utf8)
+                } else { [IO.File]::WriteAllText((Join-Path $projectDirectory '123e4567-e89b-12d3-a456-426614174000.jsonl'), "{}`n", $utf8) }
                 Write-Output 'Resume this session with:'
                 Write-Output 'claude --resume 123e4567-e89b-12d3-a456-426614174000'
                 $global:LASTEXITCODE = 0
