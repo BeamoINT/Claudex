@@ -1,0 +1,25 @@
+name: Release assets
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Build distribution archives
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: ./scripts/build-release.sh "${RELEASE_TAG#v}"
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/*.zip dist/*.tar.gz dist/SHA256SUMS --clobber

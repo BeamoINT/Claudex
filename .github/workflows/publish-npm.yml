@@ -1,0 +1,33 @@
+name: Publish npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, for example v1.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Verify tag and package
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test "v$(node -p "require('./package.json').version")" = "$RELEASE_TAG"
+          npm test
+      - name: Publish with npm trusted publishing
+        run: npm publish --access public

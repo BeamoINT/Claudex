@@ -13,6 +13,25 @@ Claudex is an open-source compatibility layer for using Codex GPT models through
 
 Sign in to Codex first with the desktop app or `codex login`, then install Claudex.
 
+### Package managers
+
+```bash
+brew install BeamoINT/tap/claudex       # macOS or Linux
+npm install --global claudex-codex      # macOS, Linux, or Windows
+```
+
+Windows users can also install from the BeamoINT Scoop bucket:
+
+```powershell
+scoop bucket add beamoint https://github.com/BeamoINT/scoop-bucket
+scoop install beamoint/claudex
+```
+
+Then run `claudex --login`. Package installs bootstrap their private managed
+configuration automatically on first use. See the
+[package-manager guide](docs/package-managers.md) for upgrades, one-shot `npx`
+usage, and WinGet submission status.
+
 ### macOS, Linux, or WSL
 
 ```bash
@@ -89,6 +108,7 @@ Claude Code's own platform limitations still apply. In particular, native Window
 | --- | --- |
 | [Documentation index](docs/README.md) | Find the right guide quickly |
 | [Installation](docs/installation.md) | Requirements, setup, updates, and removal |
+| [Package managers](docs/package-managers.md) | Homebrew, npm, Scoop, and WinGet installation |
 | [Usage](docs/usage.md) | Commands, model modes, Chrome, and pass-through behavior |
 | [Configuration](docs/configuration.md) | Supported environment variables and settings |
 | [Architecture](docs/architecture.md) | Components, data flow, authentication, and trust boundaries |

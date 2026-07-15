@@ -5,6 +5,16 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-15
+
+### Added
+
+- First-run package-manager bootstrap with automatic managed-file upgrades.
+- Public npm packaging under `claudex-codex` with the `claudex` executable.
+- Homebrew, Scoop, and WinGet distribution metadata and documentation.
+- Versioned `.tar.gz` and Windows `.zip` release artifacts with SHA-256 sums.
+- Release-asset automation and package-content validation in CI.
+
 ## [1.0.0] - 2026-07-15
 
 ### Added
@@ -22,5 +32,6 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first-party profile support.
 - Cross-platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/BeamoINT/Claudex/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BeamoINT/Claudex/releases/tag/v1.0.0

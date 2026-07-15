@@ -113,6 +113,8 @@ bash -n "$root/usage-limit"
 bash -n "$root/install.sh"
 sh -n "$root/install.zsh"
 node --check "$root/preload.cjs"
+node --check "$root/bin/claudex-package.mjs"
+node "$root/scripts/check-package.mjs"
 input_alias_output=$(CLAUDEX_TEST_TTY_INPUT=1 node -e '
   const preload = require(process.argv[1]);
   process.stdout.write(preload.rewriteSolplanInput("/model solplan\r"));
@@ -481,6 +483,7 @@ plain_ansi_solplan=$(printf '%s' "$filtered_ansi_solplan" | sed $'s/\033\\[[0-9;
 [[ "$plain_ansi_solplan" == *'GPT-5.6 Solplan'* ]]
 [[ "$plain_ansi_solplan" != *'Opus in plan mode, else Sonnet'* ]]
 [[ "$plain_ansi_solplan" != *'API Usage Billing'* ]]
+[[ "$(node "$root/bin/claudex-package.mjs" --package-version)" == "$(node -p "require('$root/package.json').version")" ]]
 
 install_home="$tmp/install home"
 mkdir -p "$install_home/.codex"
@@ -511,6 +514,17 @@ installed_env=$(<"$install_home/.config/claudex/env")
 [[ -r "$install_home/.config/claudex/cliproxyapi.yaml" ]]
 [[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'host: "127.0.0.1"'* ]]
 [[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'port: 8318'* ]]
+
+package_home="$tmp/package home"
+mkdir -p "$package_home/.codex"
+cp "$tmp/home/.codex/auth.json" "$package_home/.codex/auth.json"
+HOME="$package_home" PATH="$tmp/bin:$PATH" \
+  CLAUDEX_PROXY_TOKEN='package-test-token' CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 \
+  CLAUDEX_SKIP_SERVICE_START=1 node "$root/bin/claudex-package.mjs" --package-setup >/dev/null
+jq -e --arg version "$(node -p "require('$root/package.json').version")" \
+  '.package == "claudex-codex" and .version == $version' \
+  "$package_home/.config/claudex/package-manager.json" >/dev/null
+[[ -x "$package_home/.local/bin/claudex" ]]
 
 auth_status=$(run_wrapper --auth-status)
 [[ "$auth_status" == *'Codex authentication: ready (shared ChatGPT session)'* ]]
