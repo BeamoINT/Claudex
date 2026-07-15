@@ -149,7 +149,7 @@ filtered_frame=$(printf '%s' "$billing_frame" | \
 [[ "$filtered_frame" != *'API Usage Billing'* ]]
 [[ "$filtered_frame" != *$'·\033[43GAPI'* ]]
 
-install_home="$tmp/install-home"
+install_home="$tmp/install home"
 mkdir -p "$install_home"
 install_output=$(HOME="$install_home" PATH="$tmp/bin:$PATH" \
   CLAUDEX_PROXY_TOKEN='installer-test-token' \
@@ -162,7 +162,8 @@ install_output=$(HOME="$install_home" PATH="$tmp/bin:$PATH" \
 [[ -r "$install_home/.config/claudex/settings.json" ]]
 [[ -r "$install_home/.config/claudex/env" ]]
 [[ "$install_output" != *'installer-test-token'* ]]
-jq -e --arg expected "/usr/bin/env bash $install_home/.config/claudex/statusline" \
+printf -v expected_statusline '%q' "$install_home/.config/claudex/statusline"
+jq -e --arg expected "/usr/bin/env bash $expected_statusline" \
   '.statusLine.command == $expected and .tui == "fullscreen"' \
   "$install_home/.config/claudex/settings.json" >/dev/null
 installed_env=$(<"$install_home/.config/claudex/env")

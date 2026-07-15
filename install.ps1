@@ -13,6 +13,7 @@ $settingsTarget = Join-Path $configDir 'settings.json'
 $statuslineTarget = Join-Path $configDir 'statusline.ps1'
 $preloadTarget = Join-Path $configDir 'preload.cjs'
 $proxyConfigTarget = Join-Path $configDir 'cliproxyapi.yaml'
+$selectedProxyConfig = if ($env:CLAUDEX_PROXY_CONFIG -and (Test-Path -LiteralPath $env:CLAUDEX_PROXY_CONFIG -PathType Leaf)) { $env:CLAUDEX_PROXY_CONFIG } else { $proxyConfigTarget }
 $launcherTarget = Join-Path $binDir 'claudex.ps1'
 $cmdTarget = Join-Path $binDir 'claudex.cmd'
 $proxyVersion = '7.2.77'
@@ -72,6 +73,7 @@ $processEntries = @($env:PATH -split [regex]::Escape([string] $pathSeparator))
 if ($binDir -notin $processEntries) { $env:PATH = "$binDir$pathSeparator$env:PATH" }
 
 if (-not $skipDependencies) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     if (-not (Find-ProxyExecutable)) { Install-Proxy }
     if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
         [Console]::WriteLine("Installing Claude Code with Anthropic's native installer...")
@@ -103,7 +105,7 @@ function Get-FirstProxyKey([string] $Path) {
 
 if (-not (Test-Path -LiteralPath $envFile -PathType Leaf) -or (Get-Item -LiteralPath $envFile).Length -eq 0) {
     $proxyToken = $env:CLAUDEX_PROXY_TOKEN
-    if (-not $proxyToken) { $proxyToken = Get-FirstProxyKey $proxyConfigTarget }
+    if (-not $proxyToken) { $proxyToken = Get-FirstProxyKey $selectedProxyConfig }
     if (-not $proxyToken) {
         $secure = Read-Host 'CLIProxyAPI API key (leave empty to generate one)' -AsSecureString
         $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
@@ -118,7 +120,7 @@ if (-not (Test-Path -LiteralPath $envFile -PathType Leaf) -or (Get-Item -Literal
     }
     if ($proxyToken.Contains("`r") -or $proxyToken.Contains("`n")) { Fail 'proxy API key contains a newline' }
 
-    if (-not (Test-Path -LiteralPath $proxyConfigTarget -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $selectedProxyConfig -PathType Leaf)) {
         $jsonToken = $proxyToken | ConvertTo-Json -Compress
         $authDirectory = (Join-Path $env:USERPROFILE '.cli-proxy-api').Replace('\', '/')
         $proxyConfig = @"
@@ -135,8 +137,9 @@ request-retry: 1
 max-retry-credentials: 1
 "@
         [IO.File]::WriteAllText($proxyConfigTarget, $proxyConfig, $utf8)
+        $selectedProxyConfig = $proxyConfigTarget
     }
-    $environmentContent = "CLAUDEX_PROXY_TOKEN=$proxyToken`nCLAUDEX_PROXY_CONFIG=$proxyConfigTarget`n"
+    $environmentContent = "CLAUDEX_PROXY_TOKEN=$proxyToken`nCLAUDEX_PROXY_CONFIG=$selectedProxyConfig`n"
     [IO.File]::WriteAllText($envFile, $environmentContent, $utf8)
 } else {
     [Console]::WriteLine("Preserving existing private config: $envFile")
@@ -144,8 +147,8 @@ max-retry-credentials: 1
 
 if ($Login) {
     [Console]::WriteLine('Starting CLIProxyAPI Codex login...')
-    if (Test-Path -LiteralPath $proxyConfigTarget -PathType Leaf) {
-        & $proxyBinary -config $proxyConfigTarget -codex-login
+    if (Test-Path -LiteralPath $selectedProxyConfig -PathType Leaf) {
+        & $proxyBinary -config $selectedProxyConfig -codex-login
     } else {
         & $proxyBinary -codex-login
     }

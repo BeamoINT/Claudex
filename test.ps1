@@ -131,7 +131,7 @@ exit 1
     Assert-True (($filteredFrame | Out-String).Contains('GPT-5.6 Sol with high effort')) 'banner retained'
     Assert-True (-not ($filteredFrame | Out-String).Contains('API Usage Billing')) 'billing label removed'
 
-    $installHome = Join-Path $temporary 'install-home'
+    $installHome = Join-Path $temporary 'install home'
     $env:USERPROFILE = $installHome
     $env:CLAUDEX_CONFIG_DIR = Join-Path $installHome '.config\claudex'
     $env:CLAUDEX_BIN_DIR = Join-Path $installHome '.local\bin'

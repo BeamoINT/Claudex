@@ -162,11 +162,14 @@ ensure_proxy() {
   fi
 
   printf '%s\n' "claudex: starting the local CLIProxyAPI service..." >&2
-  local proxy_config
+  local proxy_config homebrew_proxy_config=""
   proxy_config="${CLAUDEX_PROXY_CONFIG:-$CLAUDE_CONFIG_DIR/cliproxyapi.yaml}"
+  if command -v brew >/dev/null 2>&1; then
+    homebrew_proxy_config="$(brew --prefix)/etc/cliproxyapi.conf"
+  fi
   if command -v brew >/dev/null 2>&1 \
       && brew list --formula cliproxyapi >/dev/null 2>&1 \
-      && [[ ! -r "$proxy_config" ]]; then
+      && { [[ ! -r "$proxy_config" ]] || [[ "$proxy_config" == "$homebrew_proxy_config" ]]; }; then
     brew services start cliproxyapi >/dev/null
   else
     local proxy_bin log_dir

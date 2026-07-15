@@ -155,7 +155,22 @@ proxy_bin=$(proxy_executable) || fail "CLIProxyAPI is required but was not found
 mkdir -p "$bin_dir" "$config_dir"
 chmod 700 "$config_dir"
 
-first_proxy_key() {
+proxy_key_from_file() {
+  local path="$1"
+  awk '
+    /^api-keys:/ { in_keys=1; next }
+    in_keys && /^[[:space:]]*-/ {
+      line=$0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      gsub(/^"|"$/, "", line)
+      print line
+      exit
+    }
+    in_keys && /^[^[:space:]]/ { exit }
+  ' "$path"
+}
+
+first_proxy_config() {
   local candidate key
   for candidate in \
     "${CLAUDEX_PROXY_CONFIG:-}" \
@@ -164,31 +179,27 @@ first_proxy_key() {
     "/usr/local/etc/cliproxyapi.conf" \
     "/etc/cliproxyapi.conf"; do
     [[ -n "$candidate" && -r "$candidate" ]] || continue
-    key=$(awk '
-      /^api-keys:/ { in_keys=1; next }
-      in_keys && /^[[:space:]]*-/ {
-        line=$0
-        sub(/^[[:space:]]*-[[:space:]]*/, "", line)
-        gsub(/^"|"$/, "", line)
-        print line
-        exit
-      }
-      in_keys && /^[^[:space:]]/ { exit }
-    ' "$candidate")
+    key=$(proxy_key_from_file "$candidate")
     if [[ -n "$key" ]]; then
-      printf '%s\n' "$key"
+      printf '%s\n' "$candidate"
       return 0
     fi
   done
   if command -v brew >/dev/null 2>&1; then
     candidate="$(brew --prefix)/etc/cliproxyapi.conf"
     [[ -r "$candidate" ]] || return 1
-    key=$(awk '/^api-keys:/ { found=1; next } found && /^[[:space:]]*-/ { sub(/^[[:space:]]*-[[:space:]]*/, ""); gsub(/^"|"$/, ""); print; exit }' "$candidate")
+    key=$(proxy_key_from_file "$candidate")
     [[ -n "$key" ]] || return 1
-    printf '%s\n' "$key"
+    printf '%s\n' "$candidate"
     return 0
   fi
   return 1
+}
+
+first_proxy_key() {
+  local proxy_config
+  proxy_config=$(first_proxy_config) || return 1
+  proxy_key_from_file "$proxy_config"
 }
 
 if [[ ! -s "$env_file" ]]; then
@@ -225,8 +236,9 @@ if [[ ! -s "$env_file" ]]; then
 
   umask 077
   printf 'CLAUDEX_PROXY_TOKEN=%q\n' "$proxy_token" > "$env_file"
-  if [[ -r "$proxy_config_target" ]]; then
-    printf 'CLAUDEX_PROXY_CONFIG=%q\n' "$proxy_config_target" >> "$env_file"
+  selected_proxy_config=$(first_proxy_config 2>/dev/null || true)
+  if [[ -n "$selected_proxy_config" ]]; then
+    printf 'CLAUDEX_PROXY_CONFIG=%q\n' "$selected_proxy_config" >> "$env_file"
   fi
   chmod 600 "$env_file"
 else

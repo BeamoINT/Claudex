@@ -170,7 +170,7 @@ function Model-Name([string] $Id) {
 function Invoke-Doctor {
     Ensure-Proxy
     $saved = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
-    $savedModel = if ($saved.model) { [string] $saved.model } else { 'gpt-5.6-sol' }
+    $savedModel = if ($null -ne $saved.PSObject.Properties['model'] -and $saved.model) { [string] $saved.model } else { 'gpt-5.6-sol' }
     $models = Fetch-Models
     $proxyBinary = Find-ProxyExecutable
     $proxyVersion = 'unavailable'
