@@ -240,7 +240,10 @@ function Invoke-CurlWithDeadline([string[]] $Arguments, [string] $StandardInput,
         $commandLine = (ConvertTo-CmdArgument $commandPath) + ' ' +
             (@($Arguments | ForEach-Object { ConvertTo-CmdArgument ([string] $_) }) -join ' ')
         $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
-        $startInfo.Arguments = Join-WindowsCommandLine @('/d', '/s', '/v:off', '/c', $commandLine)
+        # cmd /s /c requires one outer quote pair around a command whose
+        # executable path is itself quoted. Passing this through ordinary
+        # CreateProcess argv quoting produces a malformed, never-run shim.
+        $startInfo.Arguments = '/d /s /v:off /c "' + $commandLine + '"'
     } elseif ($command.CommandType -eq 'ExternalScript' -or $extension -eq '.ps1') {
         # ProcessStartInfo cannot CreateProcess a PowerShell script directly.
         # Run a fixed encoded bootstrap; proxy credentials live in the private
