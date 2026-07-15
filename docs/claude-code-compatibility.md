@@ -21,11 +21,13 @@ This audit targets Claude Code 2.1.210, the version used for the July 2026 produ
 | Native Windows install | PowerShell tool mode, CMD shim, native installer, backups, and private config | PowerShell isolated suite and GitHub Windows runner |
 | Codex authentication | Standard Codex file-backed session is synchronized atomically; logout removes the bridge and login recovery stays in Codex | Logged-in, refreshed-session, missing-file, and logged-out regressions |
 | Claude Code updates | Installer checks immediately; launcher checks daily without blocking and negotiates optional flags from current `--help` | Capability and update scheduling regressions |
-| Resume hints | Claude's generated resume footer is rewritten to the Claudex launcher | Byte-stream regression |
+| Resume hints | Claude's generated resume footer is rewritten to the matching Claudex or direct-Chrome launcher | Byte-stream and concurrent-session regressions |
 
 ## Transparent Claude Code features
 
 The following current Claude Code surfaces are forwarded without Claudex rewriting their arguments: `--continue`, `--resume`, `--fork-session`, `--from-pr`, `--worktree`, `--tmux`, `--ide`, `--remote-control`, `--plugin-dir`, `--mcp-config`, `--strict-mcp-config`, `--settings`, `--system-prompt`, `--append-system-prompt`, `--output-format`, `--input-format`, `--json-schema`, `--session-id`, `--debug`, `--verbose`, `--brief`, `--bg`, `--chrome`, and `--no-chrome`.
+
+Claudex-specific switches are parsed only as a leading prefix. Once the first Claude Code argument is reached, the rest of the command line is forwarded literally so prompts and option values that resemble Claudex switches cannot be consumed accidentally.
 
 Maintenance and management subcommands (`agents`, `auth`, `auto-mode`, `doctor`, `gateway`, `install`, `mcp`, `plugin`, `plugins`, `project`, `setup-token`, `ultrareview`, `update`, and `upgrade`) bypass the GPT proxy and Claudex session injection. This preserves the upstream command's authentication, output, and configuration semantics. `--bare` and `--safe-mode` likewise suppress custom agents, leader prompts, and the default permission override. An explicit `--agents` or permission flag wins over the Claudex default.
 

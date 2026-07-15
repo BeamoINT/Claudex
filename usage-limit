@@ -32,6 +32,11 @@ fail() {
   return 1
 }
 
+invalidate_usage_cache() {
+  rm -f "$cache_file" "$summary_file" "$last_attempt_file" "$last_success_file"
+  rmdir "$refresh_lock" 2>/dev/null || true
+}
+
 usage() {
   printf '%s\n' 'Usage: claudex --usage-limit [--cached|--json|--refresh|--accounts|--account SELECTOR]'
 }
@@ -127,7 +132,10 @@ find_auth_file() {
   local candidate newest="" newest_mtime=-1 candidate_mtime
   if [[ -n "${CLAUDEX_CODEX_AUTH_FILE:-}" ]]; then
     [[ -r "$CLAUDEX_CODEX_AUTH_FILE" ]] || return 1
-    jq -e '.type == "codex" and (.access_token | type == "string" and length > 0)' \
+    jq -e '.type == "codex"
+      and (.access_token | type == "string" and length > 0)
+      and ((.disabled // false) != true)
+      and ((.expired // false) != true)' \
       "$CLAUDEX_CODEX_AUTH_FILE" >/dev/null 2>&1 || return 1
     printf '%s\n' "$CLAUDEX_CODEX_AUTH_FILE"
     return 0
@@ -141,7 +149,10 @@ find_auth_file() {
     IFS= read -r selected_name < "$account_selection_file" || selected_name=""
     case "$selected_name" in ''|*/*|*\\*) return 1 ;; esac
     candidate="$auth_dir/$selected_name"
-    if [[ -r "$candidate" ]] && jq -e '.type == "codex" and (.access_token | type == "string" and length > 0)' \
+    if [[ -r "$candidate" ]] && jq -e '.type == "codex"
+      and (.access_token | type == "string" and length > 0)
+      and ((.disabled // false) != true)
+      and ((.expired // false) != true)' \
       "$candidate" >/dev/null 2>&1; then
       printf '%s\n' "$candidate"
       return 0
@@ -149,7 +160,10 @@ find_auth_file() {
     return 1
   fi
   while IFS= read -r -d '' candidate; do
-    jq -e '.type == "codex" and (.access_token | type == "string" and length > 0)' \
+    jq -e '.type == "codex"
+      and (.access_token | type == "string" and length > 0)
+      and ((.disabled // false) != true)
+      and ((.expired // false) != true)' \
       "$candidate" >/dev/null 2>&1 || continue
     candidate_mtime=$(file_mtime "$candidate" 2>/dev/null || printf 0)
     if (( candidate_mtime > newest_mtime )); then
@@ -162,7 +176,7 @@ find_auth_file() {
 }
 
 list_accounts() {
-  local auth_dir active candidate index=0 email disabled marker
+  local auth_dir active candidate index=0 email disabled expired marker suffix
   auth_dir=$(proxy_auth_dir)
   [[ -d "$auth_dir" ]] || { fail 'CLIProxyAPI Codex OAuth directory was not found.'; return 1; }
   active=$(find_auth_file 2>/dev/null || true)
@@ -172,12 +186,12 @@ list_accounts() {
     index=$(( index + 1 ))
     email=$(jq -r '.email // "unknown account"' "$candidate")
     disabled=$(jq -r '.disabled // false' "$candidate")
+    expired=$(jq -r '.expired // false' "$candidate")
     [[ "$candidate" == "$active" ]] && marker='*' || marker=' '
-    if [[ "$disabled" == true ]]; then
-      printf '[%s] %d. %s (disabled)\n' "$marker" "$index" "$email"
-    else
-      printf '[%s] %d. %s\n' "$marker" "$index" "$email"
-    fi
+    suffix=""
+    [[ "$disabled" != true ]] || suffix=" (disabled)"
+    [[ "$expired" != true ]] || suffix=" (expired)"
+    printf '[%s] %d. %s%s\n' "$marker" "$index" "$email" "$suffix"
   done < <(find "$auth_dir" -maxdepth 1 -type f -name 'codex*.json' -print0 2>/dev/null)
   (( index > 0 )) || { fail 'no CLIProxyAPI Codex OAuth credentials were found.'; return 1; }
   printf '%s\n' 'Select one with: claudex --account <number|email|filename>; use auto to follow the newest credential.'
@@ -187,6 +201,7 @@ select_account() {
   local selector="$1" auth_dir candidate index=0 email selected=""
   if [[ "$selector" == auto ]]; then
     rm -f "$account_selection_file"
+    invalidate_usage_cache
     printf '%s\n' 'Codex usage account selection: automatic (newest refreshed credential).'
     return 0
   fi
@@ -197,6 +212,10 @@ select_account() {
     index=$(( index + 1 ))
     email=$(jq -r '.email // empty' "$candidate")
     if [[ "$selector" == "$index" || "$selector" == "$email" || "$selector" == "$(basename "$candidate")" ]]; then
+      jq -e '((.disabled // false) != true) and ((.expired // false) != true)' "$candidate" >/dev/null 2>&1 || {
+        fail "Codex account '$selector' is disabled or expired."
+        return 1
+      }
       selected="$candidate"
       break
     fi
@@ -205,6 +224,7 @@ select_account() {
   umask 077
   printf '%s\n' "$(basename "$selected")" > "$account_selection_file"
   chmod 600 "$account_selection_file" 2>/dev/null || true
+  invalidate_usage_cache
   printf 'Selected Codex usage account: %s\n' "$(jq -r '.email // "unknown account"' "$selected")"
 }
 

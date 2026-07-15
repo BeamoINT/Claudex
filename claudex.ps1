@@ -24,10 +24,6 @@ function Fail([string] $Message, [int] $Code = 1) {
 if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) {
     Fail "missing $configFile; reinstall or restore the Claudex configuration."
 }
-if (-not (Test-Path -LiteralPath $settingsFile -PathType Leaf)) {
-    Fail "missing $settingsFile; reinstall or restore the Claudex settings."
-}
-
 foreach ($line in [IO.File]::ReadAllLines($configFile)) {
     if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
         $name = $Matches[1]
@@ -72,6 +68,17 @@ $claudeAutoUpdate = Env-OrDefault 'CLAUDEX_CLAUDE_AUTO_UPDATE' 'on'
 $claudeUpdateInterval = Env-OrDefault 'CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS' '86400'
 $planModePolicy = Env-OrDefault 'CLAUDEX_PLAN_MODE_POLICY' 'conservative'
 $codexSessionHelper = Env-OrDefault 'CLAUDEX_CODEX_SESSION_HELPER' (Join-Path $configDir 'codex-session.ps1')
+
+if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('--login', '--logout', '--auth-status')) {
+    if (-not (Test-Path -LiteralPath $codexSessionHelper -PathType Leaf)) { Fail 'authentication helper is missing; reinstall Claudex.' }
+    $action = switch ($ClaudeArguments[0]) { '--login' { 'login' } '--logout' { 'logout' } default { 'status' } }
+    & $codexSessionHelper $action
+    exit $LASTEXITCODE
+}
+
+if (-not (Test-Path -LiteralPath $settingsFile -PathType Leaf)) {
+    Fail "missing $settingsFile; reinstall or restore the Claudex settings."
+}
 
 if ($permissionMode -notin @('manual', 'auto', 'acceptEdits', 'dontAsk', 'plan')) {
     Fail "invalid CLAUDEX_PERMISSION_MODE '$permissionMode'; expected manual, auto, acceptEdits, dontAsk, or plan." 2
@@ -132,13 +139,6 @@ function Update-ModelCache {
 }
 
 Update-ModelCache
-
-$preload = Join-Path $configDir 'preload.cjs'
-if (Test-Path -LiteralPath $preload -PathType Leaf) {
-    $preloadForBun = $preload.Replace('\', '/').Replace(' ', '\ ')
-    $existingBunOptions = [Environment]::GetEnvironmentVariable('BUN_OPTIONS', 'Process')
-    $env:BUN_OPTIONS = ("--preload $preloadForBun $existingBunOptions").Trim()
-}
 
 function Fetch-Models {
     $output = "Authorization: Bearer $proxyToken" | & $curlCommand --silent --show-error --fail --max-time 5 `
@@ -220,6 +220,12 @@ function Start-ClaudeUpdateCheck {
     if ($now - $last -lt $claudeUpdateIntervalNumber) { return }
     [IO.Directory]::CreateDirectory($updateDir) | Out-Null
     $lock = Join-Path $updateDir 'lock'
+    if (Test-Path -LiteralPath $lock -PathType Container) {
+        try {
+            $lockAge = [DateTime]::UtcNow - (Get-Item -LiteralPath $lock).LastWriteTimeUtc
+            if ($lockAge.TotalHours -ge 1) { Remove-Item -LiteralPath $lock -Recurse -Force }
+        } catch { return }
+    }
     try { New-Item -LiteralPath $lock -ItemType Directory -ErrorAction Stop | Out-Null } catch { return }
     $claudePath = $script:claudeInvocation
     $log = Join-Path $updateDir 'claude-update.log'
@@ -237,13 +243,15 @@ function Start-ClaudeUpdateCheck {
 function Model-Name([string] $Id) {
     switch ($Id) {
         { $_ -in @('opusplan', 'solplan') } { return 'GPT-5.6 Solplan' }
+        { $_ -in @('gpt-5.6-sol', 'opus', 'fable') } { return 'GPT-5.6 Sol' }
         { $_ -in @('gpt-5.6-terra', 'sonnet') } { return 'GPT-5.6 Terra' }
         { $_ -in @('gpt-5.6-luna', 'haiku') } { return 'GPT-5.6 Luna' }
-        default { return 'GPT-5.6 Sol' }
+        default { if ($Id) { return $Id } else { return 'Unknown model' } }
     }
 }
 
 function Invoke-Doctor {
+    Load-ClaudeCapabilities
     Ensure-Proxy
     $saved = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
     $savedModel = if ($null -ne $saved.PSObject.Properties['model'] -and $saved.model) { [string] $saved.model } else { 'gpt-5.6-sol' }
@@ -280,7 +288,7 @@ function Invoke-Doctor {
     Write-Output "Plan mode policy: $planModePolicy (implementation-first unless planning is genuinely required)"
     Write-Output 'Rendering: no-flicker mode with native terminal cursor'
     Write-Output 'Terminal UI: fullscreen (launch command hidden while Claudex is open)'
-    Write-Output 'Header model name: GPT-5.6 Sol'
+    Write-Output "Header model name: $(Model-Name $savedModel)"
     Write-Output "Mouse pointer: $mousePointer"
     Write-Output "Isolation: Claudex config at $configDir; normal Claude config is untouched"
     $missing = $false
@@ -290,13 +298,6 @@ function Invoke-Doctor {
         else { [Console]::Error.WriteLine("${id}: not advertised by the authenticated Codex account"); $missing = $true }
     }
     if ($missing) { exit 1 }
-}
-
-if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('--login', '--logout', '--auth-status')) {
-    if (-not (Test-Path -LiteralPath $codexSessionHelper -PathType Leaf)) { Fail 'authentication helper is missing; reinstall Claudex.' }
-    $action = switch ($ClaudeArguments[0]) { '--login' { 'login' } '--logout' { 'logout' } default { 'status' } }
-    & $codexSessionHelper $action
-    exit $LASTEXITCODE
 }
 
 if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '--doctor') {
@@ -359,7 +360,13 @@ while ($index -lt $ClaudeArguments.Count) {
             while ($index -lt $ClaudeArguments.Count) { $forwardArguments.Add($ClaudeArguments[$index]); $index++ }
             continue
         }
-        default { $forwardArguments.Add($argument) }
+        default {
+            # Claudex-only options are a leading prefix. Preserve all tokens
+            # after Claude's first argument so option values and prompts that
+            # look like Claudex flags are never consumed.
+            while ($index -lt $ClaudeArguments.Count) { $forwardArguments.Add($ClaudeArguments[$index]); $index++ }
+            continue
+        }
     }
     $index++
 }
@@ -397,8 +404,18 @@ if ($directChrome) {
     $forwardArguments.Insert(0, '--chrome')
 }
 
+# GPT-specific terminal rewriting belongs only to proxied Claudex sessions.
+if ($useProxy) {
+    $preload = Join-Path $configDir 'preload.cjs'
+    if (Test-Path -LiteralPath $preload -PathType Leaf) {
+        $preloadForBun = $preload.Replace('\', '/').Replace(' ', '\ ')
+        $existingBunOptions = [Environment]::GetEnvironmentVariable('BUN_OPTIONS', 'Process')
+        $env:BUN_OPTIONS = ("--preload $preloadForBun $existingBunOptions").Trim()
+    }
+}
+
 Load-ClaudeCapabilities
-Start-ClaudeUpdateCheck
+if ($forwardArguments.Count -eq 0 -or $forwardArguments[0] -notin @('update', 'upgrade')) { Start-ClaudeUpdateCheck }
 
 if ($useProxy) {
     Ensure-Proxy
@@ -509,15 +526,16 @@ function Update-ResumeFooter([string] $Marker) {
     $projectDirectory = Join-Path (Join-Path $sessionConfigDir 'projects') $projectKey
     if (-not (Test-Path -LiteralPath $projectDirectory -PathType Container)) { return }
     $markerTime = (Get-Item -LiteralPath $Marker).LastWriteTimeUtc
-    $latest = Get-ChildItem -LiteralPath $projectDirectory -File -Filter '*.jsonl' |
+    $candidates = @(Get-ChildItem -LiteralPath $projectDirectory -File -Filter '*.jsonl' |
         Where-Object { $_.LastWriteTimeUtc -gt $markerTime } |
-        Sort-Object LastWriteTimeUtc -Descending |
-        Select-Object -First 1
-    if (-not $latest) { return }
+        Sort-Object LastWriteTimeUtc -Descending)
+    if ($candidates.Count -ne 1) { return }
+    $latest = $candidates[0]
     $sessionId = [IO.Path]::GetFileNameWithoutExtension($latest.Name)
     if ($sessionId -notmatch '^[0-9a-fA-F-]{36}$') { return }
     $escape = [char]27
-    $footer = "$escape[2A$escape[JResume this session with:`nclaudex --resume $sessionId`n"
+    $resumeCommand = if ($directChrome) { 'claudex --claude-chrome --resume' } else { 'claudex --resume' }
+    $footer = "$escape[2A$escape[JResume this session with:`n$resumeCommand $sessionId`n"
     if ($env:CLAUDEX_TEST_RESUME_CAPTURE_FILE) {
         [IO.File]::WriteAllText($env:CLAUDEX_TEST_RESUME_CAPTURE_FILE, $footer, $utf8)
     }

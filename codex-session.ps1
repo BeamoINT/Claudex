@@ -68,8 +68,11 @@ function Sync-Session {
             $existing = Get-Content -LiteralPath $bridgeAuthFile -Raw | ConvertFrom-Json
             $existingRefresh = [string] $existing.last_refresh
             $sourceRefresh = [string] $source.last_refresh
+            $existingDisabled = $null -ne $existing.PSObject.Properties['disabled'] -and [bool] $existing.disabled
+            $existingExpired = $null -ne $existing.PSObject.Properties['expired'] -and [bool] $existing.expired
             if ($existing.type -eq 'codex' -and $existing.access_token -and
                 $existing.account_id -eq $tokens.account_id -and
+                -not $existingDisabled -and -not $existingExpired -and
                 [string]::CompareOrdinal($existingRefresh, $sourceRefresh) -ge 0) {
                 $shouldWrite = $false
             }
@@ -108,7 +111,11 @@ switch ($Action) {
         $codex = Get-Command codex -ErrorAction SilentlyContinue
         if ($codex) { & $codex.Source logout; $exitCode = $LASTEXITCODE } else { $exitCode = 10 }
         Clear-BridgeSession
-        if ($exitCode -ne 0) { Write-Failure 'Codex CLI was not found; the local Claudex bridge session was cleared.'; exit $exitCode }
+        if ($exitCode -ne 0) {
+            if ($codex) { Write-Failure 'Codex logout failed, but the local Claudex bridge session was cleared.' }
+            else { Write-Failure 'Codex CLI was not found; the local Claudex bridge session was cleared.' }
+            exit $exitCode
+        }
         Write-Output 'Codex and Claudex are logged out.'
     }
     'status' {

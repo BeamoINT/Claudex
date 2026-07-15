@@ -103,8 +103,19 @@ if (-not $proxyBinary) { Fail 'the internal compatibility service could not be i
 
 if (-not $skipDependencies -and $env:CLAUDEX_SKIP_CLAUDE_UPDATE -ne '1') {
     [Console]::WriteLine('Checking Claude Code for the latest compatible release...')
-    & $claudeCommand.Source update *> (Join-Path $configDir 'claude-update-install.log')
-    if ($LASTEXITCODE -eq 0) {
+    $savedErrorPreference = $ErrorActionPreference
+    $updateExitCode = 1
+    try {
+        # Windows PowerShell 5 promotes redirected native stderr to a
+        # NativeCommandError under Stop. Capture the real exit code and keep
+        # the documented best-effort update behavior.
+        $ErrorActionPreference = 'Continue'
+        & $claudeCommand.Source update *> (Join-Path $configDir 'claude-update-install.log')
+        $updateExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedErrorPreference
+    }
+    if ($updateExitCode -eq 0) {
         $updateDir = Join-Path $configDir 'update'
         [IO.Directory]::CreateDirectory($updateDir) | Out-Null
         [IO.File]::WriteAllText((Join-Path $updateDir 'last-success'), ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString() + "`n"), $utf8)
