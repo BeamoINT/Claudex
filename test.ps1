@@ -60,7 +60,11 @@ echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]
                 }
                 Write-Output 'Resume this session with:'
                 Write-Output 'claude --resume 123e4567-e89b-12d3-a456-426614174000'
-                $global:LASTEXITCODE = if ($env:FAKE_CLAUDE_RESUME_EXIT) { [int]$env:FAKE_CLAUDE_RESUME_EXIT } else { 0 }
+                if ($env:FAKE_CLAUDE_RESUME_EXIT) {
+                    & $env:ComSpec /d /c "exit /b $env:FAKE_CLAUDE_RESUME_EXIT"
+                    return
+                }
+                $global:LASTEXITCODE = 0
                 return
             }
             Write-Output "AUTO=$env:CLAUDE_CODE_AUTO_MODE_MODEL"
