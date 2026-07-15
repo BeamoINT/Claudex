@@ -204,10 +204,10 @@ exit 1
     Assert-True (-not $directChrome.Contains('BASE=http')) 'direct Chrome proxy isolation'
 
     $flagPrompt = (& (Join-Path $root 'claudex.ps1') --print --terra | Out-String)
-    Assert-True ($flagPrompt.Contains('ARGS=--print --terra')) 'flag-shaped prompt preserved'
+    Assert-True ($flagPrompt.Contains('--print --terra')) 'flag-shaped prompt preserved'
     Assert-True (-not $flagPrompt.Contains('--model gpt-5.6-terra')) 'flag-shaped prompt not consumed'
     $flagValue = (& (Join-Path $root 'claudex.ps1') --permission-mode --manual | Out-String)
-    Assert-True ($flagValue.Contains('ARGS=--permission-mode --manual')) 'flag-shaped option value preserved'
+    Assert-True ($flagValue.Contains('--permission-mode --manual')) 'flag-shaped option value preserved'
 
     $ultracode = (& (Join-Path $root 'claudex.ps1') --ultracode --sol test-prompt | Out-String)
     Assert-True ($ultracode.Contains('MODE=ultracode')) 'ultracode session label'

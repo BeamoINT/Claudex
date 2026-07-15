@@ -538,7 +538,9 @@ if (( direct_chrome )); then
     unset CLAUDE_CONFIG_DIR
   fi
   unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
-  forwarded_args=(--chrome "${forwarded_args[@]}")
+  # Bash 3.2 (the system Bash on macOS) treats an empty array expansion as an
+  # unbound variable under `set -u`; use its compatible conditional expansion.
+  forwarded_args=(--chrome ${forwarded_args[@]+"${forwarded_args[@]}"})
 fi
 
 # The preload intentionally rewrites GPT-backed Claudex UI. Never inject it
