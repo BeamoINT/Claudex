@@ -23,12 +23,18 @@ const versionResult = spawnSync(
 assert.equal(versionResult.status, 0, versionResult.stderr);
 assert.equal(versionResult.stdout.trim(), manifest.version);
 
-const packResult = spawnSync(
-  process.platform === 'win32' ? 'npm.cmd' : 'npm',
-  ['pack', '--dry-run', '--json', '--ignore-scripts'],
-  { cwd: root, encoding: 'utf8' },
-);
-assert.equal(packResult.status, 0, packResult.stderr);
+const packResult = process.platform === 'win32'
+  ? spawnSync(
+      process.env.ComSpec || 'cmd.exe',
+      ['/d', '/s', '/c', 'npm pack --dry-run --json --ignore-scripts'],
+      { cwd: root, encoding: 'utf8' },
+    )
+  : spawnSync(
+      'npm',
+      ['pack', '--dry-run', '--json', '--ignore-scripts'],
+      { cwd: root, encoding: 'utf8' },
+    );
+assert.equal(packResult.status, 0, packResult.error?.stack || packResult.stderr);
 const packReport = JSON.parse(packResult.stdout);
 assert.equal(packReport.length, 1);
 const paths = new Set(packReport[0].files.map((file) => file.path));
