@@ -683,12 +683,15 @@ if (( direct_chrome )); then
   forwarded_args=(--chrome ${forwarded_args[@]+"${forwarded_args[@]}"})
 fi
 
-# The preload intentionally rewrites GPT-backed Claudex UI. Never inject it
-# into first-party Claude/Chrome or maintenance commands.
+# The preload provides GPT-specific input aliases and non-interactive cleanup.
+# Never inject it into first-party Claude/Chrome or maintenance commands.
 readonly claudex_preload="$claudex_config_dir/preload.cjs"
 if (( use_proxy )) && [[ -r "$claudex_preload" ]]; then
   readonly escaped_claudex_preload="${claudex_preload// /\\ }"
   export BUN_OPTIONS="--preload $escaped_claudex_preload ${BUN_OPTIONS:-}"
+  if { [[ -t 0 && -t 1 ]] || [[ "${CLAUDEX_TEST_TTY_OUTPUT:-0}" == 1 ]]; }; then export CLAUDEX_INTERACTIVE_TUI=1
+  else unset CLAUDEX_INTERACTIVE_TUI
+  fi
 fi
 
 load_claude_capabilities

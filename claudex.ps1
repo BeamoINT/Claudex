@@ -10,6 +10,7 @@ else { $ClaudeArguments = [string[]] @($ClaudeArguments) }
 $previousSessionMode = [Environment]::GetEnvironmentVariable('CLAUDEX_SESSION_MODE', 'Process')
 $previousEffortLevel = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_EFFORT_LEVEL', 'Process')
 $previousModelMode = [Environment]::GetEnvironmentVariable('CLAUDEX_MODEL_MODE', 'Process')
+$previousInteractiveTui = [Environment]::GetEnvironmentVariable('CLAUDEX_INTERACTIVE_TUI', 'Process')
 $utf8 = New-Object Text.UTF8Encoding($false)
 
 $configDir = if ($env:CLAUDEX_CONFIG_DIR) { $env:CLAUDEX_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.config\claudex' }
@@ -578,7 +579,7 @@ if ($directChrome) {
     $forwardArguments.Insert(0, '--chrome')
 }
 
-# GPT-specific terminal rewriting belongs only to proxied Claudex sessions.
+# GPT-specific input aliases and non-interactive cleanup belong only to proxied sessions.
 if ($useProxy) {
     $preload = Join-Path $configDir 'preload.cjs'
     if (Test-Path -LiteralPath $preload -PathType Leaf) {
@@ -586,6 +587,8 @@ if ($useProxy) {
         $existingBunOptions = [Environment]::GetEnvironmentVariable('BUN_OPTIONS', 'Process')
         $env:BUN_OPTIONS = ("--preload $preloadForBun $existingBunOptions").Trim()
     }
+    if ((-not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) -or $env:CLAUDEX_TEST_TTY_OUTPUT -eq '1') { $env:CLAUDEX_INTERACTIVE_TUI = '1' }
+    else { Remove-Item Env:CLAUDEX_INTERACTIVE_TUI -ErrorAction SilentlyContinue }
 }
 
 Load-ClaudeCapabilities
@@ -761,5 +764,7 @@ try {
     else { $env:CLAUDE_CODE_EFFORT_LEVEL = $previousEffortLevel }
     if ($null -eq $previousModelMode) { Remove-Item Env:CLAUDEX_MODEL_MODE -ErrorAction SilentlyContinue }
     else { $env:CLAUDEX_MODEL_MODE = $previousModelMode }
+    if ($null -eq $previousInteractiveTui) { Remove-Item Env:CLAUDEX_INTERACTIVE_TUI -ErrorAction SilentlyContinue }
+    else { $env:CLAUDEX_INTERACTIVE_TUI = $previousInteractiveTui }
 }
 exit $exitCode

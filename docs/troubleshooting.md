@@ -98,6 +98,11 @@ and that accessibility or reduced-motion settings are not forcing a different
 rendering mode. Run the latest Claude Code and Claudex releases. Include the
 terminal name and version in a sanitized bug report.
 
+Claudex leaves interactive fullscreen cursor and redraw frames byte-for-byte
+native. If the bottom input or status area is clipped after upgrading, close
+the older running session and start a new `claudex` session so the updated
+preload is active.
+
 ## Windows script execution is blocked
 
 Run the documented installer command from Windows PowerShell:

@@ -158,10 +158,9 @@ if (-not $selectedModelMode) {
 }
 if ($selectedModelMode -eq 'solplan') { $modelName = 'GPT-5.6 Solplan' }
 
-$escape = [char] 27
 $separator = [char] 0x00B7
-$title = "${escape}]0;Claudex $separator $modelName $separator $effort effort$([char]7)"
+$escape = [char] 27
 $line = "${escape}[38;5;81mClaudex${escape}[0m $separator ${escape}[1m$modelName${escape}[0m $separator $effort effort"
 if ($null -ne $contextPercent) { $line += " $separator $contextPercent% context" }
 if ($usageSummary) { $line += " $separator $usageSummary" }
-Write-Output ($title + $line)
+Write-Output $line

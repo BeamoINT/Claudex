@@ -94,6 +94,7 @@ printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
 printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
 printf '%s\n' "BUN=${BUN_OPTIONS:-}"
+printf '%s\n' "INTERACTIVE=${CLAUDEX_INTERACTIVE_TUI:-}"
 printf '%s\n' "ARGS=$*"
 EOF
 cat > "$tmp/bin/codex" <<'EOF'
@@ -206,6 +207,7 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" == *'OPUS_NAME=GPT-5.6 Sol'* ]]
 [[ "$default_output" == *'BASE=http://127.0.0.1:8318'* ]]
 [[ "$default_output" == *"BUN=--preload $tmp/home/.config/claudex/preload.cjs"* ]]
+[[ "$default_output" == *$'INTERACTIVE=\n'* ]]
 [[ "$default_output" == *'--permission-mode auto'* ]]
 [[ "$default_output" == *'--model gpt-5.6-terra'* ]]
 [[ "$default_output" == *'Do not create a team, spawn or delegate to additional agents'* ]]
@@ -224,6 +226,8 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" != *'"claudex-fast"'* ]]
 [[ "$default_output" == *'Sol capacity is reserved for the leader'* ]]
 [[ "$default_output" != *'"model":"gpt-5.6-sol"'* ]]
+interactive_wrapper_output=$(CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper --terra interactive-render-test)
+[[ "$interactive_wrapper_output" == *'INTERACTIVE=1'* ]]
 jq -e '
   (.autoMode.allow | index("Default allow rule") != null)
   and ([.autoMode.allow[] | select(. == "User custom allow rule")] | length == 1)
@@ -460,6 +464,7 @@ status_output=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt
 [[ "$status_output" == *'xhigh effort'* ]]
 [[ "$status_output" == *'42% context'* ]]
 [[ "$status_output" == *'Codex 7d 16% left'* ]]
+[[ "$status_output" != *$'\033]0;'* ]]
 
 solplan_settings="$tmp/home/.config/claudex/settings.json"
 solplan_settings_backup="$tmp/settings-before-solplan.json"
@@ -496,6 +501,10 @@ filtered_frame=$(printf '%s' "$billing_frame" | \
 [[ "$filtered_frame" == *'GPT-5.6 Sol with high effort'* ]]
 [[ "$filtered_frame" != *'API Usage Billing'* ]]
 [[ "$filtered_frame" != *$'·\033[43GAPI'* ]]
+interactive_frame=$'\033[2;1H[Tool] Install local app\033[3;1H/model opus\033[4;1H7'
+interactive_frame_output=$(printf '%s' "$interactive_frame" | CLAUDEX_TEST_INTERACTIVE_TUI=1 \
+  node --require "$root/preload.cjs" -e 'process.stdin.pipe(process.stdout)')
+[[ "$interactive_frame_output" == "$interactive_frame" ]]
 split_billing=$(node --require "$root/preload.cjs" -e '
   process.stdout.write("GPT-5.6 Solplan · API Usage Bil");
   process.stdout.write("ling");

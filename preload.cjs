@@ -266,7 +266,18 @@ function installOutputFilter(stream) {
   });
 }
 
-installOutputFilter(process.stdout);
-installOutputFilter(process.stderr);
+// Fullscreen Claude Code owns cursor placement, erase regions, and redraw
+// timing. Changing the byte length of those live frames after layout can leave
+// clipped input, duplicate cursors, or orphaned footer characters. Keep the
+// interactive TUI byte-for-byte native; model metadata and the supported
+// status-line hook already provide Claudex labels there. The filter remains
+// available for non-interactive output and focused diagnostics.
+const interactiveTui = process.env.CLAUDEX_INTERACTIVE_TUI === '1'
+  || process.env.CLAUDEX_TEST_INTERACTIVE_TUI === '1'
+  || Boolean(process.stdout.isTTY && process.stdin.isTTY);
+if (!interactiveTui) {
+  installOutputFilter(process.stdout);
+  installOutputFilter(process.stderr);
+}
 
 module.exports = { filterClaudexOutput, rewriteSolplanInput };

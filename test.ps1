@@ -83,6 +83,7 @@ echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]
             Write-Output "MODE=$env:CLAUDEX_SESSION_MODE"
             Write-Output "BASE=$env:ANTHROPIC_BASE_URL"
             Write-Output "BUN=$env:BUN_OPTIONS"
+            Write-Output "INTERACTIVE=$env:CLAUDEX_INTERACTIVE_TUI"
             Write-Output "CONFIG=$env:CLAUDE_CONFIG_DIR"
             Write-Output "ARGS=$($args -join ' ')"
         }
@@ -170,6 +171,7 @@ printf '%s\n' "POWERSHELL_TOOL=${CLAUDE_CODE_USE_POWERSHELL_TOOL}"
 printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
 printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
 printf '%s\n' "BUN=${BUN_OPTIONS:-}"
+printf '%s\n' "INTERACTIVE=${CLAUDEX_INTERACTIVE_TUI:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
 printf 'ARGS='; printf ' %s' "$@"; printf '\n'
 '@, $utf8)
@@ -226,6 +228,7 @@ exit 1
     Assert-True ($output.Contains('OPUS=gpt-5.6-sol')) 'single Sol alias'
     Assert-True ($output.Contains('OPUS_NAME=GPT-5.6 Sol')) 'friendly name'
     Assert-True ($output.Contains('BUN=--preload')) 'proxied session preload'
+    Assert-True ($output.Contains('INTERACTIVE=') -and -not $output.Contains('INTERACTIVE=1')) 'non-interactive output filter remains available'
     Assert-True ($output.Contains('POWERSHELL_TOOL=1')) 'native PowerShell tool'
     Assert-True ($output.Contains('--permission-mode auto')) 'auto permissions'
     Assert-True ($output.Contains('--model gpt-5.6-terra')) 'startup model'
@@ -243,6 +246,10 @@ exit 1
     Assert-True (-not $output.Contains('"claudex-builder"')) 'legacy builder alias removed'
     Assert-True (-not $output.Contains('"claudex-fast"')) 'legacy fast alias removed'
     Assert-True (-not $output.Contains('"model":"gpt-5.6-sol"')) 'leader model is not delegated'
+    $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
+    try { $interactiveWrapperOutput = (& (Join-Path $root 'claudex.ps1') --terra interactive-render-test | Out-String) }
+    finally { Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT -ErrorAction SilentlyContinue }
+    Assert-True ($interactiveWrapperOutput.Contains('INTERACTIVE=1')) 'interactive wrapper disables TUI output rewriting'
     $composedSettings = Get-Content -LiteralPath (Join-Path $testConfig 'settings.json') -Raw | ConvertFrom-Json
     Assert-True (@($composedSettings.autoMode.allow | Where-Object { $_ -eq 'Default allow rule' }).Count -eq 1) 'upstream auto-mode allow rule preserved'
     Assert-True (@($composedSettings.autoMode.allow | Where-Object { $_ -eq 'User custom allow rule' }).Count -eq 1) 'user auto-mode allow rule preserved'
@@ -492,6 +499,7 @@ exit 1
     Assert-True ($status.Contains('xhigh effort')) 'status effort'
     Assert-True ($status.Contains('42% context')) 'status context'
     Assert-True ($status.Contains('Codex 7d 18% left')) 'status usage limits'
+    Assert-True (-not $status.Contains("$([char]27)]0;")) 'status line excludes terminal-title control sequence'
 
     $env:CLAUDEX_MODEL_MODE = 'solplan'
     $solplanStatus = ($statusJson | & (Join-Path $root 'statusline.ps1') | Out-String)
@@ -515,6 +523,11 @@ exit 1
     $filteredFrame = $billingFrame | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
     Assert-True (($filteredFrame | Out-String).Contains('GPT-5.6 Sol with high effort')) 'banner retained'
     Assert-True (-not ($filteredFrame | Out-String).Contains('API Usage Billing')) 'billing label removed'
+    $interactiveFrame = "$([char]27)[2;1H[Tool] Install local app$([char]27)[3;1H/model opus$([char]27)[4;1H7"
+    $env:CLAUDEX_TEST_INTERACTIVE_TUI = '1'
+    try { $interactiveFrameOutput = $interactiveFrame | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)' }
+    finally { Remove-Item Env:CLAUDEX_TEST_INTERACTIVE_TUI -ErrorAction SilentlyContinue }
+    Assert-True (($interactiveFrameOutput | Out-String).TrimEnd() -eq $interactiveFrame) 'interactive fullscreen output remains byte-for-byte native'
     $modelFooter = '2% until auto-compact - /model opus[1m'
     $filteredModelFooter = $modelFooter | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
     Assert-True (($filteredModelFooter | Out-String).Contains('/model GPT-5.6 Sol')) 'footer model uses friendly name'

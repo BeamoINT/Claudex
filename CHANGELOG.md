@@ -20,6 +20,9 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ### Fixed
 
+- Prevented intermittent bottom-of-screen corruption by leaving fullscreen TUI
+  cursor/redraw frames byte-for-byte native and removing an unsupported terminal
+  title control sequence from status-line output.
 - Kept the localhost Codex bridge healthy for the lifetime of a session and
   serialized recovery across concurrent Claudex tabs, preventing intermittent
   `ConnectionRefused` failures after a proxy exit.
