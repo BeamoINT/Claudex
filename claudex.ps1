@@ -277,8 +277,13 @@ function Invoke-CurlWithDeadline([string[]] $Arguments, [string] $StandardInput,
             throw 'proxy request exceeded its wall-clock deadline.'
         }
         $output = $stdout.GetAwaiter().GetResult()
-        [void] $stderr.GetAwaiter().GetResult()
-        if ($process.ExitCode -ne 0) { throw "proxy request failed with exit code $($process.ExitCode)." }
+        $errorOutput = $stderr.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) {
+            $safeError = ([string] $errorOutput).Replace($proxyToken, '[redacted]').Replace("`r", ' ').Replace("`n", ' ').Trim()
+            $transport = "$($command.CommandType):$commandPath"
+            if ($safeError) { throw "proxy request via $transport failed with exit code $($process.ExitCode): $safeError" }
+            throw "proxy request via $transport failed with exit code $($process.ExitCode)."
+        }
         return $output
     } finally {
         $process.Dispose()
