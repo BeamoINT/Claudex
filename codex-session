@@ -100,10 +100,10 @@ sync_session() {
       expired: false
     }' "$codex_auth_file" > "$temporary"
     chmod 600 "$temporary"
-    mv -f "$temporary" "$bridge_auth_file"
     if [[ -n "$previous_account" && "$previous_account" != "$source_account" ]]; then
       clear_account_scoped_state
     fi
+    mv -f "$temporary" "$bridge_auth_file"
   fi
 }
 

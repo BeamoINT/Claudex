@@ -104,10 +104,10 @@ function Sync-Session {
         }
         $temporary = Join-Path $bridgeAuthDir ('.codex-session-' + [guid]::NewGuid().ToString('N') + '.tmp')
         [IO.File]::WriteAllText($temporary, (($candidate | ConvertTo-Json -Compress) + "`n"), $utf8)
-        Move-Item -LiteralPath $temporary -Destination $bridgeAuthFile -Force
         if ($previousAccount -and $previousAccount -ne [string] $tokens.account_id) {
             Clear-AccountScopedState
         }
+        Move-Item -LiteralPath $temporary -Destination $bridgeAuthFile -Force
     }
     return 0
 }

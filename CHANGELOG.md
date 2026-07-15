@@ -11,6 +11,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 - Replaced Claude Code's native `claude --resume` shutdown instruction after
   interrupted and nonzero exits, while preserving the original exit status.
+- Cleared account-scoped usage state before activating switched Codex
+  credentials, preventing stale quota data from appearing for the new account.
 
 ## [1.1.0] - 2026-07-15
 
