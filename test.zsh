@@ -583,4 +583,6 @@ HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUD
   "$root/claudex" update >/dev/null
 [[ "$(wc -l < "$update_log" | tr -d ' ')" == 1 ]]
 
+node "$root/scripts/check-docs.mjs"
+
 printf '%s\n' 'all Claudex tests passed'
