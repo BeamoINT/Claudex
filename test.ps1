@@ -32,6 +32,7 @@ try {
         $fakeCurl = Join-Path $fakeBin 'curl.cmd'
         [IO.File]::WriteAllText($fakeCurl, @'
 @echo off
+if not "%CLAUDEX_TEST_CURL_ARGUMENT_FILE%"=="" echo %*>>"%CLAUDEX_TEST_CURL_ARGUMENT_FILE%"
 echo %* | findstr /c:"test-token" /c:"secret-access-token" >nul
 if not errorlevel 1 exit /b 90
 echo %* | findstr /c:"/wham/usage" >nul
@@ -223,14 +224,20 @@ exit 1
     $seedSettings.autoMode.environment = @($seedSettings.autoMode.environment) + @('User custom environment rule')
     [IO.File]::WriteAllText((Join-Path $testConfig 'settings.json'), ($seedSettings | ConvertTo-Json -Depth 100), $utf8)
 
+    $proxyCurlArgumentLog = Join-Path $temporary 'proxy-curl-arguments.log'
+    $env:CLAUDEX_TEST_CURL_ARGUMENT_FILE = $proxyCurlArgumentLog
     $output = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
     if (-not $output.Contains('AUTO=gpt-5.6-terra')) {
         $proxyRecoveryLog = Join-Path $testConfig 'logs\proxy-recovery.log'
         $proxyRecoveryDetail = if (Test-Path -LiteralPath $proxyRecoveryLog -PathType Leaf) {
             Get-Content -LiteralPath $proxyRecoveryLog -Raw
         } else { 'proxy recovery log was not created' }
-        throw "assertion failed: auto classifier; proxy diagnostics: $proxyRecoveryDetail"
+        $proxyCurlArguments = if (Test-Path -LiteralPath $proxyCurlArgumentLog -PathType Leaf) {
+            (Get-Content -LiteralPath $proxyCurlArgumentLog -Raw).Replace('test-token', '[redacted]').Replace('secret-access-token', '[redacted]')
+        } else { 'curl argument log was not created' }
+        throw "assertion failed: auto classifier; proxy diagnostics: $proxyRecoveryDetail; redacted curl argv: $proxyCurlArguments"
     }
+    Remove-Item Env:CLAUDEX_TEST_CURL_ARGUMENT_FILE -ErrorAction SilentlyContinue
     Assert-True ($output.Contains('BG=gpt-5.6-luna')) 'background classifier'
     Assert-True ($output.Contains('SUBAGENT=gpt-5.6-terra')) 'subagent model'
     Assert-True ($output.Contains('CONCURRENCY=3')) 'tool concurrency'
