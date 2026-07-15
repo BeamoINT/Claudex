@@ -1,0 +1,401 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly config_dir="${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}"
+readonly cache_dir="$config_dir/usage-cache"
+readonly cache_file="$cache_dir/limits.json"
+readonly summary_file="$cache_dir/summary"
+readonly last_attempt_file="$cache_dir/last-attempt"
+readonly last_success_file="$cache_dir/last-success"
+readonly refresh_lock="$cache_dir/refresh.lock"
+readonly curl_bin="${CLAUDEX_CURL_BIN:-curl}"
+readonly usage_url="${CLAUDEX_USAGE_URL:-https://chatgpt.com/backend-api/wham/usage}"
+readonly refresh_seconds="${CLAUDEX_USAGE_REFRESH_SECONDS:-300}"
+readonly timeout_seconds="${CLAUDEX_USAGE_TIMEOUT_SECONDS:-8}"
+readonly max_stale_seconds="${CLAUDEX_USAGE_MAX_STALE_SECONDS:-86400}"
+
+mode=detail
+refresh=1
+lock_held=0
+temporary_curl_config=""
+temporary_limits_file=""
+
+fail() {
+  printf 'usage-limit: %s\n' "$*" >&2
+  return 1
+}
+
+usage() {
+  printf '%s\n' 'Usage: claudex --usage-limit [--cached|--json|--refresh]'
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --cached) refresh=0 ;;
+    --refresh) refresh=1 ;;
+    --json) mode=json ;;
+    --statusline) mode=statusline; refresh=0 ;;
+    --refresh-cache) mode=refresh-cache; refresh=1 ;;
+    --lock-held) lock_held=1 ;;
+    --no-color) ;;
+    --help|-h) usage; exit 0 ;;
+    *) fail "unknown argument: $1"; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [[ ! "$refresh_seconds" =~ ^[0-9]+$ ]] || (( refresh_seconds < 60 || refresh_seconds > 3600 )); then
+  fail 'CLAUDEX_USAGE_REFRESH_SECONDS must be an integer from 60 to 3600.'
+  exit 2
+fi
+if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]] || (( timeout_seconds < 1 || timeout_seconds > 30 )); then
+  fail 'CLAUDEX_USAGE_TIMEOUT_SECONDS must be an integer from 1 to 30.'
+  exit 2
+fi
+if [[ ! "$max_stale_seconds" =~ ^[0-9]+$ ]] || (( max_stale_seconds < refresh_seconds || max_stale_seconds > 604800 )); then
+  fail 'CLAUDEX_USAGE_MAX_STALE_SECONDS must be between the refresh interval and 604800.'
+  exit 2
+fi
+
+cleanup() {
+  [[ -z "$temporary_curl_config" ]] || rm -f "$temporary_curl_config"
+  [[ -z "$temporary_limits_file" ]] || rm -f "$temporary_limits_file"
+  if (( lock_held )); then
+    rmdir "$refresh_lock" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+file_mtime() {
+  if stat -f '%m' "$1" >/dev/null 2>&1; then
+    stat -f '%m' "$1"
+  else
+    stat -c '%Y' "$1"
+  fi
+}
+
+proxy_auth_dir() {
+  local proxy_config="${CLAUDEX_PROXY_CONFIG:-$config_dir/cliproxyapi.yaml}"
+  local configured=""
+  if [[ -r "$proxy_config" ]]; then
+    configured=$(awk '
+      /^[[:space:]]*auth-dir:[[:space:]]*/ {
+        sub(/^[[:space:]]*auth-dir:[[:space:]]*/, "")
+        gsub(/^"|"$/, "")
+        gsub(/^'\''|'\''$/, "")
+        print
+        exit
+      }
+    ' "$proxy_config")
+  fi
+  configured="${CLAUDEX_CODEX_AUTH_DIR:-${configured:-$HOME/.cli-proxy-api}}"
+  case "$configured" in
+    '~') configured="$HOME" ;;
+    '~/'*) configured="$HOME/${configured#\~/}" ;;
+  esac
+  printf '%s\n' "$configured"
+}
+
+find_auth_file() {
+  local candidate newest="" newest_mtime=-1 candidate_mtime
+  if [[ -n "${CLAUDEX_CODEX_AUTH_FILE:-}" ]]; then
+    [[ -r "$CLAUDEX_CODEX_AUTH_FILE" ]] || return 1
+    jq -e '.type == "codex" and (.access_token | type == "string" and length > 0)' \
+      "$CLAUDEX_CODEX_AUTH_FILE" >/dev/null 2>&1 || return 1
+    printf '%s\n' "$CLAUDEX_CODEX_AUTH_FILE"
+    return 0
+  fi
+
+  local auth_dir
+  auth_dir=$(proxy_auth_dir)
+  [[ -d "$auth_dir" ]] || return 1
+  while IFS= read -r -d '' candidate; do
+    jq -e '.type == "codex" and (.access_token | type == "string" and length > 0)' \
+      "$candidate" >/dev/null 2>&1 || continue
+    candidate_mtime=$(file_mtime "$candidate" 2>/dev/null || printf 0)
+    if (( candidate_mtime > newest_mtime )); then
+      newest="$candidate"
+      newest_mtime=$candidate_mtime
+    fi
+  done < <(find "$auth_dir" -maxdepth 1 -type f -name 'codex*.json' -print0 2>/dev/null)
+  [[ -n "$newest" ]] || return 1
+  printf '%s\n' "$newest"
+}
+
+window_label_short() {
+  local seconds="$1"
+  if (( seconds > 0 && seconds % 604800 == 0 )); then
+    printf '%sd' "$(( seconds / 86400 ))"
+  elif (( seconds > 0 && seconds % 86400 == 0 )); then
+    printf '%sd' "$(( seconds / 86400 ))"
+  elif (( seconds > 0 && seconds % 3600 == 0 )); then
+    printf '%sh' "$(( seconds / 3600 ))"
+  elif (( seconds > 0 && seconds % 60 == 0 )); then
+    printf '%sm' "$(( seconds / 60 ))"
+  else
+    printf '%ss' "$seconds"
+  fi
+}
+
+window_label_long() {
+  local seconds="$1" amount
+  if (( seconds > 0 && seconds % 86400 == 0 )); then
+    amount=$(( seconds / 86400 )); printf '%s-day' "$amount"
+  elif (( seconds > 0 && seconds % 3600 == 0 )); then
+    amount=$(( seconds / 3600 )); printf '%s-hour' "$amount"
+  elif (( seconds > 0 && seconds % 60 == 0 )); then
+    amount=$(( seconds / 60 )); printf '%s-minute' "$amount"
+  else
+    printf '%s-second' "$seconds"
+  fi
+}
+
+format_epoch() {
+  local epoch="$1"
+  if date -r "$epoch" '+%b %-d, %-I:%M %p' >/dev/null 2>&1; then
+    date -r "$epoch" '+%b %-d, %-I:%M %p'
+  else
+    date -d "@$epoch" '+%b %-d, %-I:%M %p'
+  fi
+}
+
+compact_summary() {
+  local row seconds remaining label output="" separator=""
+  while IFS=$'\t' read -r seconds remaining; do
+    [[ "$seconds" =~ ^[0-9]+$ && "$remaining" =~ ^[0-9]+$ ]] || continue
+    label=$(window_label_short "$seconds")
+    output+="${separator}${label} ${remaining}% left"
+    separator=' · '
+  done < <(jq -r '
+    def remaining: (100 - ((.used_percent // 0) | floor)) | if . < 0 then 0 elif . > 100 then 100 else . end;
+    [.rate_limit.primary_window, .rate_limit.secondary_window][]?
+    | select(type == "object")
+    | [(.limit_window_seconds // 0), remaining] | @tsv
+  ' "$cache_file" 2>/dev/null)
+
+  if [[ -n "$output" ]]; then
+    printf 'Codex %s\n' "$output"
+  elif jq -e '.rate_limit.limit_reached == true or .rate_limit_reached_type != null' \
+    "$cache_file" >/dev/null 2>&1; then
+    printf '%s\n' 'Codex limit reached'
+  fi
+}
+
+write_summary() {
+  local temporary summary
+  summary=$(compact_summary) || {
+    fail 'could not render the usage summary.'
+    return 1
+  }
+  temporary=$(mktemp "$cache_dir/.summary.tmp.XXXXXX") || {
+    fail 'could not create a temporary usage summary.'
+    return 1
+  }
+  printf '%s\n' "$summary" > "$temporary" || {
+    rm -f "$temporary"
+    fail 'could not write the usage summary.'
+    return 1
+  }
+  chmod 600 "$temporary" 2>/dev/null || true
+  mv -f "$temporary" "$summary_file" || {
+    rm -f "$temporary"
+    fail 'could not publish the usage summary.'
+    return 1
+  }
+}
+
+refresh_cache() {
+  local auth_file token account raw now
+  mkdir -p "$cache_dir" 2>/dev/null || {
+    fail "cannot create the private cache directory: $cache_dir"
+    return 1
+  }
+  chmod 700 "$cache_dir" 2>/dev/null || true
+  now=$(date +%s)
+  printf '%s\n' "$now" > "$last_attempt_file" || {
+    fail 'cannot record the usage refresh attempt.'
+    return 1
+  }
+  chmod 600 "$last_attempt_file" 2>/dev/null || true
+
+  auth_file=$(find_auth_file) || {
+    fail 'no CLIProxyAPI Codex OAuth credential was found; run the installer with --login.'
+    return 1
+  }
+  token=$(jq -er '.access_token' "$auth_file") || return 1
+  account=$(jq -er '.account_id // empty' "$auth_file") || account=""
+  case "$token$account" in
+    *$'\n'*|*$'\r'*|*'"'*) fail 'the Codex credential contains unsupported characters.'; return 1 ;;
+  esac
+
+  umask 077
+  temporary_curl_config=$(mktemp "$cache_dir/.curl.tmp.XXXXXX") || {
+    fail 'could not create a private curl configuration.'
+    return 1
+  }
+  temporary_limits_file=$(mktemp "$cache_dir/.limits.tmp.XXXXXX") || {
+    fail 'could not create a temporary usage snapshot.'
+    return 1
+  }
+  {
+    printf 'header = "Authorization: Bearer %s"\n' "$token"
+    if [[ -n "$account" ]]; then
+      printf 'header = "ChatGPT-Account-Id: %s"\n' "$account"
+    fi
+    printf '%s\n' 'header = "Accept: application/json"'
+  } > "$temporary_curl_config" || {
+    fail 'could not write the private curl configuration.'
+    return 1
+  }
+
+  raw=$("$curl_bin" --silent --show-error --fail --connect-timeout 3 \
+    --max-time "$timeout_seconds" --config "$temporary_curl_config" "$usage_url") || {
+      rm -f "$temporary_curl_config" "$temporary_limits_file"
+      temporary_curl_config=""
+      temporary_limits_file=""
+      fail 'OpenAI usage refresh failed.'
+      return 1
+    }
+  rm -f "$temporary_curl_config"
+  temporary_curl_config=""
+
+  printf '%s' "$raw" | jq --argjson fetched_at "$now" '
+    def window:
+      if type == "object" then {
+        used_percent: ((.used_percent // .usedPercent // 0) | tonumber),
+        limit_window_seconds: ((.limit_window_seconds // ((.windowDurationMins // 0) * 60)) | tonumber),
+        reset_after_seconds: ((.reset_after_seconds // 0) | tonumber),
+        reset_at: ((.reset_at // .resetsAt // 0) | tonumber)
+      } else null end;
+    def limit:
+      if type == "object" then {
+        allowed: (.allowed // true),
+        limit_reached: (.limit_reached // false),
+        primary_window: ((.primary_window // .primary) | window),
+        secondary_window: ((.secondary_window // .secondary) | window)
+      } else null end;
+    {
+      version: 1,
+      fetched_at: $fetched_at,
+      plan_type: (.plan_type // null),
+      rate_limit: (.rate_limit | limit),
+      code_review_rate_limit: (.code_review_rate_limit | limit),
+      additional_rate_limits: [(.additional_rate_limits // [])[] | {
+        limit_name: (.limit_name // "Additional limit"),
+        metered_feature: (.metered_feature // null),
+        rate_limit: (.rate_limit | limit)
+      }],
+      credits: (if (.credits | type) == "object" then {
+        has_credits: (.credits.has_credits // false),
+        unlimited: (.credits.unlimited // false),
+        overage_limit_reached: (.credits.overage_limit_reached // false),
+        balance: (.credits.balance // null)
+      } else null end),
+      spend_control_reached: (.spend_control.reached // false),
+      rate_limit_reached_type: (.rate_limit_reached_type // null),
+      reset_credits_available: (.rate_limit_reset_credits.available_count // 0)
+    }
+  ' > "$temporary_limits_file" || {
+    rm -f "$temporary_limits_file"
+    temporary_limits_file=""
+    fail 'OpenAI returned an unrecognized usage response.'
+    return 1
+  }
+  jq -e '.fetched_at > 0 and ((.rate_limit.primary_window // .rate_limit.secondary_window) | type == "object")' \
+    "$temporary_limits_file" >/dev/null || {
+      rm -f "$temporary_limits_file"
+      temporary_limits_file=""
+      fail 'OpenAI returned no Codex rate-limit window.'
+      return 1
+    }
+
+  chmod 600 "$temporary_limits_file" 2>/dev/null || true
+  mv -f "$temporary_limits_file" "$cache_file" || {
+    fail 'could not publish the usage snapshot.'
+    return 1
+  }
+  temporary_limits_file=""
+  printf '%s\n' "$now" > "$last_success_file" || {
+    fail 'cannot record the successful usage refresh.'
+    return 1
+  }
+  chmod 600 "$last_success_file" 2>/dev/null || true
+  write_summary || return 1
+}
+
+render_detail() {
+  local plan fetched name seconds used reset remaining label reset_text
+  plan=$(jq -r '.plan_type // "unknown"' "$cache_file")
+  plan=$(printf '%s' "$plan" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
+  fetched=$(jq -r '.fetched_at // 0' "$cache_file")
+  printf 'Codex usage limits (%s plan)\n' "$plan"
+  while IFS=$'\t' read -r name seconds used reset; do
+    [[ "$seconds" =~ ^[0-9]+$ ]] || continue
+    remaining=$(( 100 - ${used%.*} ))
+    (( remaining < 0 )) && remaining=0
+    (( remaining > 100 )) && remaining=100
+    label=$(window_label_long "$seconds")
+    if [[ "$reset" =~ ^[0-9]+$ ]] && (( reset > 0 )); then
+      reset_text=" · resets $(format_epoch "$reset")"
+    else
+      reset_text=""
+    fi
+    printf '%s %s: %s%% remaining (%s%% used)%s\n' \
+      "$name" "$label" "$remaining" "${used%.*}" "$reset_text"
+  done < <(jq -r '
+    def rows($name; $limit):
+      [$limit.primary_window, $limit.secondary_window][]?
+      | select(type == "object")
+      | [$name, (.limit_window_seconds // 0), (.used_percent // 0), (.reset_at // 0)] | @tsv;
+    rows("Codex"; .rate_limit),
+    rows("Code review"; .code_review_rate_limit),
+    (.additional_rate_limits[]? | rows(.limit_name; .rate_limit))
+  ' "$cache_file")
+
+  local reset_credits
+  reset_credits=$(jq -r '.reset_credits_available // 0' "$cache_file")
+  if [[ "$reset_credits" =~ ^[0-9]+$ ]] && (( reset_credits > 0 )); then
+    printf 'Rate-limit reset credits: %s\n' "$reset_credits"
+  fi
+  if jq -e '.rate_limit.limit_reached == true or .rate_limit_reached_type != null' \
+    "$cache_file" >/dev/null 2>&1; then
+    printf '%s\n' 'Status: usage limit reached'
+  fi
+  if [[ "$fetched" =~ ^[0-9]+$ ]] && (( fetched > 0 )); then
+    printf 'Updated: %s\n' "$(format_epoch "$fetched")"
+  fi
+}
+
+refresh_failed=0
+if (( refresh )); then
+  refresh_cache || refresh_failed=1
+fi
+
+if [[ "$mode" == refresh-cache ]]; then
+  exit "$refresh_failed"
+fi
+
+if [[ ! -r "$cache_file" ]]; then
+  (( refresh_failed )) || fail 'no cached usage snapshot is available.'
+  exit 1
+fi
+
+if (( refresh_failed )); then
+  printf '%s\n' 'usage-limit: live refresh failed; showing the last cached snapshot.' >&2
+fi
+
+case "$mode" in
+  json) cat "$cache_file" ;;
+  statusline)
+    now=$(date +%s)
+    last_success=0
+    if [[ -r "$last_success_file" ]]; then
+      IFS= read -r last_success < "$last_success_file" || last_success=0
+    fi
+    if [[ "$last_success" =~ ^[0-9]+$ ]] && (( now - last_success <= max_stale_seconds )); then
+      IFS= read -r summary < "$summary_file" || summary=""
+      printf '%s\n' "$summary"
+    fi
+    ;;
+  *) render_detail ;;
+esac

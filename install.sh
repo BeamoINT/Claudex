@@ -7,6 +7,8 @@ readonly config_dir="${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}"
 readonly env_file="$config_dir/env"
 readonly settings_target="$config_dir/settings.json"
 readonly statusline_target="$config_dir/statusline"
+readonly usage_limit_target="$config_dir/usage-limit"
+readonly usage_skill_target="$config_dir/skills/usage-limit/SKILL.md"
 readonly preload_target="$config_dir/preload.cjs"
 readonly proxy_config_target="$config_dir/cliproxyapi.yaml"
 readonly launcher_target="$bin_dir/claudex"
@@ -34,7 +36,7 @@ while (( $# > 0 )); do
   shift
 done
 
-for source_file in claudex statusline preload.cjs settings.json; do
+for source_file in claudex statusline usage-limit preload.cjs settings.json skills/usage-limit/SKILL.md; do
   [[ -r "$root/$source_file" ]] || fail "missing repository file: $source_file"
 done
 
@@ -260,7 +262,7 @@ fi
 timestamp=$(date +%Y%m%d-%H%M%S)
 backup_dir="$config_dir/backups/install-$timestamp"
 backed_up=0
-for managed_file in "$launcher_target" "$settings_target" "$statusline_target" "$preload_target"; do
+for managed_file in "$launcher_target" "$settings_target" "$statusline_target" "$usage_limit_target" "$preload_target" "$usage_skill_target"; do
   if [[ -e "$managed_file" ]]; then
     mkdir -p "$backup_dir"
     cp -p "$managed_file" "$backup_dir/$(basename "$managed_file")"
@@ -271,7 +273,10 @@ done
 
 install -m 755 "$root/claudex" "$launcher_target"
 install -m 755 "$root/statusline" "$statusline_target"
+install -m 755 "$root/usage-limit" "$usage_limit_target"
 install -m 644 "$root/preload.cjs" "$preload_target"
+mkdir -p "$(dirname "$usage_skill_target")"
+install -m 644 "$root/skills/usage-limit/SKILL.md" "$usage_skill_target"
 
 printf -v quoted_statusline '%q' "$statusline_target"
 statusline_command="/usr/bin/env bash $quoted_statusline"

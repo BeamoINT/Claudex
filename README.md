@@ -15,8 +15,10 @@ Private, portable setup for running Claude Code through a local CLIProxyAPI-back
 - bounded retries to prevent 429 retry storms
 - 400k context accounting with automatic compaction around 280k tokens
 - session-scoped context stabilization that never flashes a misleading `0%` during startup or compaction refreshes
+- live Codex plan limits in the status line, refreshed asynchronously every five minutes without blocking the UI
+- `/usage-limit` inside Claudex and `claudex --usage-limit` in the shell for detailed percentages, reset times, and reset credits
 - full-screen rendering that hides the shell launch command while Claudex is open
-- friendly model names, a normal mouse pointer, and a compact status line
+- friendly model names, no-flicker rendering, a native terminal cursor, a normal mouse pointer, and a compact status line
 - removal of Claude Code's hardcoded `API Usage Billing` welcome label without modifying the signed Claude binary
 - a separate `~/.config/claudex` state directory that does not modify normal Claude Code settings
 
@@ -87,7 +89,12 @@ claudex --terra         # start on Terra
 claudex --luna          # start on Luna
 claudex --manual        # disable auto permissions for this launch
 claudex --doctor        # verify proxy, models, and configuration
+claudex --usage-limit   # refresh and print Codex plan limits
 ```
+
+Inside an active Claudex session, run `/usage-limit` for the same detailed report. The compact footer uses the account authenticated through CLIProxyAPI and shows remaining capacity, such as `Codex 5h 74% left · 7d 61% left`. Refreshes happen in the background, use short network timeouts, and retain a sanitized cache for temporary network outages. The cache contains plan and quota values only—never account identity or OAuth credentials.
+
+Optional usage controls are `CLAUDEX_USAGE_DISPLAY=on|off`, `CLAUDEX_USAGE_REFRESH_SECONDS` (60–3600, default 300), `CLAUDEX_USAGE_TIMEOUT_SECONDS` (1–30, default 8), and `CLAUDEX_USAGE_MAX_STALE_SECONDS` (default 86400). Set `CLAUDEX_CODEX_AUTH_FILE` only when a multi-account CLIProxyAPI installation needs an explicit account selection; otherwise Claudex follows the most recently refreshed Codex credential.
 
 ## Testing
 
@@ -107,6 +114,6 @@ GitHub Actions runs the isolated suite on `macos-latest`, `ubuntu-latest`, and `
 
 ## Security and backup boundary
 
-This repository intentionally excludes API keys, OAuth credentials, sessions, prompts, history, telemetry, usage data, caches, and machine-generated Claude state. Fresh installs generate a random 256-bit local proxy key and bind the proxy to `127.0.0.1`. Downloaded proxy binaries are pinned to release v7.2.77 and checked against upstream SHA-256 digests before installation.
+This repository intentionally excludes API keys, OAuth credentials, sessions, prompts, history, telemetry, usage data, caches, and machine-generated Claude state. Usage requests go directly to OpenAI over HTTPS with the existing CLIProxyAPI OAuth credential, keep that credential out of process arguments, and write only sanitized quota fields to a mode-restricted local cache. Fresh installs generate a random 256-bit local proxy key and bind the proxy to `127.0.0.1`. Downloaded proxy binaries are pinned to release v7.2.77 and checked against upstream SHA-256 digests before installation.
 
 Never commit a real token, even to this private repository. Only reproducible configuration and installer code belong here.

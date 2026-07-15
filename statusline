@@ -67,6 +67,52 @@ stabilize_context_percent() {
 
 stabilize_context_percent
 
+usage_summary=""
+load_usage_summary() {
+  local display="${CLAUDEX_USAGE_DISPLAY:-on}"
+  local config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.config/claudex}"
+  local helper="${CLAUDEX_USAGE_LIMIT_BIN:-$config_dir/usage-limit}"
+  local cache_dir="$config_dir/usage-cache"
+  local summary_file="$cache_dir/summary"
+  local last_attempt_file="$cache_dir/last-attempt"
+  local last_success_file="$cache_dir/last-success"
+  local refresh_lock="$cache_dir/refresh.lock"
+  local refresh_seconds="${CLAUDEX_USAGE_REFRESH_SECONDS:-300}"
+  local max_stale_seconds="${CLAUDEX_USAGE_MAX_STALE_SECONDS:-86400}"
+  local now last_attempt=0 last_success=0
+
+  [[ "$display" != off && -x "$helper" ]] || return 0
+  if [[ ! "$refresh_seconds" =~ ^[0-9]+$ ]] || (( refresh_seconds < 60 || refresh_seconds > 3600 )); then
+    refresh_seconds=300
+  fi
+  if [[ ! "$max_stale_seconds" =~ ^[0-9]+$ ]] || (( max_stale_seconds < refresh_seconds || max_stale_seconds > 604800 )); then
+    max_stale_seconds=86400
+  fi
+  now=$(date +%s)
+  if [[ -r "$last_attempt_file" ]]; then IFS= read -r last_attempt < "$last_attempt_file" || last_attempt=0; fi
+  if [[ ! "$last_attempt" =~ ^[0-9]+$ ]]; then last_attempt=0; fi
+
+  if (( now - last_attempt >= refresh_seconds )); then
+    mkdir -p "$cache_dir" 2>/dev/null || true
+    chmod 700 "$cache_dir" 2>/dev/null || true
+    if mkdir "$refresh_lock" 2>/dev/null; then
+      printf '%s\n' "$now" > "$last_attempt_file"
+      chmod 600 "$last_attempt_file" 2>/dev/null || true
+      nohup "$helper" --refresh-cache --lock-held >/dev/null 2>&1 </dev/null &
+    elif (( now - last_attempt >= refresh_seconds * 2 )); then
+      rmdir "$refresh_lock" 2>/dev/null || true
+    fi
+  fi
+
+  if [[ -r "$last_success_file" ]]; then IFS= read -r last_success < "$last_success_file" || last_success=0; fi
+  [[ "$last_success" =~ ^[0-9]+$ ]] || last_success=0
+  if (( now - last_success <= max_stale_seconds )) && [[ -r "$summary_file" ]]; then
+    IFS= read -r usage_summary < "$summary_file" || usage_summary=""
+  fi
+}
+
+load_usage_summary
+
 if [[ -z "$effort" ]]; then
   effort="${CLAUDE_CODE_EFFORT_LEVEL:-${CLAUDE_EFFORT:-}}"
 fi
@@ -96,10 +142,7 @@ esac
 # Keep the terminal tab title accurate as /model and /effort change.
 printf '\033]0;%s\007' "Claudex · ${model_name} · ${effort} effort"
 
-if [[ -n "$context_percent" ]]; then
-  printf '\033[38;5;81mClaudex\033[0m · \033[1m%s\033[0m · %s effort · %s%% context\n' \
-    "$model_name" "$effort" "$context_percent"
-else
-  printf '\033[38;5;81mClaudex\033[0m · \033[1m%s\033[0m · %s effort\n' \
-    "$model_name" "$effort"
-fi
+printf '\033[38;5;81mClaudex\033[0m · \033[1m%s\033[0m · %s effort' "$model_name" "$effort"
+if [[ -n "$context_percent" ]]; then printf ' · %s%% context' "$context_percent"; fi
+if [[ -n "$usage_summary" ]]; then printf ' · %s' "$usage_summary"; fi
+printf '\n'

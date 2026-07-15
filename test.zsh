@@ -5,12 +5,27 @@ readonly root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-mkdir -p "$tmp/home/.config/claudex" "$tmp/bin"
-printf '%s\n' 'CLAUDEX_PROXY_TOKEN=test-token' > "$tmp/home/.config/claudex/env"
+mkdir -p "$tmp/home/.config/claudex" "$tmp/home/.cli-proxy-api" "$tmp/bin"
+printf '%s\n' 'CLAUDEX_PROXY_TOKEN=test-token' "CLAUDEX_CODEX_AUTH_DIR=$tmp/home/.cli-proxy-api" > "$tmp/home/.config/claudex/env"
 cp "$root/settings.json" "$tmp/home/.config/claudex/settings.json"
+cp "$root/usage-limit" "$tmp/home/.config/claudex/usage-limit"
+cat > "$tmp/home/.cli-proxy-api/codex-test.json" <<'EOF'
+{"type":"codex","access_token":"secret-access-token","refresh_token":"secret-refresh-token","account_id":"account-test","email":"private@example.com"}
+EOF
 
 cat > "$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
+for argument in "$@"; do
+  if [[ "$argument" == *'test-token'* || "$argument" == *'secret-access-token'* ]]; then
+    printf '%s\n' 'credential leaked into curl arguments' >&2
+    exit 90
+  fi
+  if [[ "$argument" == *'/wham/usage'* ]]; then
+    [[ "${FAKE_USAGE_FAIL:-0}" != 1 ]] || exit 22
+    printf '%s\n' '{"user_id":"private-user","account_id":"private-account","email":"private@example.com","plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":82,"limit_window_seconds":604800,"reset_after_seconds":565127,"reset_at":1784666240},"secondary_window":null},"code_review_rate_limit":null,"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","metered_feature":"codex_bengalfox","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":1784705933},"secondary_window":null}}],"credits":{"has_credits":false,"unlimited":false,"overage_limit_reached":false,"balance":"0"},"spend_control":{"reached":false,"individual_limit":null},"rate_limit_reached_type":null,"rate_limit_reset_credits":{"available_count":1}}'
+    exit
+  fi
+done
 printf '%s\n' '{"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}'
 EOF
 cat > "$tmp/bin/claude" <<'EOF'
@@ -26,6 +41,8 @@ printf '%s\n' "CONCURRENCY=${CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY}"
 printf '%s\n' "RETRIES=${CLAUDE_CODE_MAX_RETRIES}"
 printf '%s\n' "CONTEXT=${CLAUDE_CODE_MAX_CONTEXT_TOKENS}"
 printf '%s\n' "COMPACT=${CLAUDE_CODE_AUTO_COMPACT_WINDOW}"
+printf '%s\n' "NO_FLICKER=${CLAUDE_CODE_NO_FLICKER}"
+printf '%s\n' "ACCESSIBILITY=${CLAUDE_CODE_ACCESSIBILITY}"
 printf '%s\n' "OPUS=${ANTHROPIC_DEFAULT_OPUS_MODEL}"
 printf '%s\n' "OPUS_NAME=${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME}"
 printf '%s\n' "ARGS=$*"
@@ -45,6 +62,7 @@ run_wrapper() {
 
 bash -n "$root/claudex"
 bash -n "$root/statusline"
+bash -n "$root/usage-limit"
 bash -n "$root/install.sh"
 sh -n "$root/install.zsh"
 node --check "$root/preload.cjs"
@@ -78,6 +96,8 @@ jq -e '
 [[ "$default_output" == *'RETRIES=2'* ]]
 [[ "$default_output" == *'CONTEXT=400000'* ]]
 [[ "$default_output" == *'COMPACT=280000'* ]]
+[[ "$default_output" == *'NO_FLICKER=1'* ]]
+[[ "$default_output" == *'ACCESSIBILITY=1'* ]]
 [[ "$default_output" == *'OPUS=gpt-5.6-sol'* ]]
 [[ "$default_output" == *'OPUS_NAME=GPT-5.6 Sol'* ]]
 [[ "$default_output" == *'--permission-mode auto'* ]]
@@ -110,11 +130,38 @@ doctor_output=$(run_wrapper --doctor)
 [[ "$doctor_output" == *'Context window: 400000 tokens'* ]]
 [[ "$doctor_output" == *'Auto-compact window: 280000 tokens (precompute enabled)'* ]]
 [[ "$doctor_output" == *'Context status: session-stabilized (transient zero suppressed)'* ]]
+[[ "$doctor_output" == *'Codex usage: status-line refresh every 300s'* ]]
+[[ "$doctor_output" == *'Rendering: no-flicker mode with native terminal cursor'* ]]
 [[ "$doctor_output" == *'Terminal UI: fullscreen (launch command hidden while Claudex is open)'* ]]
 [[ "$doctor_output" == *'Header model name: GPT-5.6 Sol'* ]]
 [[ "$doctor_output" == *'Mouse pointer: pointer'* ]]
 [[ "$doctor_output" == *'gpt-5.6-terra: advertised'* ]]
 [[ "$doctor_output" != *'extra version detail'* ]]
+
+usage_output=$(run_wrapper --usage-limit)
+[[ "$usage_output" == *'Codex usage limits (Pro plan)'* ]]
+[[ "$usage_output" == *'Codex 7-day: 18% remaining (82% used)'* ]]
+[[ "$usage_output" == *'GPT-5.3-Codex-Spark 7-day: 100% remaining (0% used)'* ]]
+[[ "$usage_output" == *'Rate-limit reset credits: 1'* ]]
+[[ "$usage_output" != *'secret-access-token'* ]]
+[[ "$usage_output" != *'private@example.com'* ]]
+jq -e '
+  .plan_type == "pro"
+  and .rate_limit.primary_window.used_percent == 82
+  and (.user_id | not)
+  and (.account_id | not)
+  and (.email | not)
+  and (.access_token | not)
+' "$tmp/home/.config/claudex/usage-cache/limits.json" >/dev/null
+cache_mode=$(stat -f '%Lp' "$tmp/home/.config/claudex/usage-cache/limits.json" 2>/dev/null || stat -c '%a' "$tmp/home/.config/claudex/usage-cache/limits.json")
+cache_dir_mode=$(stat -f '%Lp' "$tmp/home/.config/claudex/usage-cache" 2>/dev/null || stat -c '%a' "$tmp/home/.config/claudex/usage-cache")
+[[ "$cache_mode" == 600 ]]
+[[ "$cache_dir_mode" == 700 ]]
+
+fallback_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  FAKE_USAGE_FAIL=1 "$root/claudex" --usage-limit 2>&1)
+[[ "$fallback_output" == *'live refresh failed; showing the last cached snapshot'* ]]
+[[ "$fallback_output" == *'Codex 7-day: 18% remaining (82% used)'* ]]
 
 if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
   CLAUDEX_PERMISSION_MODE=broken "$root/claudex" >/dev/null 2>&1; then
@@ -147,6 +194,7 @@ status_output=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt
 [[ "$status_output" == *'GPT-5.6 Sol'* ]]
 [[ "$status_output" == *'xhigh effort'* ]]
 [[ "$status_output" == *'42% context'* ]]
+[[ "$status_output" == *'Codex 7d 18% left'* ]]
 
 transient_status=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":0,"total_input_tokens":0,"context_window_size":400000,"current_usage":null}}' | \
   CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
@@ -180,7 +228,9 @@ install_output=$(HOME="$install_home" PATH="$tmp/bin:$PATH" \
   "$root/install.sh")
 [[ -x "$install_home/.local/bin/claudex" ]]
 [[ -x "$install_home/.config/claudex/statusline" ]]
+[[ -x "$install_home/.config/claudex/usage-limit" ]]
 [[ -r "$install_home/.config/claudex/preload.cjs" ]]
+[[ -r "$install_home/.config/claudex/skills/usage-limit/SKILL.md" ]]
 [[ -r "$install_home/.config/claudex/settings.json" ]]
 [[ -r "$install_home/.config/claudex/env" ]]
 [[ "$install_output" != *'installer-test-token'* ]]

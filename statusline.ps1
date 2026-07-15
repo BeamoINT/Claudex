@@ -76,6 +76,57 @@ if (-not $effort) {
 }
 if (-not $effort) { $effort = 'adaptive' }
 
+$usageSummary = ''
+$usageDisplay = if ($env:CLAUDEX_USAGE_DISPLAY) { $env:CLAUDEX_USAGE_DISPLAY } else { 'on' }
+$usageHelper = if ($env:CLAUDEX_USAGE_LIMIT_BIN) { $env:CLAUDEX_USAGE_LIMIT_BIN } else { Join-Path $configDir 'usage-limit.ps1' }
+if ($usageDisplay -ne 'off' -and (Test-Path -LiteralPath $usageHelper -PathType Leaf)) {
+    try {
+        $refreshSeconds = 300
+        $maxStaleSeconds = 86400
+        if ($env:CLAUDEX_USAGE_REFRESH_SECONDS) {
+            $candidate = 0
+            if ([int]::TryParse($env:CLAUDEX_USAGE_REFRESH_SECONDS, [ref] $candidate) -and $candidate -ge 60 -and $candidate -le 3600) {
+                $refreshSeconds = $candidate
+            }
+        }
+        if ($env:CLAUDEX_USAGE_MAX_STALE_SECONDS) {
+            $candidate = 0
+            if ([int]::TryParse($env:CLAUDEX_USAGE_MAX_STALE_SECONDS, [ref] $candidate) -and $candidate -ge $refreshSeconds -and $candidate -le 604800) {
+                $maxStaleSeconds = $candidate
+            }
+        }
+        $usageCacheDir = Join-Path $configDir 'usage-cache'
+        $summaryPath = Join-Path $usageCacheDir 'summary'
+        $lastAttemptPath = Join-Path $usageCacheDir 'last-attempt'
+        $lastSuccessPath = Join-Path $usageCacheDir 'last-success'
+        $refreshLock = Join-Path $usageCacheDir 'refresh.lock'
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $lastAttempt = 0L
+        if (Test-Path -LiteralPath $lastAttemptPath -PathType Leaf) { [long]::TryParse(([IO.File]::ReadAllText($lastAttemptPath).Trim()), [ref] $lastAttempt) | Out-Null }
+        if ($now - $lastAttempt -ge $refreshSeconds) {
+            [IO.Directory]::CreateDirectory($usageCacheDir) | Out-Null
+            $started = $false
+            try {
+                New-Item -Path $refreshLock -ItemType Directory -ErrorAction Stop | Out-Null
+                [IO.File]::WriteAllText($lastAttemptPath, "$now`n", $utf8)
+                $powershell = (Get-Process -Id $PID).Path
+                $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $usageHelper + '"'), '-RefreshCache', '-LockHeld')
+                Start-Process -FilePath $powershell -ArgumentList $arguments -WindowStyle Hidden | Out-Null
+                $started = $true
+            } catch {
+                if (-not $started -and $now - $lastAttempt -ge ($refreshSeconds * 2) -and (Test-Path -LiteralPath $refreshLock -PathType Container)) {
+                    Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        $lastSuccess = 0L
+        if (Test-Path -LiteralPath $lastSuccessPath -PathType Leaf) { [long]::TryParse(([IO.File]::ReadAllText($lastSuccessPath).Trim()), [ref] $lastSuccess) | Out-Null }
+        if ($now - $lastSuccess -le $maxStaleSeconds -and (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+            $usageSummary = [IO.File]::ReadAllText($summaryPath).Trim()
+        }
+    } catch { $usageSummary = '' }
+}
+
 $modelName = switch -Wildcard ($modelId) {
     'gpt-5.6-sol' { 'GPT-5.6 Sol'; break }
     'gpt-5.6-terra' { 'GPT-5.6 Terra'; break }
@@ -100,4 +151,5 @@ $separator = [char] 0x00B7
 $title = "${escape}]0;Claudex $separator $modelName $separator $effort effort$([char]7)"
 $line = "${escape}[38;5;81mClaudex${escape}[0m $separator ${escape}[1m$modelName${escape}[0m $separator $effort effort"
 if ($null -ne $contextPercent) { $line += " $separator $contextPercent% context" }
+if ($usageSummary) { $line += " $separator $usageSummary" }
 Write-Output ($title + $line)
