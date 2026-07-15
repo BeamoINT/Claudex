@@ -1,6 +1,6 @@
 {
   "name": "claudex-codex",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Cross-platform compatibility layer for using Codex GPT models in Claude Code",
   "type": "module",
   "bin": {

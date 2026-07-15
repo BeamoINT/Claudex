@@ -582,7 +582,7 @@ try {
     Set-MousePointer $mousePointer
     & claude @claudeLaunchArguments
     $exitCode = $LASTEXITCODE
-    if ($rewriteResumeFooter -and $exitCode -eq 0) { Update-ResumeFooter $resumeMarker }
+    if ($rewriteResumeFooter) { Update-ResumeFooter $resumeMarker }
 } finally {
     if ($authWatcher -and -not $authWatcher.HasExited) {
         Stop-Process -Id $authWatcher.Id -Force -ErrorAction SilentlyContinue

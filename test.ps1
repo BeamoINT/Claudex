@@ -237,6 +237,8 @@ exit 1
     Remove-Item Env:CLAUDEX_TEST_RESUME_CAPTURE_FILE
     Assert-True ($resumeFooter.Contains("$([char]27)[2A$([char]27)[JResume this session with:")) 'resume footer rows replaced'
     Assert-True ($resumeFooter.Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'Claudex resume command'
+    $windowsLauncher = [IO.File]::ReadAllText((Join-Path $root 'claudex.ps1'))
+    Assert-True ($windowsLauncher.Contains('if ($rewriteResumeFooter) { Update-ResumeFooter $resumeMarker }')) 'resume footer is rewritten independently of exit status'
 
     Remove-Item -LiteralPath $resumeCapture -Force
     $env:FAKE_CLAUDE_RESUME = '1'
