@@ -497,7 +497,7 @@ case "${forwarded_args[0]:-}" in
     ;;
 esac
 
-for argument in "${forwarded_args[@]}"; do
+for argument in ${forwarded_args[@]+"${forwarded_args[@]}"}; do
   case "$argument" in
     --safe-mode|--bare)
       inject_session_customizations=0
@@ -660,7 +660,7 @@ trap 'emit_mouse_pointer_shape default; [[ -z "${resume_marker:-}" ]] || rm -f "
 rewrite_resume_footer=0
 if { [[ -t 0 && -t 1 ]] || [[ "${CLAUDEX_TEST_TTY_OUTPUT:-0}" == 1 ]]; }; then
   rewrite_resume_footer=1
-  for argument in "${forwarded_args[@]}"; do
+  for argument in ${forwarded_args[@]+"${forwarded_args[@]}"}; do
     case "$argument" in
       --print|-p|--help|-h|--version|-v|doctor) rewrite_resume_footer=0 ;;
     esac
