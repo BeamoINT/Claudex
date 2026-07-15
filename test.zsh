@@ -564,6 +564,12 @@ chmod +x "$update_home/.config/claudex/codex-session"
 cp "$tmp/home/.codex/auth.json" "$update_home/.codex/auth.json"
 printf '%s\n' 'CLAUDEX_PROXY_TOKEN=test-token' "CLAUDEX_CODEX_AUTH_DIR=$update_home/.cli-proxy-api" > "$update_home/.config/claudex/env"
 update_dir="$update_home/.config/claudex/update"
+direct_update_log="$tmp/direct-update.log"
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=0 \
+  FAKE_UPDATE_LOG="$direct_update_log" "$root/claudex" --claude-chrome --version >/dev/null
+for _ in {1..50}; do [[ -s "$update_dir/last-success" ]] && break; sleep 0.02; done
+[[ -s "$direct_update_log" && -s "$update_dir/last-success" ]]
+rm -rf "$update_dir"
 mkdir -p "$update_dir/lock"
 touch -t 200001010000 "$update_dir/lock"
 update_log="$tmp/update.log"

@@ -288,7 +288,9 @@ maybe_update_claude() {
   [[ "${CLAUDEX_SKIP_AUTO_UPDATE:-0}" != 1 ]] || return 0
   command -v claude >/dev/null 2>&1 || return 0
 
-  local update_dir="$CLAUDE_CONFIG_DIR/update" stamp="$CLAUDE_CONFIG_DIR/update/last-success" now last=0
+  # Direct Chrome intentionally unsets CLAUDE_CONFIG_DIR. Update bookkeeping
+  # always belongs to Claudex's stable private config root.
+  local update_dir="$claudex_config_dir/update" stamp="$claudex_config_dir/update/last-success" now last=0
   now=$(date +%s)
   if [[ -r "$stamp" ]]; then
     read -r last < "$stamp" || last=0
