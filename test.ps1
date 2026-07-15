@@ -43,10 +43,10 @@ if not errorlevel 1 (
 echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}
 '@, $utf8)
         function global:claude {
-            $argumentList = @($args)
-            if ($argumentList.Count -gt 0 -and $argumentList[0] -eq '--version') { Write-Output '2.1.210 (test)'; return }
-            if ($argumentList.Count -gt 0 -and $argumentList[0] -eq '--help') { Write-Output '--model --agents --append-system-prompt --permission-mode --settings --effort'; return }
-            if ($argumentList.Count -gt 0 -and $argumentList[0] -eq 'update') { return }
+            $firstArgument = if ($args) { [string] $args[0] } else { '' }
+            if ($firstArgument -eq '--version') { Write-Output '2.1.210 (test)'; return }
+            if ($firstArgument -eq '--help') { Write-Output '--model --agents --append-system-prompt --permission-mode --settings --effort'; return }
+            if ($firstArgument -eq 'update') { return }
             if ($env:FAKE_CLAUDE_RESUME -eq '1') {
                 $projectKey = [regex]::Replace((Get-Location).Path, '[^A-Za-z0-9]', '-')
                 $projectDirectory = Join-Path (Join-Path $env:CLAUDE_CONFIG_DIR 'projects') $projectKey

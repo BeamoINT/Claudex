@@ -5,7 +5,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
-$ClaudeArguments = @($ClaudeArguments)
+if ($null -eq $ClaudeArguments) { $ClaudeArguments = [string[]] @() }
+else { $ClaudeArguments = [string[]] @($ClaudeArguments) }
 $previousSessionMode = [Environment]::GetEnvironmentVariable('CLAUDEX_SESSION_MODE', 'Process')
 $previousEffortLevel = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_EFFORT_LEVEL', 'Process')
 $previousModelMode = [Environment]::GetEnvironmentVariable('CLAUDEX_MODEL_MODE', 'Process')
