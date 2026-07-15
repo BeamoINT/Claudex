@@ -404,6 +404,9 @@ exit 1
     $inputAlias = & node -e 'const p=require(process.argv[1]);process.stdout.write(p.rewriteSolplanInput(process.argv[2]+String.fromCharCode(13)))' (Join-Path $root 'preload.cjs') '/model solplan'
     Remove-Item Env:CLAUDEX_TEST_TTY_INPUT
     Assert-True (($inputAlias | Out-String).Contains('/model opusplan')) 'Solplan slash-command alias'
+    $packageVersion = (& node (Join-Path $root 'bin\claudex-package.mjs') --package-version | Out-String).Trim()
+    $packageManifest = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
+    Assert-True ($packageVersion -eq $packageManifest.version) 'package-manager wrapper version'
 
     $installHome = Join-Path $temporary 'install home'
     [IO.Directory]::CreateDirectory((Join-Path $installHome '.codex')) | Out-Null
@@ -433,6 +436,8 @@ exit 1
 
     & node (Join-Path $root 'scripts\check-docs.mjs')
     Assert-True ($LASTEXITCODE -eq 0) 'community and documentation checks'
+    & node (Join-Path $root 'scripts\check-package.mjs')
+    Assert-True ($LASTEXITCODE -eq 0) 'npm package checks'
 
     [Console]::WriteLine('all Claudex Windows tests passed')
 } finally {

@@ -14,6 +14,7 @@ env
 coverage/
 .pytest_cache/
 node_modules/
+dist/
 .claude/
 .codex/
 .config/claudex/

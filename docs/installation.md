@@ -19,6 +19,11 @@ archive commands.
 
 ## Download
 
+The shortest installation path is a supported package manager. See
+[package-managers.md](package-managers.md) for Homebrew, npm, Scoop, and WinGet
+commands. Package installs configure themselves on first use and refresh the
+managed launcher after upgrades.
+
 Choose one of these methods:
 
 1. Download the source archive from the
@@ -97,6 +102,10 @@ Luna. If the account does not provide one of those models, Claudex exits with
 an actionable error instead of silently substituting a model.
 
 ## Update
+
+For a package-manager installation, use the normal package-manager upgrade
+command. Claudex detects the new package version and refreshes its managed
+files on the next launch. See [package-managers.md](package-managers.md).
 
 For a Git checkout:
 

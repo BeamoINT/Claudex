@@ -97,9 +97,24 @@ passes:
 5. publish a GitHub Release with installation notes and user-visible changes;
 6. verify the release archive and the latest-release link.
 
-Do not publish credentials, installed state, or generated binaries from a local
-machine. GitHub supplies source archives; CLIProxyAPI remains a verified
-install-time download.
+For a package-manager release, also:
+
+1. keep `package.json` and `CHANGELOG.md` on the same version;
+2. verify `npm test`, `npm pack --dry-run`, and `./scripts/build-release.sh`;
+3. wait for the release-assets workflow to attach both archives and
+   `SHA256SUMS`;
+4. publish `claudex-codex` to npm, then verify a clean-prefix global install;
+5. update and test the BeamoINT Homebrew tap and Scoop bucket with the exact
+   release-asset hashes;
+6. submit the matching WinGet manifest and link its external review.
+
+The manual `Publish npm` workflow is designed for npm trusted publishing and
+uses GitHub OIDC instead of a long-lived registry token. Configure the npm
+package to trust `.github/workflows/publish-npm.yml` before using it.
+
+Publish only archives built from the verified release tag. Do not publish
+credentials, installed state, or the downloaded CLIProxyAPI binary from a local
+machine; CLIProxyAPI remains a verified install-time dependency.
 
 ## Review checklist
 

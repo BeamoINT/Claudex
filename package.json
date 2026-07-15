@@ -1,0 +1,72 @@
+{
+  "name": "claudex-codex",
+  "version": "1.1.0",
+  "description": "Cross-platform compatibility layer for using Codex GPT models in Claude Code",
+  "type": "module",
+  "bin": {
+    "claudex": "bin/claudex-package.mjs"
+  },
+  "files": [
+    "bin/",
+    "docs/",
+    "skills/",
+    "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
+    "CONTRIBUTING.md",
+    "GOVERNANCE.md",
+    "LICENSE",
+    "NOTICE.md",
+    "README.md",
+    "SECURITY.md",
+    "SUPPORT.md",
+    "claudex",
+    "claudex.cmd",
+    "claudex.ps1",
+    "claudex-package.cmd",
+    "codex-session",
+    "codex-session.ps1",
+    "env.example",
+    "install.ps1",
+    "install.sh",
+    "install.zsh",
+    "preload.cjs",
+    "settings.json",
+    "statusline",
+    "statusline.ps1",
+    "usage-limit",
+    "usage-limit.ps1"
+  ],
+  "scripts": {
+    "check:docs": "node scripts/check-docs.mjs",
+    "check:package": "node scripts/check-package.mjs",
+    "test": "npm run check:docs && npm run check:package",
+    "test:all": "bash ./test.sh",
+    "build:release": "bash ./scripts/build-release.sh",
+    "prepublishOnly": "npm test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "claudex",
+    "claude-code",
+    "codex",
+    "openai",
+    "anthropic",
+    "cli",
+    "developer-tools",
+    "ai"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BeamoINT/Claudex.git"
+  },
+  "bugs": {
+    "url": "https://github.com/BeamoINT/Claudex/issues"
+  },
+  "homepage": "https://github.com/BeamoINT/Claudex#readme",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
