@@ -290,7 +290,7 @@ exit 1
     Assert-True (($filteredSolplan | Out-String).Contains('GPT-5.6 Solplan')) 'Solplan picker label'
     Assert-True (($filteredSolplan | Out-String).Contains('GPT-5.6 Sol in plan mode, GPT-5.6 Terra otherwise')) 'Solplan picker description'
     $env:CLAUDEX_TEST_TTY_INPUT = '1'
-    $inputAlias = "/model solplan`r" | node --require (Join-Path $root 'preload.cjs') -e 'process.stdin.pipe(process.stdout)'
+    $inputAlias = & node -e 'const p=require(process.argv[1]);process.stdout.write(p.rewriteSolplanInput(process.argv[2]+String.fromCharCode(13)))' (Join-Path $root 'preload.cjs') '/model solplan'
     Remove-Item Env:CLAUDEX_TEST_TTY_INPUT
     Assert-True (($inputAlias | Out-String).Contains('/model opusplan')) 'Solplan slash-command alias'
 
