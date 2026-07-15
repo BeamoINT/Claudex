@@ -3,6 +3,10 @@ $utf8 = New-Object Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $utf8
 
 $raw = [Console]::In.ReadToEnd()
+if ([string]::IsNullOrWhiteSpace($raw)) {
+    $pipelineInput = @($input)
+    if ($pipelineInput.Count -gt 0) { $raw = $pipelineInput -join "`n" }
+}
 $data = $null
 try { $data = $raw | ConvertFrom-Json } catch { $data = $null }
 
@@ -12,11 +16,11 @@ $effort = ''
 $contextPercent = $null
 if ($data) {
     if ($data.model) {
-        $modelId = [string] $data.model.id
-        $displayName = [string] $data.model.display_name
+        if ($null -ne $data.model.PSObject.Properties['id']) { $modelId = [string] $data.model.id }
+        if ($null -ne $data.model.PSObject.Properties['display_name']) { $displayName = [string] $data.model.display_name }
     }
-    if ($data.effort) { $effort = [string] $data.effort.level }
-    if ($data.context_window -and $null -ne $data.context_window.used_percentage) {
+    if ($data.effort -and $null -ne $data.effort.PSObject.Properties['level']) { $effort = [string] $data.effort.level }
+    if ($data.context_window -and $null -ne $data.context_window.PSObject.Properties['used_percentage'] -and $null -ne $data.context_window.used_percentage) {
         $contextPercent = [math]::Floor([double] $data.context_window.used_percentage)
     }
 }
@@ -54,7 +58,7 @@ $modelName = switch -Wildcard ($modelId) {
 
 $escape = [char] 27
 $separator = [char] 0x00B7
-[Console]::Out.Write("${escape}]0;Claudex $separator $modelName $separator $effort effort$([char]7)")
+$title = "${escape}]0;Claudex $separator $modelName $separator $effort effort$([char]7)"
 $line = "${escape}[38;5;81mClaudex${escape}[0m $separator ${escape}[1m$modelName${escape}[0m $separator $effort effort"
 if ($null -ne $contextPercent) { $line += " $separator $contextPercent% context" }
-[Console]::Out.WriteLine($line)
+Write-Output ($title + $line)

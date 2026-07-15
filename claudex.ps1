@@ -179,26 +179,26 @@ function Invoke-Doctor {
         if ($versionLines.Count -gt 0) { $proxyVersion = [string] $versionLines[0] }
     }
     $claudeVersion = try { (& claude --version 2>$null | Select-Object -First 1) } catch { 'unavailable' }
-    [Console]::WriteLine("Claude Code: $claudeVersion")
-    [Console]::WriteLine("CLIProxyAPI: $proxyVersion")
-    [Console]::WriteLine("Proxy: healthy at $proxyUrl")
-    [Console]::WriteLine("Saved model: $(Model-Name $savedModel) ($savedModel)")
-    [Console]::WriteLine("Default permission mode: $permissionMode")
-    [Console]::WriteLine("Auto-mode classifier: $autoModeModel (only used when auto mode is selected)")
-    [Console]::WriteLine("Subagent model: $subagentModel (Sol is reserved for the leader)")
-    [Console]::WriteLine("Tool concurrency: $toolConcurrencyNumber")
-    [Console]::WriteLine("Agent concurrency: $agentConcurrencyNumber")
-    [Console]::WriteLine("API retries: $maxRetriesNumber")
-    [Console]::WriteLine("Context window: $contextWindowNumber tokens")
-    [Console]::WriteLine("Auto-compact window: $compactWindowNumber tokens (precompute enabled)")
-    [Console]::WriteLine('Terminal UI: fullscreen (launch command hidden while Claudex is open)')
-    [Console]::WriteLine('Header model name: GPT-5.6 Sol')
-    [Console]::WriteLine("Mouse pointer: $mousePointer")
-    [Console]::WriteLine("Isolation: Claudex config at $configDir; normal Claude config is untouched")
+    Write-Output "Claude Code: $claudeVersion"
+    Write-Output "CLIProxyAPI: $proxyVersion"
+    Write-Output "Proxy: healthy at $proxyUrl"
+    Write-Output "Saved model: $(Model-Name $savedModel) ($savedModel)"
+    Write-Output "Default permission mode: $permissionMode"
+    Write-Output "Auto-mode classifier: $autoModeModel (only used when auto mode is selected)"
+    Write-Output "Subagent model: $subagentModel (Sol is reserved for the leader)"
+    Write-Output "Tool concurrency: $toolConcurrencyNumber"
+    Write-Output "Agent concurrency: $agentConcurrencyNumber"
+    Write-Output "API retries: $maxRetriesNumber"
+    Write-Output "Context window: $contextWindowNumber tokens"
+    Write-Output "Auto-compact window: $compactWindowNumber tokens (precompute enabled)"
+    Write-Output 'Terminal UI: fullscreen (launch command hidden while Claudex is open)'
+    Write-Output 'Header model name: GPT-5.6 Sol'
+    Write-Output "Mouse pointer: $mousePointer"
+    Write-Output "Isolation: Claudex config at $configDir; normal Claude config is untouched"
     $missing = $false
     $ids = @($models.data | ForEach-Object { $_.id })
     foreach ($id in @('gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna')) {
-        if ($ids -contains $id) { [Console]::WriteLine("${id}: advertised") }
+        if ($ids -contains $id) { Write-Output "${id}: advertised" }
         else { [Console]::Error.WriteLine("${id}: not advertised by the authenticated Codex account"); $missing = $true }
     }
     if ($missing) { exit 1 }

@@ -7,6 +7,7 @@ $testHome = Join-Path $temporary 'home'
 $testConfig = Join-Path $testHome '.config\claudex'
 $fakeBin = Join-Path $temporary 'bin'
 $utf8 = New-Object Text.UTF8Encoding($false)
+$isWindowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 
 function Assert-True([bool] $Condition, [string] $Message) {
     if (-not $Condition) { throw "assertion failed: $Message" }
@@ -19,11 +20,13 @@ try {
     Copy-Item -LiteralPath (Join-Path $root 'settings.json') -Destination (Join-Path $testConfig 'settings.json')
     Copy-Item -LiteralPath (Join-Path $root 'preload.cjs') -Destination (Join-Path $testConfig 'preload.cjs')
 
-    [IO.File]::WriteAllText((Join-Path $fakeBin 'curl.cmd'), @'
+    if ($isWindowsPlatform) {
+        $fakeCurl = Join-Path $fakeBin 'curl.cmd'
+        [IO.File]::WriteAllText($fakeCurl, @'
 @echo off
 echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}
 '@, $utf8)
-    [IO.File]::WriteAllText((Join-Path $fakeBin 'claude.cmd'), @'
+        [IO.File]::WriteAllText((Join-Path $fakeBin 'claude.cmd'), @'
 @echo off
 if "%~1"=="--version" (
   echo 2.1.210 ^(test^)
@@ -41,16 +44,49 @@ echo OPUS_NAME=%ANTHROPIC_DEFAULT_OPUS_MODEL_NAME%
 echo POWERSHELL_TOOL=%CLAUDE_CODE_USE_POWERSHELL_TOOL%
 echo ARGS=%*
 '@, $utf8)
-    [IO.File]::WriteAllText((Join-Path $fakeBin 'cliproxyapi.cmd'), @'
+        [IO.File]::WriteAllText((Join-Path $fakeBin 'cliproxyapi.cmd'), @'
 @echo off
 echo CLIProxyAPI test
 echo extra version detail
 exit /b 1
 '@, $utf8)
+    } else {
+        $fakeCurl = Join-Path $fakeBin 'curl.exe'
+        [IO.File]::WriteAllText($fakeCurl, @'
+#!/bin/sh
+printf '%s\n' '{"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}'
+'@, $utf8)
+        [IO.File]::WriteAllText((Join-Path $fakeBin 'claude'), @'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' '2.1.210 (test)'
+  exit 0
+fi
+printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
+printf '%s\n' "BG=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
+printf '%s\n' "SUBAGENT=${CLAUDE_CODE_SUBAGENT_MODEL}"
+printf '%s\n' "CONCURRENCY=${CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY}"
+printf '%s\n' "RETRIES=${CLAUDE_CODE_MAX_RETRIES}"
+printf '%s\n' "CONTEXT=${CLAUDE_CODE_MAX_CONTEXT_TOKENS}"
+printf '%s\n' "COMPACT=${CLAUDE_CODE_AUTO_COMPACT_WINDOW}"
+printf '%s\n' "OPUS=${ANTHROPIC_DEFAULT_OPUS_MODEL}"
+printf '%s\n' "OPUS_NAME=${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME}"
+printf '%s\n' "POWERSHELL_TOOL=${CLAUDE_CODE_USE_POWERSHELL_TOOL}"
+printf 'ARGS='; printf ' %s' "$@"; printf '\n'
+'@, $utf8)
+        [IO.File]::WriteAllText((Join-Path $fakeBin 'cliproxyapi'), @'
+#!/bin/sh
+printf '%s\n' 'CLIProxyAPI test'
+printf '%s\n' 'extra version detail'
+exit 1
+'@, $utf8)
+        & chmod +x $fakeCurl (Join-Path $fakeBin 'claude') (Join-Path $fakeBin 'cliproxyapi')
+        if ($LASTEXITCODE -ne 0) { throw 'failed to make PowerShell test doubles executable' }
+    }
 
     $env:USERPROFILE = $testHome
     $env:CLAUDEX_CONFIG_DIR = $testConfig
-    $env:CLAUDEX_CURL_BIN = Join-Path $fakeBin 'curl.cmd'
+    $env:CLAUDEX_CURL_BIN = $fakeCurl
     $env:PATH = "$fakeBin$([IO.Path]::PathSeparator)$env:PATH"
     Remove-Item Env:CLAUDEX_PERMISSION_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:CLAUDEX_AUTO_COMPACT_WINDOW -ErrorAction SilentlyContinue
