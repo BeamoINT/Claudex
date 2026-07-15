@@ -29,23 +29,38 @@ try {
     [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T01:00:00Z","tokens":{"access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"codex-source-id","account_id":"account-test"}}', $utf8)
 
     if ($isWindowsPlatform) {
-        $fakeCurl = Join-Path $fakeBin 'curl.cmd'
-        [IO.File]::WriteAllText($fakeCurl, @'
-@echo off
-if not "%CLAUDEX_TEST_CURL_ARGUMENT_FILE%"=="" echo %*>>"%CLAUDEX_TEST_CURL_ARGUMENT_FILE%"
-echo CLAUDEX_TEST_CURL_ARGS=%* 1>&2
-echo %* | findstr /c:"test-token" /c:"secret-access-token" >nul
-if not errorlevel 1 exit /b 90
-echo %* | findstr /c:"/wham/usage" >nul
-if not errorlevel 1 (
-  if "%FAKE_USAGE_FAIL%"=="1" exit /b 22
-  echo {"user_id":"private-user","account_id":"private-account","email":"private@example.com","plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":82,"limit_window_seconds":604800,"reset_after_seconds":565127,"reset_at":1784666240},"secondary_window":null},"code_review_rate_limit":null,"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","metered_feature":"codex_bengalfox","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":1784705933},"secondary_window":null}}],"credits":{"has_credits":false,"unlimited":false,"overage_limit_reached":false,"balance":"0"},"spend_control":{"reached":false,"individual_limit":null},"rate_limit_reached_type":null,"rate_limit_reset_credits":{"available_count":1}}
-  exit /b 0
-)
-if not "%FAKE_PROXY_READY_FILE%"=="" if not exist "%FAKE_PROXY_READY_FILE%" exit /b 7
-echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}
-exit /b 0
-'@, $utf8)
+        $fakeCurl = Join-Path $fakeBin 'curl.exe'
+        Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+
+public static class ClaudexTestCurl
+{
+    public static int Main(string[] args)
+    {
+        bool usage = false;
+        string headerFile = null;
+        foreach (string argument in args)
+        {
+            if (argument.Contains("test-token") || argument.Contains("secret-access-token")) return 90;
+            if (argument.Contains("/wham/usage")) usage = true;
+            if (argument.StartsWith("@") && argument.Length > 1) headerFile = argument.Substring(1);
+        }
+        if (usage)
+        {
+            if (Environment.GetEnvironmentVariable("FAKE_USAGE_FAIL") == "1") return 22;
+            Console.WriteLine(@"{""user_id"":""private-user"",""account_id"":""private-account"",""email"":""private@example.com"",""plan_type"":""pro"",""rate_limit"":{""allowed"":true,""limit_reached"":false,""primary_window"":{""used_percent"":82,""limit_window_seconds"":604800,""reset_after_seconds"":565127,""reset_at"":1784666240},""secondary_window"":null},""code_review_rate_limit"":null,""additional_rate_limits"":[{""limit_name"":""GPT-5.3-Codex-Spark"",""metered_feature"":""codex_bengalfox"",""rate_limit"":{""allowed"":true,""limit_reached"":false,""primary_window"":{""used_percent"":0,""limit_window_seconds"":604800,""reset_after_seconds"":604800,""reset_at"":1784705933},""secondary_window"":null}}],""credits"":{""has_credits"":false,""unlimited"":false,""overage_limit_reached"":false,""balance"":""0""},""spend_control"":{""reached"":false,""individual_limit"":null},""rate_limit_reached_type"":null,""rate_limit_reset_credits"":{""available_count"":1}}");
+            return 0;
+        }
+        string ready = Environment.GetEnvironmentVariable("FAKE_PROXY_READY_FILE");
+        if (!String.IsNullOrEmpty(ready) && !File.Exists(ready)) return 7;
+        if (String.IsNullOrEmpty(headerFile) || !File.Exists(headerFile) ||
+            !File.ReadAllText(headerFile).Contains("Authorization: Bearer test-token")) return 91;
+        Console.WriteLine(@"{""data"":[{""id"":""gpt-5.6-sol""},{""id"":""gpt-5.6-terra""},{""id"":""gpt-5.6-luna""}]}");
+        return 0;
+    }
+}
+'@ -OutputAssembly $fakeCurl -OutputType ConsoleApplication
         function global:claude {
             $firstArgument = if ($args) { [string] $args[0] } else { '' }
             if ($firstArgument -eq '--version') { Write-Output '2.1.210 (test)'; return }
@@ -226,20 +241,14 @@ exit 1
     $seedSettings.autoMode.environment = @($seedSettings.autoMode.environment) + @('User custom environment rule')
     [IO.File]::WriteAllText((Join-Path $testConfig 'settings.json'), ($seedSettings | ConvertTo-Json -Depth 100), $utf8)
 
-    $proxyCurlArgumentLog = Join-Path $temporary 'proxy-curl-arguments.log'
-    $env:CLAUDEX_TEST_CURL_ARGUMENT_FILE = $proxyCurlArgumentLog
     $output = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
     if (-not $output.Contains('AUTO=gpt-5.6-terra')) {
         $proxyRecoveryLog = Join-Path $testConfig 'logs\proxy-recovery.log'
         $proxyRecoveryDetail = if (Test-Path -LiteralPath $proxyRecoveryLog -PathType Leaf) {
             Get-Content -LiteralPath $proxyRecoveryLog -Raw
         } else { 'proxy recovery log was not created' }
-        $proxyCurlArguments = if (Test-Path -LiteralPath $proxyCurlArgumentLog -PathType Leaf) {
-            (Get-Content -LiteralPath $proxyCurlArgumentLog -Raw).Replace('test-token', '[redacted]').Replace('secret-access-token', '[redacted]')
-        } else { 'curl argument log was not created' }
-        throw "assertion failed: auto classifier; proxy diagnostics: $proxyRecoveryDetail; redacted curl argv: $proxyCurlArguments"
+        throw "assertion failed: auto classifier; proxy diagnostics: $proxyRecoveryDetail"
     }
-    Remove-Item Env:CLAUDEX_TEST_CURL_ARGUMENT_FILE -ErrorAction SilentlyContinue
     Assert-True ($output.Contains('BG=gpt-5.6-luna')) 'background classifier'
     Assert-True ($output.Contains('SUBAGENT=gpt-5.6-terra')) 'subagent model'
     Assert-True ($output.Contains('CONCURRENCY=3')) 'tool concurrency'
