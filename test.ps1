@@ -52,6 +52,9 @@ echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]
             Write-Output "OPUS=$env:ANTHROPIC_DEFAULT_OPUS_MODEL"
             Write-Output "OPUS_NAME=$env:ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"
             Write-Output "POWERSHELL_TOOL=$env:CLAUDE_CODE_USE_POWERSHELL_TOOL"
+            Write-Output "MODE=$env:CLAUDEX_SESSION_MODE"
+            Write-Output "BASE=$env:ANTHROPIC_BASE_URL"
+            Write-Output "CONFIG=$env:CLAUDE_CONFIG_DIR"
             Write-Output "ARGS=$($args -join ' ')"
         }
         [IO.File]::WriteAllText((Join-Path $fakeBin 'cliproxyapi.cmd'), @'
@@ -90,6 +93,9 @@ printf '%s\n' "ACCESSIBILITY=${CLAUDE_CODE_ACCESSIBILITY}"
 printf '%s\n' "OPUS=${ANTHROPIC_DEFAULT_OPUS_MODEL}"
 printf '%s\n' "OPUS_NAME=${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME}"
 printf '%s\n' "POWERSHELL_TOOL=${CLAUDE_CODE_USE_POWERSHELL_TOOL}"
+printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
+printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
+printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
 printf 'ARGS='; printf ' %s' "$@"; printf '\n'
 '@, $utf8)
         [IO.File]::WriteAllText((Join-Path $fakeBin 'cliproxyapi'), @'
@@ -136,6 +142,25 @@ exit 1
     Assert-True (-not $output.Contains('"claudex-fast"')) 'legacy fast alias removed'
     Assert-True (-not $output.Contains('"model":"gpt-5.6-sol"')) 'leader model is not delegated'
 
+    $ultracode = (& (Join-Path $root 'claudex.ps1') --ultracode --sol test-prompt | Out-String)
+    Assert-True ($ultracode.Contains('MODE=ultracode')) 'ultracode session label'
+    Assert-True ($ultracode.Contains('--effort xhigh')) 'ultracode xhigh effort'
+    Assert-True ($ultracode.Contains('"ultracode":true')) 'ultracode setting'
+    Assert-True ($ultracode.Contains('"workflows":true')) 'ultracode workflows'
+
+    $maxEffort = (& (Join-Path $root 'claudex.ps1') --max-effort test-prompt | Out-String)
+    Assert-True ($maxEffort.Contains('MODE=max')) 'max effort session label'
+    Assert-True ($maxEffort.Contains('--effort max')) 'max effort flag'
+
+    $bare = (& (Join-Path $root 'claudex.ps1') --bare --print test-prompt | Out-String)
+    Assert-True (-not $bare.Contains('--agents')) 'bare mode custom agents suppressed'
+    Assert-True (-not $bare.Contains('--append-system-prompt')) 'bare mode leader prompt suppressed'
+    Assert-True (-not $bare.Contains('--permission-mode')) 'bare mode permission override suppressed'
+
+    $maintenance = (& (Join-Path $root 'claudex.ps1') mcp list | Out-String)
+    Assert-True (-not $maintenance.Contains('BASE=http')) 'maintenance command bypasses model proxy'
+    Assert-True (-not $maintenance.Contains('--agents')) 'maintenance command bypasses session injection'
+
     $state = Get-Content -LiteralPath (Join-Path $testConfig '.claude.json') -Raw | ConvertFrom-Json
     $stateIds = @($state.additionalModelOptionsCache | ForEach-Object { $_.value })
     Assert-True (@($stateIds | Where-Object { $_ -eq 'gpt-5.6-sol' }).Count -eq 1) 'one Sol cache entry'
@@ -166,9 +191,18 @@ exit 1
     Assert-True ($null -eq $usageCache.PSObject.Properties['access_token']) 'usage cache token redaction'
 
     $env:FAKE_USAGE_FAIL = '1'
+    $env:CLAUDEX_USAGE_SOURCE = 'web'
     $fallbackUsage = (& (Join-Path $root 'claudex.ps1') --usage-limit 2>&1 | Out-String)
     Remove-Item Env:FAKE_USAGE_FAIL
+    Remove-Item Env:CLAUDEX_USAGE_SOURCE
     Assert-True ($fallbackUsage.Contains('Codex 7-day: 18% remaining (82% used)')) 'usage outage cache fallback'
+
+    $accounts = (& (Join-Path $root 'claudex.ps1') --accounts | Out-String)
+    Assert-True ($accounts.Contains('private@example.com')) 'usage account picker lists account'
+    $selection = (& (Join-Path $root 'claudex.ps1') --account private@example.com | Out-String)
+    Assert-True ($selection.Contains('Selected Codex usage account: private@example.com')) 'usage account picker selects account'
+    $automatic = (& (Join-Path $root 'claudex.ps1') --account auto | Out-String)
+    Assert-True ($automatic.Contains('automatic')) 'usage account picker restores automatic mode'
 
     $statusJson = '{"session_id":"stable-session","model":{"id":"gpt-5.6-sol"},"effort":{"level":"xhigh"},"context_window":{"used_percentage":42.9,"total_input_tokens":171600,"context_window_size":400000}}'
     $status = ($statusJson | & (Join-Path $root 'statusline.ps1') | Out-String)

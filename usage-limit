@@ -8,17 +8,24 @@ readonly summary_file="$cache_dir/summary"
 readonly last_attempt_file="$cache_dir/last-attempt"
 readonly last_success_file="$cache_dir/last-success"
 readonly refresh_lock="$cache_dir/refresh.lock"
+readonly account_selection_file="$config_dir/codex-usage-account"
 readonly curl_bin="${CLAUDEX_CURL_BIN:-curl}"
 readonly usage_url="${CLAUDEX_USAGE_URL:-https://chatgpt.com/backend-api/wham/usage}"
 readonly refresh_seconds="${CLAUDEX_USAGE_REFRESH_SECONDS:-300}"
 readonly timeout_seconds="${CLAUDEX_USAGE_TIMEOUT_SECONDS:-8}"
 readonly max_stale_seconds="${CLAUDEX_USAGE_MAX_STALE_SECONDS:-86400}"
+readonly usage_source="${CLAUDEX_USAGE_SOURCE:-auto}"
+readonly alert_percent="${CLAUDEX_USAGE_ALERT_PERCENT:-20}"
 
 mode=detail
 refresh=1
 lock_held=0
+account_action=""
+account_selector=""
 temporary_curl_config=""
 temporary_limits_file=""
+temporary_appserver_dir=""
+appserver_pid=""
 
 fail() {
   printf 'usage-limit: %s\n' "$*" >&2
@@ -26,7 +33,7 @@ fail() {
 }
 
 usage() {
-  printf '%s\n' 'Usage: claudex --usage-limit [--cached|--json|--refresh]'
+  printf '%s\n' 'Usage: claudex --usage-limit [--cached|--json|--refresh|--accounts|--account SELECTOR]'
 }
 
 while (( $# > 0 )); do
@@ -37,6 +44,14 @@ while (( $# > 0 )); do
     --statusline) mode=statusline; refresh=0 ;;
     --refresh-cache) mode=refresh-cache; refresh=1 ;;
     --lock-held) lock_held=1 ;;
+    --accounts) account_action=list; refresh=0 ;;
+    --account)
+      shift
+      (( $# > 0 )) || { fail '--account requires a number, email, filename, or auto.'; exit 2; }
+      account_action=select
+      account_selector="$1"
+      refresh=0
+      ;;
     --no-color) ;;
     --help|-h) usage; exit 0 ;;
     *) fail "unknown argument: $1"; usage >&2; exit 2 ;;
@@ -56,10 +71,22 @@ if [[ ! "$max_stale_seconds" =~ ^[0-9]+$ ]] || (( max_stale_seconds < refresh_se
   fail 'CLAUDEX_USAGE_MAX_STALE_SECONDS must be between the refresh interval and 604800.'
   exit 2
 fi
+case "$usage_source" in auto|web|app-server) ;;
+  *) fail 'CLAUDEX_USAGE_SOURCE must be auto, web, or app-server.'; exit 2 ;;
+esac
+if [[ ! "$alert_percent" =~ ^[0-9]+$ ]] || (( alert_percent < 0 || alert_percent > 100 )); then
+  fail 'CLAUDEX_USAGE_ALERT_PERCENT must be an integer from 0 to 100.'
+  exit 2
+fi
 
 cleanup() {
   [[ -z "$temporary_curl_config" ]] || rm -f "$temporary_curl_config"
   [[ -z "$temporary_limits_file" ]] || rm -f "$temporary_limits_file"
+  if [[ -n "$appserver_pid" ]]; then
+    kill "$appserver_pid" 2>/dev/null || true
+    wait "$appserver_pid" 2>/dev/null || true
+  fi
+  [[ -z "$temporary_appserver_dir" ]] || rm -rf "$temporary_appserver_dir"
   if (( lock_held )); then
     rmdir "$refresh_lock" 2>/dev/null || true
   fi
@@ -109,6 +136,18 @@ find_auth_file() {
   local auth_dir
   auth_dir=$(proxy_auth_dir)
   [[ -d "$auth_dir" ]] || return 1
+  if [[ -r "$account_selection_file" ]]; then
+    local selected_name
+    IFS= read -r selected_name < "$account_selection_file" || selected_name=""
+    case "$selected_name" in ''|*/*|*\\*) return 1 ;; esac
+    candidate="$auth_dir/$selected_name"
+    if [[ -r "$candidate" ]] && jq -e '.type == "codex" and (.access_token | type == "string" and length > 0)' \
+      "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    return 1
+  fi
   while IFS= read -r -d '' candidate; do
     jq -e '.type == "codex" and (.access_token | type == "string" and length > 0)' \
       "$candidate" >/dev/null 2>&1 || continue
@@ -120,6 +159,173 @@ find_auth_file() {
   done < <(find "$auth_dir" -maxdepth 1 -type f -name 'codex*.json' -print0 2>/dev/null)
   [[ -n "$newest" ]] || return 1
   printf '%s\n' "$newest"
+}
+
+list_accounts() {
+  local auth_dir active candidate index=0 email disabled marker
+  auth_dir=$(proxy_auth_dir)
+  [[ -d "$auth_dir" ]] || { fail 'CLIProxyAPI Codex OAuth directory was not found.'; return 1; }
+  active=$(find_auth_file 2>/dev/null || true)
+  printf '%s\n' 'Codex usage accounts:'
+  while IFS= read -r -d '' candidate; do
+    jq -e '.type == "codex" and (.access_token | type == "string" and length > 0)' "$candidate" >/dev/null 2>&1 || continue
+    index=$(( index + 1 ))
+    email=$(jq -r '.email // "unknown account"' "$candidate")
+    disabled=$(jq -r '.disabled // false' "$candidate")
+    [[ "$candidate" == "$active" ]] && marker='*' || marker=' '
+    if [[ "$disabled" == true ]]; then
+      printf '[%s] %d. %s (disabled)\n' "$marker" "$index" "$email"
+    else
+      printf '[%s] %d. %s\n' "$marker" "$index" "$email"
+    fi
+  done < <(find "$auth_dir" -maxdepth 1 -type f -name 'codex*.json' -print0 2>/dev/null)
+  (( index > 0 )) || { fail 'no CLIProxyAPI Codex OAuth credentials were found.'; return 1; }
+  printf '%s\n' 'Select one with: claudex --account <number|email|filename>; use auto to follow the newest credential.'
+}
+
+select_account() {
+  local selector="$1" auth_dir candidate index=0 email selected=""
+  if [[ "$selector" == auto ]]; then
+    rm -f "$account_selection_file"
+    printf '%s\n' 'Codex usage account selection: automatic (newest refreshed credential).'
+    return 0
+  fi
+  auth_dir=$(proxy_auth_dir)
+  [[ -d "$auth_dir" ]] || { fail 'CLIProxyAPI Codex OAuth directory was not found.'; return 1; }
+  while IFS= read -r -d '' candidate; do
+    jq -e '.type == "codex" and (.access_token | type == "string" and length > 0)' "$candidate" >/dev/null 2>&1 || continue
+    index=$(( index + 1 ))
+    email=$(jq -r '.email // empty' "$candidate")
+    if [[ "$selector" == "$index" || "$selector" == "$email" || "$selector" == "$(basename "$candidate")" ]]; then
+      selected="$candidate"
+      break
+    fi
+  done < <(find "$auth_dir" -maxdepth 1 -type f -name 'codex*.json' -print0 2>/dev/null)
+  [[ -n "$selected" ]] || { fail "no Codex account matched '$selector'. Run: claudex --accounts"; return 1; }
+  umask 077
+  printf '%s\n' "$(basename "$selected")" > "$account_selection_file"
+  chmod 600 "$account_selection_file" 2>/dev/null || true
+  printf 'Selected Codex usage account: %s\n' "$(jq -r '.email // "unknown account"' "$selected")"
+}
+
+case "$account_action" in
+  list) list_accounts; exit ;;
+  select) select_account "$account_selector"; exit ;;
+esac
+
+fetch_web_usage() {
+  local auth_file token account raw
+  auth_file=$(find_auth_file) || {
+    fail 'no CLIProxyAPI Codex OAuth credential was found; run the installer with --login.'
+    return 1
+  }
+  token=$(jq -er '.access_token' "$auth_file") || return 1
+  account=$(jq -er '.account_id // empty' "$auth_file") || account=""
+  case "$token$account" in
+    *$'\n'*|*$'\r'*|*'"'*) fail 'the Codex credential contains unsupported characters.'; return 1 ;;
+  esac
+
+  umask 077
+  temporary_curl_config=$(mktemp "$cache_dir/.curl.tmp.XXXXXX") || return 1
+  {
+    printf 'header = "Authorization: Bearer %s"\n' "$token"
+    [[ -z "$account" ]] || printf 'header = "ChatGPT-Account-Id: %s"\n' "$account"
+    printf '%s\n' 'header = "Accept: application/json"'
+  } > "$temporary_curl_config" || return 1
+  raw=$("$curl_bin" --silent --show-error --fail --connect-timeout 3 \
+    --max-time "$timeout_seconds" --config "$temporary_curl_config" "$usage_url") || {
+      rm -f "$temporary_curl_config"
+      temporary_curl_config=""
+      fail 'OpenAI usage refresh failed.'
+      return 1
+    }
+  rm -f "$temporary_curl_config"
+  temporary_curl_config=""
+  printf '%s' "$raw"
+}
+
+fetch_appserver_usage() {
+  command -v codex >/dev/null 2>&1 || { fail 'Codex CLI is unavailable for the app-server fallback.'; return 1; }
+  if [[ -n "${CLAUDEX_CODEX_AUTH_FILE:-}" || -r "$account_selection_file" ]]; then
+    fail 'app-server fallback is disabled while an explicit usage account is selected.'
+    return 1
+  fi
+
+  local input_fifo output_file error_file attempts response=""
+  temporary_appserver_dir=$(mktemp -d "${TMPDIR:-/tmp}/claudex-appserver.XXXXXX") || return 1
+  input_fifo="$temporary_appserver_dir/input"
+  output_file="$temporary_appserver_dir/output"
+  error_file="$temporary_appserver_dir/error"
+  mkfifo "$input_fifo" || return 1
+  : > "$output_file"
+  exec 9<>"$input_fifo"
+  codex app-server <"$input_fifo" >"$output_file" 2>"$error_file" &
+  appserver_pid=$!
+  printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"Claudex","title":"Claudex usage fallback","version":"1.0.0"}}}' >&9
+  attempts=$(( timeout_seconds * 20 ))
+  while (( attempts > 0 )); do
+    jq -e 'select(.id == 1 and .result)' "$output_file" >/dev/null 2>&1 && break
+    kill -0 "$appserver_pid" 2>/dev/null || break
+    attempts=$(( attempts - 1 ))
+    sleep 0.05
+  done
+  (( attempts > 0 )) || { exec 9>&-; fail 'Codex app-server initialization timed out.'; return 1; }
+
+  printf '%s\n' '{"method":"initialized"}' '{"id":2,"method":"account/rateLimits/read","params":null}' >&9
+  attempts=$(( timeout_seconds * 20 ))
+  while (( attempts > 0 )); do
+    response=$(jq -c 'select(.id == 2 and .result) | .result' "$output_file" 2>/dev/null | tail -1)
+    [[ -z "$response" ]] || break
+    kill -0 "$appserver_pid" 2>/dev/null || break
+    attempts=$(( attempts - 1 ))
+    sleep 0.05
+  done
+  exec 9>&-
+  kill "$appserver_pid" 2>/dev/null || true
+  wait "$appserver_pid" 2>/dev/null || true
+  appserver_pid=""
+  [[ -n "$response" ]] || { fail 'Codex app-server returned no rate-limit snapshot.'; return 1; }
+
+  printf '%s' "$response" | jq '
+    def window:
+      if type == "object" then {
+        used_percent: (.usedPercent // 0),
+        limit_window_seconds: ((.windowDurationMins // 0) * 60),
+        reset_after_seconds: 0,
+        reset_at: (.resetsAt // 0)
+      } else null end;
+    def limit:
+      if type == "object" then {
+        allowed: (.rateLimitReachedType == null),
+        limit_reached: (.rateLimitReachedType != null),
+        primary_window: (.primary | window),
+        secondary_window: (.secondary | window)
+      } else null end;
+    . as $root
+    | {
+        plan_type: (.rateLimits.planType // null),
+        rate_limit: (.rateLimits | limit),
+        code_review_rate_limit: null,
+        additional_rate_limits: [
+          (.rateLimitsByLimitId // {} | to_entries[]) as $entry
+          | select($entry.value.limitId != $root.rateLimits.limitId)
+          | {
+              limit_name: ($entry.value.limitName // $entry.key),
+              metered_feature: $entry.value.limitId,
+              rate_limit: ($entry.value | limit)
+            }
+        ],
+        credits: (if (.rateLimits.credits | type) == "object" then {
+          has_credits: (.rateLimits.credits.hasCredits // false),
+          unlimited: (.rateLimits.credits.unlimited // false),
+          overage_limit_reached: false,
+          balance: (.rateLimits.credits.balance // null)
+        } else null end),
+        spend_control: {reached: false},
+        rate_limit_reached_type: (.rateLimits.rateLimitReachedType // null),
+        rate_limit_reset_credits: {available_count: (.rateLimitResetCredits.availableCount // 0)}
+      }
+  '
 }
 
 window_label_short() {
@@ -174,7 +380,18 @@ compact_summary() {
   ' "$cache_file" 2>/dev/null)
 
   if [[ -n "$output" ]]; then
-    printf 'Codex %s\n' "$output"
+    local lowest_remaining
+    lowest_remaining=$(jq -r '
+      [[.rate_limit.primary_window, .rate_limit.secondary_window][]?
+        | select(type == "object")
+        | (100 - ((.used_percent // 0) | floor))
+        | if . < 0 then 0 elif . > 100 then 100 else . end] | min // 101
+    ' "$cache_file" 2>/dev/null)
+    if (( alert_percent > 0 )) && [[ "$lowest_remaining" =~ ^[0-9]+$ ]] && (( lowest_remaining <= alert_percent )); then
+      printf '⚠ Codex %s\n' "$output"
+    else
+      printf 'Codex %s\n' "$output"
+    fi
   elif jq -e '.rate_limit.limit_reached == true or .rate_limit_reached_type != null' \
     "$cache_file" >/dev/null 2>&1; then
     printf '%s\n' 'Codex limit reached'
@@ -205,7 +422,7 @@ write_summary() {
 }
 
 refresh_cache() {
-  local auth_file token account raw now
+  local raw now refresh_source=""
   mkdir -p "$cache_dir" 2>/dev/null || {
     fail "cannot create the private cache directory: $cache_dir"
     return 1
@@ -218,48 +435,32 @@ refresh_cache() {
   }
   chmod 600 "$last_attempt_file" 2>/dev/null || true
 
-  auth_file=$(find_auth_file) || {
-    fail 'no CLIProxyAPI Codex OAuth credential was found; run the installer with --login.'
-    return 1
-  }
-  token=$(jq -er '.access_token' "$auth_file") || return 1
-  account=$(jq -er '.account_id // empty' "$auth_file") || account=""
-  case "$token$account" in
-    *$'\n'*|*$'\r'*|*'"'*) fail 'the Codex credential contains unsupported characters.'; return 1 ;;
-  esac
-
   umask 077
-  temporary_curl_config=$(mktemp "$cache_dir/.curl.tmp.XXXXXX") || {
-    fail 'could not create a private curl configuration.'
-    return 1
-  }
   temporary_limits_file=$(mktemp "$cache_dir/.limits.tmp.XXXXXX") || {
     fail 'could not create a temporary usage snapshot.'
     return 1
   }
-  {
-    printf 'header = "Authorization: Bearer %s"\n' "$token"
-    if [[ -n "$account" ]]; then
-      printf 'header = "ChatGPT-Account-Id: %s"\n' "$account"
+
+  if [[ "$usage_source" != app-server ]]; then
+    if [[ "$usage_source" == auto ]]; then
+      if raw=$(fetch_web_usage 2>/dev/null) && printf '%s' "$raw" | jq -e '
+        ((.rate_limit.primary_window // .rate_limit.secondary_window) | type) == "object"
+      ' >/dev/null 2>&1; then
+        refresh_source=web
+      fi
+    elif raw=$(fetch_web_usage); then
+      refresh_source=web
     fi
-    printf '%s\n' 'header = "Accept: application/json"'
-  } > "$temporary_curl_config" || {
-    fail 'could not write the private curl configuration.'
-    return 1
-  }
-
-  raw=$("$curl_bin" --silent --show-error --fail --connect-timeout 3 \
-    --max-time "$timeout_seconds" --config "$temporary_curl_config" "$usage_url") || {
-      rm -f "$temporary_curl_config" "$temporary_limits_file"
-      temporary_curl_config=""
-      temporary_limits_file=""
-      fail 'OpenAI usage refresh failed.'
+    if [[ -z "$refresh_source" && "$usage_source" == web ]]; then
       return 1
-    }
-  rm -f "$temporary_curl_config"
-  temporary_curl_config=""
+    fi
+  fi
+  if [[ -z "$refresh_source" ]]; then
+    raw=$(fetch_appserver_usage) || return 1
+    refresh_source=app-server
+  fi
 
-  printf '%s' "$raw" | jq --argjson fetched_at "$now" '
+  printf '%s' "$raw" | jq --argjson fetched_at "$now" --arg source "$refresh_source" '
     def window:
       if type == "object" then {
         used_percent: ((.used_percent // .usedPercent // 0) | tonumber),
@@ -277,6 +478,7 @@ refresh_cache() {
     {
       version: 1,
       fetched_at: $fetched_at,
+      source: $source,
       plan_type: (.plan_type // null),
       rate_limit: (.rate_limit | limit),
       code_review_rate_limit: (.code_review_rate_limit | limit),
@@ -352,6 +554,17 @@ render_detail() {
     (.additional_rate_limits[]? | rows(.limit_name; .rate_limit))
   ' "$cache_file")
 
+  local lowest_remaining source
+  lowest_remaining=$(jq -r '
+    [[.rate_limit.primary_window, .rate_limit.secondary_window][]?
+      | select(type == "object")
+      | (100 - ((.used_percent // 0) | floor))
+      | if . < 0 then 0 elif . > 100 then 100 else . end] | min // 101
+  ' "$cache_file")
+  if (( alert_percent > 0 )) && [[ "$lowest_remaining" =~ ^[0-9]+$ ]] && (( lowest_remaining <= alert_percent )); then
+    printf 'Warning: Codex capacity is at or below the configured %s%% alert threshold.\n' "$alert_percent"
+  fi
+
   local reset_credits
   reset_credits=$(jq -r '.reset_credits_available // 0' "$cache_file")
   if [[ "$reset_credits" =~ ^[0-9]+$ ]] && (( reset_credits > 0 )); then
@@ -364,6 +577,8 @@ render_detail() {
   if [[ "$fetched" =~ ^[0-9]+$ ]] && (( fetched > 0 )); then
     printf 'Updated: %s\n' "$(format_epoch "$fetched")"
   fi
+  source=$(jq -r '.source // "web"' "$cache_file")
+  printf 'Source: %s\n' "$source"
 }
 
 refresh_failed=0
