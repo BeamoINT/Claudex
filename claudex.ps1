@@ -223,18 +223,31 @@ function Join-WindowsCommandLine([string[]] $Arguments) {
     return (@($Arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument ([string] $_) }) -join ' ')
 }
 
+function ConvertTo-CmdArgument([string] $Value) {
+    if ($null -eq $Value) { $Value = '' }
+    # Delayed expansion is disabled by the caller. Keep metacharacters inside a
+    # quoted token and use cmd's doubled-quote representation for literal quotes.
+    return '"' + $Value.Replace('%', '%%').Replace('"', '""') + '"'
+}
+
 function Invoke-CurlWithDeadline([string[]] $Arguments, [string] $StandardInput, [int] $TimeoutMilliseconds) {
     $command = Get-Command $curlCommand -ErrorAction SilentlyContinue
     if (-not $command) { throw "curl executable was not found: $curlCommand" }
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $commandPath = [string] $command.Source
     $extension = [IO.Path]::GetExtension($commandPath).ToLowerInvariant()
-    if ($command.CommandType -eq 'ExternalScript' -or $extension -in @('.ps1', '.cmd', '.bat')) {
-        # ProcessStartInfo cannot CreateProcess a command shim directly. Run a
-        # fixed, encoded bootstrap and keep credentials on stdin, never argv.
+    if ($extension -in @('.cmd', '.bat')) {
+        $commandLine = (ConvertTo-CmdArgument $commandPath) + ' ' +
+            (@($Arguments | ForEach-Object { ConvertTo-CmdArgument ([string] $_) }) -join ' ')
+        $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
+        $startInfo.Arguments = Join-WindowsCommandLine @('/d', '/s', '/v:off', '/c', $commandLine)
+    } elseif ($command.CommandType -eq 'ExternalScript' -or $extension -eq '.ps1') {
+        # ProcessStartInfo cannot CreateProcess a PowerShell script directly.
+        # Run a fixed encoded bootstrap; proxy credentials live in the private
+        # header file, never in this command line.
         $escapedPath = $commandPath.Replace("'", "''")
         $argumentLiteral = @($Arguments | ForEach-Object { "'" + ([string] $_).Replace("'", "''") + "'" }) -join ','
-        $bootstrap = "`$payload=[Console]::In.ReadToEnd(); `$payload | & '$escapedPath' @($argumentLiteral); exit `$LASTEXITCODE"
+        $bootstrap = "& '$escapedPath' @($argumentLiteral); exit `$LASTEXITCODE"
         $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
         $startInfo.FileName = (Get-Process -Id $PID).Path
         $startInfo.Arguments = Join-WindowsCommandLine @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded)
@@ -1124,13 +1137,6 @@ function Update-ResumeFooter([string] $Marker) {
         [IO.File]::WriteAllText($env:CLAUDEX_TEST_RESUME_CAPTURE_FILE, $footer, $utf8)
     }
     [Console]::Out.Write($footer)
-}
-
-function ConvertTo-CmdArgument([string] $Value) {
-    if ($null -eq $Value) { $Value = '' }
-    # Delayed expansion is disabled by the caller. Keep metacharacters inside a
-    # quoted token and use cmd's doubled-quote representation for literal quotes.
-    return '"' + $Value.Replace('%', '%%').Replace('"', '""') + '"'
 }
 
 function Invoke-ClaudeProcess([Collections.Generic.List[string]] $Arguments) {

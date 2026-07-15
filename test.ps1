@@ -43,6 +43,7 @@ if not errorlevel 1 (
 )
 if not "%FAKE_PROXY_READY_FILE%"=="" if not exist "%FAKE_PROXY_READY_FILE%" exit /b 7
 echo {"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}
+exit /b 0
 '@, $utf8)
         function global:claude {
             $firstArgument = if ($args) { [string] $args[0] } else { '' }
