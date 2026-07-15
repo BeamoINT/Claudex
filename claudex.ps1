@@ -1,3 +1,4 @@
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [int] $ClaudexInternalProxyWatchParentProcessId = 0,
     [Parameter(ValueFromRemainingArguments = $true)]
