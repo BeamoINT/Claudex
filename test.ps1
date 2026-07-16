@@ -828,8 +828,8 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
 
     $forwardedModelOutput = (& (Join-Path $root 'claudex.ps1') --model gpt-5.6-luna explicit-model-test | Out-String)
     $forwardedModelArgs = @($forwardedModelOutput -split "`r?`n" | Where-Object { $_.StartsWith('ARGS=') })[-1]
-    Assert-True ($forwardedModelArgs.Contains('--model gpt-5.6-luna')) 'explicit native --model reaches Claude unchanged'
-    Assert-True (([regex]::Matches($forwardedModelArgs, '(?:^| )--model(?: |$)')).Count -eq 1) 'explicit native --model suppresses default model injection'
+    Assert-True ($forwardedModelArgs.Contains('--model gpt-5.6-luna')) "explicit native --model reaches Claude unchanged; output=$forwardedModelOutput; args=$forwardedModelArgs"
+    Assert-True (([regex]::Matches($forwardedModelArgs, '(?:^| )--model(?: |$)')).Count -eq 1) "explicit native --model suppresses default model injection; output=$forwardedModelOutput; args=$forwardedModelArgs"
     $env:FAKE_PROXY_MODELS_JSON = '{"data":[{"id":"gpt-5.6-terra"}]}'
     try {
         $fallbackModelOutput = (& (Join-Path $root 'claudex.ps1') --model gpt-5.6-sol --fallback-model=gpt-5.6-terra fallback-model-test | Out-String)
