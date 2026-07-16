@@ -186,6 +186,26 @@ if "%1"=="-c" (
 )
 exit /b 2
 '@, $utf8)
+        # Child PowerShell regressions cannot inherit the in-process `claude`
+        # function above. Provide the same capability probe as an executable
+        # fixture so those tests reach proxy recovery instead of exiting early.
+        [IO.File]::WriteAllText((Join-Path $fakeBin 'claude.cmd'), @'
+@echo off
+if "%~1"=="--version" (
+  echo 2.1.210 ^(test^)
+  exit /b 0
+)
+if "%~1"=="--help" (
+  echo --model --agents --append-system-prompt --permission-mode --settings --effort --add-dir --plugin-dir
+  exit /b 0
+)
+if "%~1"=="auto-mode" if "%~2"=="defaults" (
+  echo {"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Data Exfiltration: default hard deny"]}
+  exit /b 0
+)
+if "%~1"=="update" exit /b 0
+exit /b 0
+'@, $utf8)
     } else {
         $fakeCurl = Join-Path $fakeBin 'curl.exe'
         [IO.File]::WriteAllText($fakeCurl, @'
@@ -513,7 +533,7 @@ process.stdout.write(JSON.stringify({
         Assert-True ($unmanaged401Exit -ne 0) 'Windows launcher rejects an unverified loopback process after HTTP 401'
         $unmanaged401Stderr = if (Test-Path -LiteralPath $unmanaged401ErrorLog -PathType Leaf) { Get-Content -LiteralPath $unmanaged401ErrorLog -Raw } else { '' }
         $unmanaged401Text = ((($unmanaged401Output | Out-String) + $unmanaged401Stderr) -replace '\s+', ' ')
-        Assert-True ($unmanaged401Text.Contains('will not stop an unverified process')) "unverified loopback 401 explains the managed-process safety boundary; captured=$unmanaged401Text"
+        Assert-True ($unmanaged401Text.Contains('will not stop an unverified process')) 'unverified loopback 401 explains the managed-process safety boundary'
         Assert-True (-not (Test-Path -LiteralPath $unmanaged401StartLog -PathType Leaf)) 'unverified loopback 401 never starts a replacement proxy'
 
         $proxyReady = Join-Path $temporary 'windows-proxy-ready'
