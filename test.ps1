@@ -262,6 +262,8 @@ switch ($Action) {
     $env:CLAUDEX_TEST_TTY_INPUT = '1'
     $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
     $env:CLAUDEX_SKIP_AUTH_WATCHER = '1'
+    $savedCi = [Environment]::GetEnvironmentVariable('CI', 'Process')
+    $env:CI = '0'
     try {
         $interactiveAuthOutput = (& (Join-Path $root 'claudex.ps1') --terra auth-recovery-test 2>&1 | Out-String)
         Assert-True ($interactiveAuthOutput.Contains('Codex sign-in is required. Opening the official Codex browser login')) 'interactive startup explains and opens official Codex login'
@@ -276,6 +278,8 @@ switch ($Action) {
         Remove-Item Env:CLAUDEX_CODEX_SESSION_HELPER -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDEX_TEST_AUTH_RECOVERY_LOG -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDEX_TEST_AUTH_RECOVERY_MARKER -ErrorAction SilentlyContinue
+        if ($null -eq $savedCi) { Remove-Item Env:CI -ErrorAction SilentlyContinue }
+        else { $env:CI = $savedCi }
     }
 
     $sourceSettings = Get-Content -LiteralPath (Join-Path $root 'settings.json') -Raw | ConvertFrom-Json

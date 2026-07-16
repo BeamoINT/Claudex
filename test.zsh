@@ -193,7 +193,7 @@ node "$root/scripts/check-package.mjs"
 auth_recovery_log="$tmp/auth-recovery.log"
 auth_recovery_marker="$tmp/auth-recovery.marker"
 interactive_auth_output=$(
-  HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
+  HOME="$tmp/home" PATH="$tmp/bin:$PATH" CI=0 CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
     CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=1 \
     CLAUDEX_CODEX_SESSION_HELPER="$auth_recovery_helper" \
     CLAUDEX_TEST_AUTH_RECOVERY_LOG="$auth_recovery_log" CLAUDEX_TEST_AUTH_RECOVERY_MARKER="$auth_recovery_marker" \
