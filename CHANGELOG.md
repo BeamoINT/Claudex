@@ -5,6 +5,14 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.5.5] - 2026-07-16
+
+### Fixed
+
+- Updated the Windows command boundary regression to verify decoded argument
+  slots, preserving exact command arguments without treating required batch
+  quoting as part of an argument value.
+
 ## [1.5.4] - 2026-07-16
 
 ### Added
@@ -368,7 +376,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first party profile support.
 - Cross platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.5.4...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.5.5...HEAD
+[1.5.5]: https://github.com/BeamoINT/Claudex/compare/v1.5.4...v1.5.5
 [1.5.4]: https://github.com/BeamoINT/Claudex/compare/v1.5.3...v1.5.4
 [1.5.3]: https://github.com/BeamoINT/Claudex/compare/v1.5.1...v1.5.3
 [1.5.1]: https://github.com/BeamoINT/Claudex/compare/v1.5.0...v1.5.1

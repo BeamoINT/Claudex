@@ -186,7 +186,9 @@ public static class ClaudexTestProxy
         [IO.File]::WriteAllText((Join-Path $fakeBin 'codex.cmd'), @'
 @echo off
 if not "%FAKE_CODEX_NATIVE_LOG%"=="" (
-  >"%FAKE_CODEX_NATIVE_LOG%" echo ARGS=%*
+  >"%FAKE_CODEX_NATIVE_LOG%" echo ARG1=%~1
+  >>"%FAKE_CODEX_NATIVE_LOG%" echo ARG2=%~2
+  >>"%FAKE_CODEX_NATIVE_LOG%" echo ARG3=%~3
   >>"%FAKE_CODEX_NATIVE_LOG%" echo BASE=%ANTHROPIC_BASE_URL%
   >>"%FAKE_CODEX_NATIVE_LOG%" echo AUTH_TOKEN=%ANTHROPIC_AUTH_TOKEN%
   >>"%FAKE_CODEX_NATIVE_LOG%" echo PROXY_TOKEN=%CLAUDEX_PROXY_TOKEN%
@@ -215,7 +217,9 @@ exit /b 2
         [IO.File]::WriteAllText((Join-Path $fakeBin 'claude.cmd'), @'
 @echo off
 if not "%FAKE_CLAUDE_NATIVE_LOG%"=="" (
-  >"%FAKE_CLAUDE_NATIVE_LOG%" echo ARGS=%*
+  >"%FAKE_CLAUDE_NATIVE_LOG%" echo ARG1=%~1
+  >>"%FAKE_CLAUDE_NATIVE_LOG%" echo ARG2=%~2
+  >>"%FAKE_CLAUDE_NATIVE_LOG%" echo ARG3=%~3
   >>"%FAKE_CLAUDE_NATIVE_LOG%" echo BASE=%ANTHROPIC_BASE_URL%
   >>"%FAKE_CLAUDE_NATIVE_LOG%" echo AUTH_TOKEN=%ANTHROPIC_AUTH_TOKEN%
   >>"%FAKE_CLAUDE_NATIVE_LOG%" echo PROXY_TOKEN=%CLAUDEX_PROXY_TOKEN%
@@ -238,7 +242,10 @@ if "%~1"=="auto-mode" if "%~2"=="defaults" (
 )
 if "%~1"=="update" exit /b 0
 if not "%FAKE_CLAUDE_MAINTENANCE_LOG%"=="" (
-  >"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo ARGS=%*
+  >"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo ARG1=%~1
+  >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo ARG2=%~2
+  >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo ARG3=%~3
+  >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo ARG4=%~4
   >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo BASE=%ANTHROPIC_BASE_URL%
   >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo MANAGED=%CLAUDEX_MANAGED_SESSION%
 )
@@ -366,10 +373,10 @@ exit 1
                 Assert-True ($maintenanceExit -eq 0) "Windows $maintenanceCommand bypasses missing Claudex configuration"
                 Assert-True (Test-Path -LiteralPath $maintenanceLog -PathType Leaf) "Windows $maintenanceCommand reaches Claude"
                 $maintenanceLines = @([IO.File]::ReadAllLines($maintenanceLog))
-                Assert-True ($maintenanceLines.Count -eq 3) "Windows $maintenanceCommand writes one maintenance launch record"
-                Assert-True ($maintenanceLines[0] -eq "ARGS=$maintenanceCommand maintenance-sentinel") "Windows $maintenanceCommand preserves exact Claude argv without managed flags"
-                Assert-True ($maintenanceLines[1] -eq 'BASE=') "Windows $maintenanceCommand clears the managed proxy URL"
-                Assert-True ($maintenanceLines[2] -eq 'MANAGED=') "Windows $maintenanceCommand clears the managed-session marker"
+                Assert-True ($maintenanceLines.Count -eq 6) "Windows $maintenanceCommand writes one maintenance launch record"
+                Assert-True ($maintenanceLines[0] -eq "ARG1=$maintenanceCommand" -and $maintenanceLines[1] -eq 'ARG2=maintenance-sentinel' -and $maintenanceLines[2] -eq 'ARG3=' -and $maintenanceLines[3] -eq 'ARG4=') "Windows $maintenanceCommand preserves exact Claude argv without managed flags"
+                Assert-True ($maintenanceLines[4] -eq 'BASE=') "Windows $maintenanceCommand clears the managed proxy URL"
+                Assert-True ($maintenanceLines[5] -eq 'MANAGED=') "Windows $maintenanceCommand clears the managed-session marker"
             }
             Remove-Item -LiteralPath $maintenanceLog -Force -ErrorAction SilentlyContinue
             $maintenanceSavedPath = $env:PATH
@@ -380,8 +387,8 @@ exit 1
             } finally { $env:PATH = $maintenanceSavedPath }
             Assert-True ($verboseMaintenanceExit -eq 0) 'global options before maintenance bypass missing configuration and stale Node'
             $verboseMaintenanceLines = @([IO.File]::ReadAllLines($maintenanceLog))
-            Assert-True ($verboseMaintenanceLines[0] -eq 'ARGS=--verbose mcp list') 'global options preserve exact maintenance argv'
-            Assert-True ($verboseMaintenanceLines[1] -eq 'BASE=' -and $verboseMaintenanceLines[2] -eq 'MANAGED=') 'global-option maintenance launch receives no proxy or managed session injection'
+            Assert-True ($verboseMaintenanceLines[0] -eq 'ARG1=--verbose' -and $verboseMaintenanceLines[1] -eq 'ARG2=mcp' -and $verboseMaintenanceLines[2] -eq 'ARG3=list' -and $verboseMaintenanceLines[3] -eq 'ARG4=') 'global options preserve exact maintenance argv'
+            Assert-True ($verboseMaintenanceLines[4] -eq 'BASE=' -and $verboseMaintenanceLines[5] -eq 'MANAGED=') 'global-option maintenance launch receives no proxy or managed session injection'
         } finally {
             if ($null -eq $savedConfigDir) { Remove-Item Env:CLAUDEX_CONFIG_DIR -ErrorAction SilentlyContinue } else { $env:CLAUDEX_CONFIG_DIR = $savedConfigDir }
             if ($null -eq $savedSettingsFile) { Remove-Item Env:CLAUDEX_SETTINGS_FILE -ErrorAction SilentlyContinue } else { $env:CLAUDEX_SETTINGS_FILE = $savedSettingsFile }
@@ -416,9 +423,9 @@ exit 1
             & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') codex native-codex arg-two 2>&1 | Out-Null
             Assert-True ($LASTEXITCODE -eq 37) 'native Codex route preserves the child exit code'
             $nativeCodexLines = @([IO.File]::ReadAllLines($nativeCodexLog))
-            Assert-True ($nativeCodexLines[0] -eq 'ARGS=native-codex arg-two') 'native Codex route preserves exact argv'
-            Assert-True ($nativeCodexLines[1] -eq 'BASE=' -and $nativeCodexLines[2] -eq 'AUTH_TOKEN=') 'managed native Codex route clears provider credentials'
-            Assert-True ($nativeCodexLines[3] -eq 'PROXY_TOKEN=' -and $nativeCodexLines[4] -eq 'MANAGED=' -and $nativeCodexLines[5] -eq 'BUN=') 'managed native Codex route clears proxy, session, and preload state'
+            Assert-True ($nativeCodexLines[0] -eq 'ARG1=native-codex' -and $nativeCodexLines[1] -eq 'ARG2=arg-two' -and $nativeCodexLines[2] -eq 'ARG3=') 'native Codex route preserves exact argv'
+            Assert-True ($nativeCodexLines[3] -eq 'BASE=' -and $nativeCodexLines[4] -eq 'AUTH_TOKEN=') 'managed native Codex route clears provider credentials'
+            Assert-True ($nativeCodexLines[5] -eq 'PROXY_TOKEN=' -and $nativeCodexLines[6] -eq 'MANAGED=' -and $nativeCodexLines[7] -eq 'BUN=') 'managed native Codex route clears proxy, session, and preload state'
 
             $nativeClaudeLog = Join-Path $temporary 'native-claude.log'
             $env:FAKE_CLAUDE_NATIVE_LOG = $nativeClaudeLog
@@ -426,9 +433,9 @@ exit 1
             & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') claude native-claude arg-two 2>&1 | Out-Null
             Assert-True ($LASTEXITCODE -eq 29) 'native Claude route preserves the child exit code'
             $nativeClaudeLines = @([IO.File]::ReadAllLines($nativeClaudeLog))
-            Assert-True ($nativeClaudeLines[0] -eq 'ARGS=native-claude arg-two') 'native Claude route preserves exact argv'
-            Assert-True ($nativeClaudeLines[1] -eq 'BASE=' -and $nativeClaudeLines[2] -eq 'AUTH_TOKEN=' -and $nativeClaudeLines[3] -eq 'PROXY_TOKEN=') 'managed native Claude route clears provider and proxy credentials'
-            Assert-True ($nativeClaudeLines[4] -eq 'MANAGED=' -and $nativeClaudeLines[5] -eq 'BUN=--preload C:/user/preload.cjs') 'managed native Claude route clears its session marker and only its own preload'
+            Assert-True ($nativeClaudeLines[0] -eq 'ARG1=native-claude' -and $nativeClaudeLines[1] -eq 'ARG2=arg-two' -and $nativeClaudeLines[2] -eq 'ARG3=') 'native Claude route preserves exact argv'
+            Assert-True ($nativeClaudeLines[3] -eq 'BASE=' -and $nativeClaudeLines[4] -eq 'AUTH_TOKEN=' -and $nativeClaudeLines[5] -eq 'PROXY_TOKEN=') 'managed native Claude route clears provider and proxy credentials'
+            Assert-True ($nativeClaudeLines[6] -eq 'MANAGED=' -and $nativeClaudeLines[7] -eq 'BUN=--preload C:/user/preload.cjs') 'managed native Claude route clears its session marker and only its own preload'
 
             Remove-Item Env:CLAUDEX_MANAGED_SESSION -ErrorAction SilentlyContinue
             $env:ANTHROPIC_BASE_URL = 'https://caller-provider.invalid'
@@ -445,17 +452,17 @@ exit 1
             & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --remote-control hosted-session 2>&1 | Out-Null
             Assert-True ($LASTEXITCODE -eq 23) 'Remote Control route preserves the native Claude exit code'
             $remoteLines = @([IO.File]::ReadAllLines($nativeClaudeLog))
-            Assert-True ($remoteLines[0] -eq 'ARGS=--remote-control hosted-session') 'Remote Control route preserves exact Claude argv'
-            Assert-True ($remoteLines[1] -eq 'BASE=' -and $remoteLines[2] -eq 'AUTH_TOKEN=' -and $remoteLines[3] -eq 'PROXY_TOKEN=') 'Remote Control forces a first-party provider boundary'
-            Assert-True ($remoteLines[5] -eq 'BUN=--preload C:/user/native-preload.cjs') 'Remote Control preserves caller-owned native Bun options'
-            Assert-True ($remoteLines[6] -eq 'PROVIDERS=|||||') 'Remote Control clears alternate provider selectors and base URLs'
+            Assert-True ($remoteLines[0] -eq 'ARG1=--remote-control' -and $remoteLines[1] -eq 'ARG2=hosted-session' -and $remoteLines[2] -eq 'ARG3=') 'Remote Control route preserves exact Claude argv'
+            Assert-True ($remoteLines[3] -eq 'BASE=' -and $remoteLines[4] -eq 'AUTH_TOKEN=' -and $remoteLines[5] -eq 'PROXY_TOKEN=') 'Remote Control forces a first-party provider boundary'
+            Assert-True ($remoteLines[7] -eq 'BUN=--preload C:/user/native-preload.cjs') 'Remote Control preserves caller-owned native Bun options'
+            Assert-True ($remoteLines[8] -eq 'PROVIDERS=|||||') 'Remote Control clears alternate provider selectors and base URLs'
 
             $env:FAKE_CLAUDE_NATIVE_EXIT = '19'
             & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') ultrareview review-target 2>&1 | Out-Null
             Assert-True ($LASTEXITCODE -eq 19) 'Ultrareview route preserves the native Claude exit code'
             $ultrareviewLines = @([IO.File]::ReadAllLines($nativeClaudeLog))
-            Assert-True ($ultrareviewLines[0] -eq 'ARGS=ultrareview review-target') 'Ultrareview route preserves exact Claude argv'
-            Assert-True ($ultrareviewLines[1] -eq 'BASE=' -and $ultrareviewLines[2] -eq 'AUTH_TOKEN=' -and $ultrareviewLines[3] -eq 'PROXY_TOKEN=') 'Ultrareview forces a first-party provider boundary'
+            Assert-True ($ultrareviewLines[0] -eq 'ARG1=ultrareview' -and $ultrareviewLines[1] -eq 'ARG2=review-target' -and $ultrareviewLines[2] -eq 'ARG3=') 'Ultrareview route preserves exact Claude argv'
+            Assert-True ($ultrareviewLines[3] -eq 'BASE=' -and $ultrareviewLines[4] -eq 'AUTH_TOKEN=' -and $ultrareviewLines[5] -eq 'PROXY_TOKEN=') 'Ultrareview forces a first-party provider boundary'
         } finally {
             foreach ($nativeBoundaryName in $nativeBoundaryEnvironment.Keys) {
                 $nativeBoundaryValue = $nativeBoundaryEnvironment[$nativeBoundaryName]
