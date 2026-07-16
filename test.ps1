@@ -381,7 +381,7 @@ exit 1
                 Assert-True ($maintenanceLines[0] -eq "ARG1=$maintenanceCommand" -and $maintenanceLines[1] -eq 'ARG2=maintenance-sentinel' -and $maintenanceLines[2] -eq 'ARG3=' -and $maintenanceLines[3] -eq 'ARG4=') "Windows $maintenanceCommand preserves exact Claude argv without managed flags"
                 Assert-True ($maintenanceLines[4] -eq 'BUN=--preload C:/user/preload.cjs') "Windows $maintenanceCommand preserves caller owned Bun options"
                 Assert-True ($maintenanceLines[5] -eq 'BASE=') "Windows $maintenanceCommand clears the managed proxy URL"
-                Assert-True ($maintenanceLines[6] -eq 'MANAGED=') "Windows $maintenanceCommand clears the managed-session marker"
+                Assert-True ($maintenanceLines[6] -eq 'MANAGED=') "Windows $maintenanceCommand clears the managed session marker"
             }
             Remove-Item -LiteralPath $maintenanceLog -Force -ErrorAction SilentlyContinue
             $maintenanceSavedPath = $env:PATH
@@ -393,7 +393,7 @@ exit 1
             Assert-True ($verboseMaintenanceExit -eq 0) 'global options before maintenance bypass missing configuration and stale Node'
             $verboseMaintenanceLines = @([IO.File]::ReadAllLines($maintenanceLog))
             Assert-True ($verboseMaintenanceLines[0] -eq 'ARG1=--verbose' -and $verboseMaintenanceLines[1] -eq 'ARG2=mcp' -and $verboseMaintenanceLines[2] -eq 'ARG3=list' -and $verboseMaintenanceLines[3] -eq 'ARG4=') 'global options preserve exact maintenance argv'
-            Assert-True ($verboseMaintenanceLines[4] -eq 'BUN=--preload C:/user/preload.cjs' -and $verboseMaintenanceLines[5] -eq 'BASE=' -and $verboseMaintenanceLines[6] -eq 'MANAGED=') 'global-option maintenance launch receives no proxy or managed session injection'
+            Assert-True ($verboseMaintenanceLines[4] -eq 'BUN=--preload C:/user/preload.cjs' -and $verboseMaintenanceLines[5] -eq 'BASE=' -and $verboseMaintenanceLines[6] -eq 'MANAGED=') 'global option maintenance launch receives no proxy or managed session injection'
         } finally {
             if ($null -eq $savedConfigDir) { Remove-Item Env:CLAUDEX_CONFIG_DIR -ErrorAction SilentlyContinue } else { $env:CLAUDEX_CONFIG_DIR = $savedConfigDir }
             if ($null -eq $savedSettingsFile) { Remove-Item Env:CLAUDEX_SETTINGS_FILE -ErrorAction SilentlyContinue } else { $env:CLAUDEX_SETTINGS_FILE = $savedSettingsFile }
@@ -725,11 +725,13 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
     }
     Assert-True ($userSubagentOutput.Contains('SUBAGENT=caller-owned-subagent')) 'managed launch preserves an explicit caller subagent model'
 
-    $delimiterCommandLine = '"' + (Join-Path $root 'claudex.cmd') + '" --terra -- --safe-mode --agents --permission-mode --model literal-prompt-token'
-    $delimiterOutput = (& $env:ComSpec /d /s /c $delimiterCommandLine | Out-String)
+    $delimiterCommandLine = '""' + (Join-Path $root 'claudex.cmd') + '" --terra -- --safe-mode --agents --permission-mode --model literal-prompt-token"'
+    $delimiterOutput = (& $env:ComSpec /d /s /c $delimiterCommandLine 2>&1 | Out-String)
+    $delimiterExit = $LASTEXITCODE
+    Assert-True ($delimiterExit -eq 0) "installed Windows delimiter route exits successfully; output=$delimiterOutput"
     Assert-True ($delimiterOutput.Contains('"Terra (high)"')) "flag like prompt text after the delimiter does not disable managed agents; output=$delimiterOutput"
-    Assert-True ($delimiterOutput.Contains('--permission-mode auto')) 'flag-like prompt text after the delimiter does not disable managed permissions'
-    Assert-True ($delimiterOutput.Contains('--model gpt-5.6-terra')) 'flag-like model text after the delimiter does not replace the selected startup model'
+    Assert-True ($delimiterOutput.Contains('--permission-mode auto')) 'flag like prompt text after the delimiter does not disable managed permissions'
+    Assert-True ($delimiterOutput.Contains('--model gpt-5.6-terra')) 'flag like model text after the delimiter does not replace the selected startup model'
 
     $restrictedToolsOutput = (& (Join-Path $root 'claudex.ps1') --tools '' --print restricted-tools-test | Out-String)
     Assert-True (-not $restrictedToolsOutput.Contains('Before every final answer, call TaskList')) 'restricted tool surfaces do not receive impossible task lifecycle requirements'
