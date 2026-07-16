@@ -999,6 +999,8 @@ process.stdout.write(JSON.stringify({
         $env:FAKE_PROXY_START_LOG = $proxyStartLog
         $env:CLAUDEX_TEST_PROXY_REACHABLE_FILE = $proxyReady
         $watcherErrorLog = Join-Path $temporary 'windows-proxy-watcher-errors.log'
+        $watcherOutputLog = Join-Path $temporary 'windows-proxy-watcher-output.log'
+        $watcherStandardErrorLog = Join-Path $temporary 'windows-proxy-watcher-standard-error.log'
         $env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE = $watcherErrorLog
         $stateHashBefore = (Get-FileHash -LiteralPath (Join-Path $testConfig '.claude.json') -Algorithm SHA256).Hash
         $shellPath = (Get-Process -Id $PID).Path
@@ -1007,7 +1009,8 @@ process.stdout.write(JSON.stringify({
         $quotedLauncher = '"' + (Join-Path $root 'claudex.ps1') + '"'
         $watchArguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedLauncher,
             '-ClaudexInternalProxyWatchParentProcessId', [string] $dummyParent.Id)
-        $watcher = Start-Process -FilePath $shellPath -ArgumentList $watchArguments -PassThru -WindowStyle Hidden
+        $watcher = Start-Process -FilePath $shellPath -ArgumentList $watchArguments -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $watcherOutputLog -RedirectStandardError $watcherStandardErrorLog
         try {
             foreach ($attempt in 1..100) {
                 if (Test-Path -LiteralPath $proxyReady -PathType Leaf) { break }
@@ -1016,7 +1019,11 @@ process.stdout.write(JSON.stringify({
             if (-not (Test-Path -LiteralPath $proxyReady -PathType Leaf)) {
                 $watcher.Refresh()
                 $watchErrors = if (Test-Path -LiteralPath $watcherErrorLog) { Get-Content -LiteralPath $watcherErrorLog -Raw } else { '' }
-                throw "assertion failed: Windows proxy watcher recovered a refused connection; watcherExited=$($watcher.HasExited); watcherErrors=$watchErrors"
+                if ($watcher.HasExited) { $watcher.WaitForExit() }
+                $watcherOutput = if (Test-Path -LiteralPath $watcherOutputLog) { Get-Content -LiteralPath $watcherOutputLog -Raw } else { '' }
+                $watcherStandardError = if (Test-Path -LiteralPath $watcherStandardErrorLog) { Get-Content -LiteralPath $watcherStandardErrorLog -Raw } else { '' }
+                $dummyParent.Refresh()
+                throw "assertion failed: Windows proxy watcher recovered a refused connection; watcherExited=$($watcher.HasExited); parentExited=$($dummyParent.HasExited); watcherErrors=$watchErrors; stdout=$watcherOutput; stderr=$watcherStandardError"
             }
             Start-Sleep -Milliseconds 300
             $watcher.Refresh()
