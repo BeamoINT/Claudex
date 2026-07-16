@@ -66,10 +66,11 @@ public static class ClaudexTestCurl
             if ($firstArgument -eq '--version') { Write-Output '2.1.210 (test)'; return }
             if ($firstArgument -eq '--help') { Write-Output '--model --agents --append-system-prompt --permission-mode --settings --effort'; return }
             if ($firstArgument -eq 'auto-mode' -and $args.Count -gt 1 -and $args[1] -eq 'defaults') {
+                if ($env:FAKE_AUTO_MODE_DEFAULTS_FAIL -eq '1') { $global:LASTEXITCODE = 1; return }
                 if ($env:FAKE_AUTO_MODE_DEFAULT_VERSION -eq '2') {
-                    Write-Output '{"allow":["Updated default allow rule"],"environment":["Updated default environment rule"],"soft_deny":["Updated soft deny"],"hard_deny":["Updated hard deny"]}'
+                    Write-Output '{"allow":["Updated default allow rule"],"environment":["Updated default environment rule"],"soft_deny":["Updated soft deny"],"hard_deny":["Data Exfiltration: updated hard deny"]}'
                 } else {
-                    Write-Output '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
+                    Write-Output '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Data Exfiltration: default hard deny"]}'
                 }
                 return
             }
@@ -103,6 +104,7 @@ public static class ClaudexTestCurl
             Write-Output "COMPACT=$env:CLAUDE_CODE_AUTO_COMPACT_WINDOW"
             Write-Output "NO_FLICKER=$env:CLAUDE_CODE_NO_FLICKER"
             Write-Output "ACCESSIBILITY=$env:CLAUDE_CODE_ACCESSIBILITY"
+            Write-Output "DISABLE_1M=$env:CLAUDE_CODE_DISABLE_1M_CONTEXT"
             Write-Output "OPUS=$env:ANTHROPIC_DEFAULT_OPUS_MODEL"
             Write-Output "OPUS_NAME=$env:ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"
             Write-Output "POWERSHELL_TOOL=$env:CLAUDE_CODE_USE_POWERSHELL_TOOL"
@@ -178,7 +180,7 @@ if [ "${1:-}" = "--help" ]; then
   exit 0
 fi
 if [ "${1:-}" = "auto-mode" ] && [ "${2:-}" = "defaults" ]; then
-  printf '%s\n' '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
+  printf '%s\n' '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Data Exfiltration: default hard deny"]}'
   exit 0
 fi
 if [ "${1:-}" = "update" ]; then exit 0; fi
@@ -191,6 +193,7 @@ printf '%s\n' "CONTEXT=${CLAUDE_CODE_MAX_CONTEXT_TOKENS}"
 printf '%s\n' "COMPACT=${CLAUDE_CODE_AUTO_COMPACT_WINDOW}"
 printf '%s\n' "NO_FLICKER=${CLAUDE_CODE_NO_FLICKER}"
 printf '%s\n' "ACCESSIBILITY=${CLAUDE_CODE_ACCESSIBILITY}"
+printf '%s\n' "DISABLE_1M=${CLAUDE_CODE_DISABLE_1M_CONTEXT:-}"
 printf '%s\n' "OPUS=${ANTHROPIC_DEFAULT_OPUS_MODEL}"
 printf '%s\n' "OPUS_NAME=${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME}"
 printf '%s\n' "POWERSHELL_TOOL=${CLAUDE_CODE_USE_POWERSHELL_TOOL}"
@@ -229,16 +232,62 @@ exit 1
     Remove-Item Env:CLAUDEX_AUTO_COMPACT_WINDOW -ErrorAction SilentlyContinue
     Remove-Item Env:CLAUDEX_MOUSE_POINTER_SHAPE -ErrorAction SilentlyContinue
 
+    $authRecoveryHelper = Join-Path $temporary 'auth-recovery-helper.ps1'
+    [IO.File]::WriteAllText($authRecoveryHelper, @'
+param(
+    [Parameter(Position = 0)] [string] $Action,
+    [Parameter(ValueFromRemainingArguments = $true)] [string[]] $Remaining
+)
+Add-Content -LiteralPath $env:CLAUDEX_TEST_AUTH_RECOVERY_LOG -Value $Action
+switch ($Action) {
+    'sync' {
+        if (-not (Test-Path -LiteralPath $env:CLAUDEX_TEST_AUTH_RECOVERY_MARKER -PathType Leaf)) {
+            New-Item -Path $env:CLAUDEX_TEST_AUTH_RECOVERY_MARKER -ItemType File | Out-Null
+            exit 11
+        }
+        exit 0
+    }
+    'login' { exit 0 }
+    'watch' { exit 0 }
+    'status' { exit 0 }
+    default { exit 2 }
+}
+'@, $utf8)
+
+    $authRecoveryLog = Join-Path $temporary 'auth-recovery.log'
+    $authRecoveryMarker = Join-Path $temporary 'auth-recovery.marker'
+    $env:CLAUDEX_CODEX_SESSION_HELPER = $authRecoveryHelper
+    $env:CLAUDEX_TEST_AUTH_RECOVERY_LOG = $authRecoveryLog
+    $env:CLAUDEX_TEST_AUTH_RECOVERY_MARKER = $authRecoveryMarker
+    $env:CLAUDEX_TEST_TTY_INPUT = '1'
+    $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
+    $env:CLAUDEX_SKIP_AUTH_WATCHER = '1'
+    try {
+        $interactiveAuthOutput = (& (Join-Path $root 'claudex.ps1') --terra auth-recovery-test 2>&1 | Out-String)
+        Assert-True ($interactiveAuthOutput.Contains('Codex sign-in is required. Opening the official Codex browser login')) 'interactive startup explains and opens official Codex login'
+        Assert-True ($interactiveAuthOutput.Contains('AUTO=gpt-5.6-terra')) 'interactive startup retries after Codex login'
+        $interactiveAuthActions = @(Get-Content -LiteralPath $authRecoveryLog)
+        Assert-True (@($interactiveAuthActions | Where-Object { $_ -eq 'sync' }).Count -eq 2) 'interactive startup retries auth synchronization once'
+        Assert-True (@($interactiveAuthActions | Where-Object { $_ -eq 'login' }).Count -eq 1) 'interactive startup opens one login flow'
+    } finally {
+        Remove-Item Env:CLAUDEX_TEST_TTY_INPUT -ErrorAction SilentlyContinue
+        Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT -ErrorAction SilentlyContinue
+        Remove-Item Env:CLAUDEX_SKIP_AUTH_WATCHER -ErrorAction SilentlyContinue
+        Remove-Item Env:CLAUDEX_CODEX_SESSION_HELPER -ErrorAction SilentlyContinue
+        Remove-Item Env:CLAUDEX_TEST_AUTH_RECOVERY_LOG -ErrorAction SilentlyContinue
+        Remove-Item Env:CLAUDEX_TEST_AUTH_RECOVERY_MARKER -ErrorAction SilentlyContinue
+    }
+
     $sourceSettings = Get-Content -LiteralPath (Join-Path $root 'settings.json') -Raw | ConvertFrom-Json
-    Assert-True (@($sourceSettings.autoMode.environment | Where-Object { $_.StartsWith('User-designated task boundary:') }).Count -eq 1) 'auto-mode task boundary'
-    Assert-True (@($sourceSettings.autoMode.environment | Where-Object { $_.StartsWith('Explicitly approved development transfer:') }).Count -eq 1) 'auto-mode approved development transfer'
-    Assert-True (@($sourceSettings.autoMode.allow | Where-Object { $_.StartsWith('Explicit Action Approval:') }).Count -eq 1) 'auto-mode explicit approval'
-    Assert-True (@($sourceSettings.autoMode.allow | Where-Object { $_.Contains('approve that') }).Count -eq 1) 'auto-mode approval by reference'
-    Assert-True (@($sourceSettings.autoMode.allow | Where-Object { $_.StartsWith('Requested Agent Configuration:') }).Count -eq 1) 'auto-mode requested configuration'
+    Assert-True ($null -eq $sourceSettings.PSObject.Properties['autoMode']) 'shipped settings defer to complete upstream auto-mode defaults'
 
     $seedSettings = Get-Content -LiteralPath (Join-Path $testConfig 'settings.json') -Raw | ConvertFrom-Json
-    $seedSettings.autoMode.allow = @($seedSettings.autoMode.allow) + @('User custom allow rule')
-    $seedSettings.autoMode.environment = @($seedSettings.autoMode.environment) + @('User custom environment rule')
+    $seedSettings | Add-Member -NotePropertyName autoMode -NotePropertyValue ([pscustomobject]@{
+        allow = @('User custom allow rule')
+        environment = @('User custom environment rule')
+        soft_deny = @('User custom soft deny rule')
+        hard_deny = @('User custom hard deny rule')
+    })
     [IO.File]::WriteAllText((Join-Path $testConfig 'settings.json'), ($seedSettings | ConvertTo-Json -Depth 100), $utf8)
 
     $output = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
@@ -252,11 +301,12 @@ exit 1
     Assert-True ($output.Contains('BG=gpt-5.6-luna')) 'background classifier'
     Assert-True ($output.Contains('SUBAGENT=gpt-5.6-terra')) 'subagent model'
     Assert-True ($output.Contains('CONCURRENCY=3')) 'tool concurrency'
-    Assert-True ($output.Contains('RETRIES=4')) 'bounded retries'
+    Assert-True ($output.Contains('RETRIES=15')) 'bounded retries cover bridge recovery'
     Assert-True ($output.Contains('CONTEXT=400000')) 'context window'
     Assert-True ($output.Contains('COMPACT=280000')) 'compaction window'
     Assert-True ($output.Contains('NO_FLICKER=1')) 'no-flicker rendering'
     Assert-True ($output.Contains('ACCESSIBILITY=1')) 'native terminal cursor'
+    Assert-True ($output.Contains('DISABLE_1M=1')) 'proxied sessions hide the unsupported Anthropic 1M selector'
     Assert-True ($output.Contains('OPUS=gpt-5.6-sol')) 'single Sol alias'
     Assert-True ($output.Contains('OPUS_NAME=GPT-5.6 Sol')) 'friendly name'
     Assert-True ($output.Contains('BUN=--preload')) 'proxied session preload'
@@ -285,8 +335,14 @@ exit 1
         Assert-True ($configuredModel.Contains('--model gpt-5.6-luna')) 'configured default model routes the launch'
         $configuredModelOverride = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
         Assert-True ($configuredModelOverride.Contains('--model gpt-5.6-terra')) 'explicit model shortcut overrides configured default'
-        $configuredChrome = (& (Join-Path $root 'claudex.ps1') --claude-chrome --print chrome-test | Out-String)
+        $env:CLAUDE_CODE_DISABLE_1M_CONTEXT = 'inherited'
+        try {
+            $configuredChrome = (& (Join-Path $root 'claudex.ps1') --claude-chrome --print chrome-test | Out-String)
+            Assert-True ($env:CLAUDE_CODE_DISABLE_1M_CONTEXT -eq 'inherited') 'direct Chrome restores inherited 1M override'
+        }
+        finally { Remove-Item Env:CLAUDE_CODE_DISABLE_1M_CONTEXT -ErrorAction SilentlyContinue }
         Assert-True (-not $configuredChrome.Contains('--model gpt-5.6-luna')) 'direct Chrome ignores managed default model'
+        Assert-True ($configuredChrome.Contains('DISABLE_1M=') -and -not $configuredChrome.Contains('DISABLE_1M=inherited')) 'direct Chrome clears managed 1M override'
     } finally { Remove-Item Env:CLAUDEX_MODEL -ErrorAction SilentlyContinue }
     $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
     try { $interactiveWrapperOutput = (& (Join-Path $root 'claudex.ps1') --terra interactive-render-test | Out-String) }
@@ -299,6 +355,13 @@ exit 1
     Assert-True (@($composedSettings.autoMode.environment | Where-Object { $_ -eq 'Default environment rule' }).Count -eq 1) 'upstream auto-mode environment preserved'
     Assert-True (@($composedSettings.autoMode.environment | Where-Object { $_ -eq 'User custom environment rule' }).Count -eq 1) 'user auto-mode environment rule preserved'
     Assert-True (@($composedSettings.autoMode.environment | Where-Object { $_.StartsWith('Explicitly approved development transfer:') }).Count -eq 1) 'approved development transfer composed'
+    Assert-True (@($composedSettings.autoMode.soft_deny | Where-Object { $_ -eq 'Default soft deny' }).Count -eq 1) 'upstream soft deny preserved'
+    Assert-True (@($composedSettings.autoMode.soft_deny | Where-Object { $_ -eq 'User custom soft deny rule' }).Count -eq 1) 'user soft deny preserved'
+    Assert-True (@($composedSettings.autoMode.soft_deny | Where-Object { $_.StartsWith('Approved Private Development Transfer') }).Count -eq 1) 'approved private transfer is named-specific soft consent'
+    $managedHardDeny = @($composedSettings.autoMode.hard_deny | Where-Object { $_.StartsWith('Data Exfiltration:') -and $_.Contains('Claudex scoped private development transfer exception:') })
+    Assert-True ($managedHardDeny.Count -eq 1) 'data exfiltration hard deny has one scoped exception'
+    Assert-True ($managedHardDeny[0].Contains('public destination') -and $managedHardDeny[0].Contains('credentials or secrets') -and $managedHardDeny[0].Contains('different host')) 'hard-deny exception retains protected destinations and data'
+    Assert-True (@($composedSettings.autoMode.hard_deny | Where-Object { $_ -eq 'User custom hard deny rule' }).Count -eq 1) 'user hard deny preserved'
     $env:FAKE_AUTO_MODE_DEFAULT_VERSION = '2'
     try { & (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-Null }
     finally { Remove-Item Env:FAKE_AUTO_MODE_DEFAULT_VERSION -ErrorAction SilentlyContinue }
@@ -309,6 +372,11 @@ exit 1
     Assert-True (@($updatedSettings.autoMode.environment | Where-Object { $_ -eq 'Default environment rule' }).Count -eq 0) 'removed upstream environment default does not persist'
     Assert-True (@($updatedSettings.autoMode.environment | Where-Object { $_ -eq 'Updated default environment rule' }).Count -eq 1) 'updated upstream environment default is active'
     Assert-True (@($updatedSettings.autoMode.environment | Where-Object { $_ -eq 'User custom environment rule' }).Count -eq 1) 'custom environment survives upstream replacement'
+    Assert-True (@($updatedSettings.autoMode.soft_deny | Where-Object { $_ -eq 'Default soft deny' }).Count -eq 0) 'removed upstream soft deny does not persist'
+    Assert-True (@($updatedSettings.autoMode.soft_deny | Where-Object { $_ -eq 'Updated soft deny' }).Count -eq 1) 'updated upstream soft deny is active'
+    Assert-True (@($updatedSettings.autoMode.soft_deny | Where-Object { $_ -eq 'User custom soft deny rule' }).Count -eq 1) 'custom soft deny survives upstream replacement'
+    Assert-True (@($updatedSettings.autoMode.hard_deny | Where-Object { $_.StartsWith('Data Exfiltration: updated hard deny') -and $_.Contains('Claudex scoped private development transfer exception:') }).Count -eq 1) 'updated hard deny receives scoped exception once'
+    Assert-True (@($updatedSettings.autoMode.hard_deny | Where-Object { $_ -eq 'User custom hard deny rule' }).Count -eq 1) 'custom hard deny survives upstream replacement'
 
     if ($isWindowsPlatform) {
         $proxyReady = Join-Path $temporary 'windows-proxy-ready'
@@ -398,7 +466,13 @@ exit 1
     $windowsLauncher = [IO.File]::ReadAllText((Join-Path $root 'claudex.ps1'))
     Assert-True ($windowsLauncher.Contains('if ($rewriteResumeFooter) { Update-ResumeFooter $resumeMarker }')) 'resume footer is rewritten independently of exit status'
     Assert-True ($windowsLauncher.Contains("Join-Path `$configDir 'auto-mode-defaults.json'")) 'Windows uses the shared auto-mode defaults snapshot schema'
-    Assert-True ($windowsLauncher.Contains('try { Ensure-Proxy $startModel }')) 'selected launch model is checked without driving proxy health'
+    Assert-True ($windowsLauncher.Contains('try { Ensure-ProxyForLaunch $startModel }')) 'foreground startup owns interactive Codex login recovery'
+    Assert-True ($windowsLauncher.Contains('if ($env:CI -and $env:CI -notin')) 'CI startup suppresses interactive Codex login'
+    Assert-True ($windowsLauncher.Contains('Codex sign-in is required. Run `claudex --login` in an interactive terminal')) 'noninteractive startup gives prompt-free login guidance'
+    $watchLoopStart = $windowsLauncher.IndexOf('function Invoke-ProxyWatchLoop')
+    $watchLoopEnd = $windowsLauncher.IndexOf('function Start-ProxyWatcher', $watchLoopStart)
+    $watchLoopSource = $windowsLauncher.Substring($watchLoopStart, $watchLoopEnd - $watchLoopStart)
+    Assert-True ($watchLoopSource.Contains('Ensure-Proxy') -and -not $watchLoopSource.Contains('Ensure-ProxyForLaunch')) 'background proxy recovery remains prompt-free'
     Assert-True ($windowsLauncher.Contains("if (`$RequiredModel -eq 'opusplan') { @('gpt-5.6-sol', 'gpt-5.6-terra') }")) 'Solplan health checks its two concrete backing models'
     Assert-True ($windowsLauncher.Contains('ConvertTo-WindowsCommandLineArgument')) 'Windows native argv serializer is installed'
     Assert-True ($windowsLauncher.Contains('if ($null -eq $Value -or $Value.Length -eq 0) { return ''""'' }')) 'Windows native argv serializer preserves empty arguments'
@@ -433,9 +507,22 @@ exit 1
     Assert-True (-not $bare.Contains('--append-system-prompt')) 'bare mode leader prompt suppressed'
     Assert-True (-not $bare.Contains('--permission-mode')) 'bare mode permission override suppressed'
 
-    $maintenance = (& (Join-Path $root 'claudex.ps1') mcp list | Out-String)
+    $explicitAgents = (& (Join-Path $root 'claudex.ps1') --agents '{}' test-prompt | Out-String)
+    Assert-True ($explicitAgents.Contains('--agents {}')) 'explicit custom agents preserved'
+    Assert-True (-not $explicitAgents.Contains('"Terra"')) 'managed agents suppressed by explicit custom agents'
+    Assert-True ($explicitAgents.Contains('Ask as few questions as possible')) 'custom agents retain low-question leader guard'
+    Assert-True ($explicitAgents.Contains('Never repeat a question the user already answered')) 'custom agents retain no-repeat question guard'
+    Assert-True ($explicitAgents.Contains("Treat the user's explicit approval as decisive")) 'custom agents retain explicit-approval guard'
+
+    $env:CLAUDE_CODE_DISABLE_1M_CONTEXT = 'inherited'
+    try {
+        $maintenance = (& (Join-Path $root 'claudex.ps1') mcp list | Out-String)
+        Assert-True ($env:CLAUDE_CODE_DISABLE_1M_CONTEXT -eq 'inherited') 'maintenance command restores inherited 1M override'
+    }
+    finally { Remove-Item Env:CLAUDE_CODE_DISABLE_1M_CONTEXT -ErrorAction SilentlyContinue }
     Assert-True (-not $maintenance.Contains('BASE=http')) 'maintenance command bypasses model proxy'
     Assert-True (-not $maintenance.Contains('--agents')) 'maintenance command bypasses session injection'
+    Assert-True ($maintenance.Contains('DISABLE_1M=') -and -not $maintenance.Contains('DISABLE_1M=inherited')) 'maintenance command clears managed 1M override'
 
     $state = Get-Content -LiteralPath (Join-Path $testConfig '.claude.json') -Raw | ConvertFrom-Json
     $stateIds = @($state.additionalModelOptionsCache | ForEach-Object { $_.value })
@@ -443,6 +530,7 @@ exit 1
     Assert-True (@($stateIds | Where-Object { $_ -eq 'gpt-5.6-terra' }).Count -eq 1) 'one Terra cache entry'
     Assert-True (@($stateIds | Where-Object { $_ -eq 'gpt-5.6-luna' }).Count -eq 1) 'one Luna cache entry'
     Assert-True (@($stateIds | Where-Object { $_ -eq 'opusplan' }).Count -eq 1) 'one Solplan cache entry'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $testConfig 'run') 'model-display.lock'))) 'model cache lock released'
 
     $doctor = (& (Join-Path $root 'claudex.ps1') --doctor | Out-String)
     Assert-True ($doctor.Contains('CLIProxyAPI: CLIProxyAPI test')) 'proxy version first line'
@@ -454,6 +542,7 @@ exit 1
     Assert-True ($doctor.Contains('Rendering: no-flicker mode with native terminal cursor')) 'doctor rendering hardening'
     Assert-True ($doctor.Contains('Codex authentication: ready (shared ChatGPT session)')) 'doctor shared Codex auth'
     Assert-True ($doctor.Contains('Claude Code updates: on')) 'doctor auto updates'
+    Assert-True ($doctor.Contains('Claudex updates: on')) 'doctor Claudex self-updates'
     Assert-True ($doctor.Contains('Plan mode policy: conservative')) 'doctor plan policy'
     Assert-True ($doctor.Contains('gpt-5.6-terra: advertised')) 'doctor models'
 
@@ -577,6 +666,23 @@ exit 1
     Assert-True ($status.Contains('Codex 7d 18% left')) 'status usage limits'
     Assert-True (-not $status.Contains("$([char]27)]0;")) 'status line excludes terminal-title control sequence'
 
+    [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\summary'), "Codex 7d 18% left $([char]0x00B7) Review 7d 9% left $([char]0x00B7) Extra-long-capacity-window 30d 8% left`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\last-success'), "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())`n", $utf8)
+    $env:CLAUDEX_STATUSLINE_COLUMNS = '40'
+    try { $narrowStatus = ($statusJson | & (Join-Path $root 'statusline.ps1') | Out-String).TrimEnd() }
+    finally { Remove-Item Env:CLAUDEX_STATUSLINE_COLUMNS -ErrorAction SilentlyContinue }
+    $narrowPlain = [regex]::Replace($narrowStatus, "$([char]27)\[[0-9;]*m", '')
+    Assert-True ($narrowPlain.Length -le 40) 'narrow status stays within the available columns'
+    Assert-True ($narrowPlain.Contains('GPT-5.6 Sol') -and $narrowPlain.Contains('42% context')) 'narrow status preserves model and context'
+    Assert-True (-not $narrowPlain.Contains('Extra-long-capacity-window')) 'narrow status drops the long usage tail'
+    Assert-True ($narrowStatus.Contains("$([char]27)[38;5;81mClaudex$([char]27)[0m")) 'narrow status preserves ANSI boundaries'
+
+    $env:CLAUDEX_STATUSLINE_COLUMNS = '18'
+    try { $tinyStatus = ($statusJson | & (Join-Path $root 'statusline.ps1') | Out-String).TrimEnd() }
+    finally { Remove-Item Env:CLAUDEX_STATUSLINE_COLUMNS -ErrorAction SilentlyContinue }
+    $tinyPlain = [regex]::Replace($tinyStatus, "$([char]27)\[[0-9;]*m", '')
+    Assert-True ($tinyPlain.Length -le 18 -and $tinyPlain.Contains([string][char]0x2026)) 'tiny status truncates without wrapping'
+
     $env:CLAUDEX_MODEL_MODE = 'solplan'
     $solplanStatus = ($statusJson | & (Join-Path $root 'statusline.ps1') | Out-String)
     Remove-Item Env:CLAUDEX_MODEL_MODE
@@ -605,6 +711,10 @@ exit 1
     $packageManifest = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
     Assert-True ($packageVersion -eq $packageManifest.version) 'package-manager wrapper version'
 
+    $installScriptSource = Get-Content -LiteralPath (Join-Path $root 'install.ps1') -Raw
+    Assert-True ($installScriptSource.Contains("`$claudeInstalledBinDir = Join-Path `$env:USERPROFILE '.local\bin'")) 'Claude installer discovers its first-run bin directory'
+    Assert-True ($installScriptSource.Contains('@($codexInstalledBinDir, $claudeInstalledBinDir,')) 'Claude installer persists its first-run bin directory'
+
     $installHome = Join-Path $temporary 'install home'
     [IO.Directory]::CreateDirectory((Join-Path $installHome '.codex')) | Out-Null
     Copy-Item -LiteralPath (Join-Path $testCodexDir 'auth.json') -Destination (Join-Path $installHome '.codex\auth.json')
@@ -621,6 +731,8 @@ exit 1
     Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'usage-limit.ps1') -PathType Leaf) 'usage helper installed'
     Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'codex-session.ps1') -PathType Leaf) 'Codex session helper installed'
     Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'preload.cjs') -PathType Leaf) 'preload installed'
+    Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'self-update.ps1') -PathType Leaf) 'self-update helper installed'
+    Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'install.json') -PathType Leaf) 'install receipt written'
     Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'skills\usage-limit\SKILL.md') -PathType Leaf) 'usage skill installed'
     $installedSettings = Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'settings.json') -Raw | ConvertFrom-Json
     Assert-True ($installedSettings.statusLine.command.Contains('powershell.exe')) 'Windows status command'
@@ -634,6 +746,9 @@ exit 1
     Assert-True ($installedProxyConfig.Contains('request-retry: 3')) 'proxy retries transient upstream failures before surfacing an API error'
     Assert-True ($installedProxyConfig.Contains('transient-error-cooldown-seconds: 1')) 'proxy transient cooldown stays bounded'
     Assert-True ($installedProxyConfig.Contains('bootstrap-retries: 2')) 'proxy retries pre-stream failures'
+    $selfUpdateStatus = (& (Join-Path $root 'claudex.ps1') self-update --status | Out-String)
+    Assert-True ($selfUpdateStatus.Contains('Installed version: 1.4.0')) 'self-update status dispatch'
+    Assert-True ($selfUpdateStatus.Contains('Install method: git')) 'self-update install provenance'
 
     & node (Join-Path $root 'scripts\check-docs.mjs')
     Assert-True ($LASTEXITCODE -eq 0) 'community and documentation checks'

@@ -105,16 +105,46 @@ assert.equal(untouched.status, 0, untouched.stderr);
 assert.equal(untouched.stdout, machinePayload);
 assert.equal(untouched.stderr, 'Opus Plan Mode; claude --resume abc; /model opus');
 
-const splitOutput = spawnSync(process.execPath, ['-r', preloadPath, '-e', `
-  let callbacks = 0;
-  process.stdout.write(Buffer.from([0xf0, 0x9f]), () => { callbacks += 1; });
-  process.stdout.write(Buffer.from([0x98, 0x80]), () => {
-    callbacks += 1;
-    process.stdout.write('|callbacks=' + callbacks);
-  });
-`]);
-assert.equal(splitOutput.status, 0, splitOutput.stderr.toString());
-assert.deepEqual(splitOutput.stdout, Buffer.concat([Buffer.from('😀'), Buffer.from('|callbacks=2')]));
+// Output is an opaque byte stream. Exercise the exact cases that a text-based
+// write wrapper breaks: UTF-8 split across calls, invalid UTF-8, fullscreen
+// ANSI frames, offset Uint8Array views, managed-looking machine data, callback
+// order, and the native write return value.
+const opaqueParts = [
+  Buffer.from([0xf0, 0x9f]),
+  Buffer.from([0x98, 0x80]),
+  Buffer.from([0xf0, 0x28, 0x8c, 0x28]),
+  Buffer.from('\x1b[?1049h\x1b[2J\x1b[H/model opus\x1b[?1049l'),
+  Buffer.from('{"result":"Opus Plan Mo'),
+  Buffer.from('de","resume":"claude --res'),
+  Buffer.from('ume abc","model":"/model op'),
+  Buffer.from('us"}'),
+];
+const opaqueOutput = spawnSync(process.execPath, ['-r', preloadPath, '-e', `
+  const parts = ${JSON.stringify(opaqueParts.map((part) => part.toString('base64')))}
+    .map((part) => Buffer.from(part, 'base64'));
+  const callbackOrder = [];
+  const returnValues = [];
+  for (let index = 0; index < parts.length; index += 1) {
+    const padded = Buffer.concat([Buffer.from([0xaa, 0xbb]), parts[index], Buffer.from([0xcc])]);
+    const view = new Uint8Array(padded.buffer, padded.byteOffset + 2, parts[index].length);
+    returnValues.push(process.stdout.write(view, () => {
+      callbackOrder.push(index);
+      if (callbackOrder.length === parts.length) {
+        process.stderr.write(JSON.stringify({ callbackOrder, returnValues }));
+      }
+    }));
+  }
+`], { maxBuffer: 1024 * 1024 });
+assert.equal(opaqueOutput.status, 0, opaqueOutput.stderr.toString());
+assert.deepEqual(opaqueOutput.stdout, Buffer.concat(opaqueParts), 'stdout bytes are never decoded or rewritten');
+assert.deepEqual(
+  JSON.parse(opaqueOutput.stderr.toString()),
+  {
+    callbackOrder: [0, 1, 2, 3, 4, 5, 6, 7],
+    returnValues: [true, true, true, true, true, true, true, true],
+  },
+  'native write callbacks and return values are preserved',
+);
 
 // The pure compatibility helper remains available, but valid ANSI state must
 // survive it. Only the known malformed no-ESC SGR token is discarded.

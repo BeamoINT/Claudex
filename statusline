@@ -9,10 +9,11 @@ parsed=$(printf '%s' "$input" | jq -ejr '[
   (if .context_window.used_percentage == null then "" else (.context_window.used_percentage | floor | tostring) end),
   (.session_id // ""),
   (.context_window.total_input_tokens // 0 | tostring),
-  (.context_window.context_window_size // 0 | tostring)
-] | join("\u001f")' 2>/dev/null) || parsed=$'\x1f\x1f\x1f\x1f\x1f\x1f'
+  (.context_window.context_window_size // 0 | tostring),
+  (.columns // 0 | tostring)
+] | join("\u001f")' 2>/dev/null) || parsed=$'\x1f\x1f\x1f\x1f\x1f\x1f\x1f'
 
-IFS=$'\x1f' read -r model_id display_name effort context_percent session_id total_input_tokens context_window_size <<< "$parsed"
+IFS=$'\x1f' read -r model_id display_name effort context_percent session_id total_input_tokens context_window_size input_columns <<< "$parsed"
 
 stabilize_context_percent() {
   local candidate="$context_percent"
@@ -155,7 +156,63 @@ if [[ -z "$selected_model_mode" && -r "${CLAUDE_CONFIG_DIR:-$HOME/.config/claude
 fi
 if [[ "$selected_model_mode" == solplan ]]; then model_name="GPT-5.6 Solplan"; fi
 
-printf '\033[38;5;81mClaudex\033[0m · \033[1m%s\033[0m · %s effort' "$model_name" "$effort"
-if [[ -n "$context_percent" ]]; then printf ' · %s%% context' "$context_percent"; fi
-if [[ -n "$usage_summary" ]]; then printf ' · %s' "$usage_summary"; fi
-printf '\n'
+statusline_columns="${CLAUDEX_STATUSLINE_COLUMNS:-}"
+if [[ ! "$statusline_columns" =~ ^[1-9][0-9]*$ ]] && [[ "$input_columns" =~ ^[1-9][0-9]*$ ]]; then
+  statusline_columns="$input_columns"
+fi
+if [[ ! "$statusline_columns" =~ ^[1-9][0-9]*$ ]] && [[ "${COLUMNS:-}" =~ ^[1-9][0-9]*$ ]]; then
+  statusline_columns="$COLUMNS"
+fi
+if [[ ! "$statusline_columns" =~ ^[1-9][0-9]*$ ]] && [[ -r /dev/tty ]]; then
+  terminal_size=$(stty size </dev/tty 2>/dev/null || true)
+  terminal_columns="${terminal_size##* }"
+  if [[ "$terminal_columns" =~ ^[1-9][0-9]*$ ]]; then statusline_columns="$terminal_columns"; fi
+fi
+if [[ ! "$statusline_columns" =~ ^[1-9][0-9]*$ ]]; then statusline_columns=0; fi
+
+readonly brand_plain='Claudex'
+readonly brand_ansi=$'\033[38;5;81mClaudex\033[0m'
+readonly model_ansi=$'\033[1m'"$model_name"$'\033[0m'
+mandatory_plain="$brand_plain · $model_name"
+mandatory_ansi="$brand_ansi · $model_ansi"
+core_plain="$mandatory_plain · $effort effort"
+core_ansi="$mandatory_ansi · $effort effort"
+if [[ -n "$context_percent" ]]; then
+  core_plain+=" · ${context_percent}% context"
+  core_ansi+=" · ${context_percent}% context"
+fi
+full_plain="$core_plain"
+full_ansi="$core_ansi"
+if [[ -n "$usage_summary" ]]; then
+  full_plain+=" · $usage_summary"
+  full_ansi+=" · $usage_summary"
+fi
+
+rendered_plain="$full_plain"
+rendered_ansi="$full_ansi"
+if (( statusline_columns > 0 && ${#rendered_plain} > statusline_columns )); then
+  rendered_plain="$core_plain"
+  rendered_ansi="$core_ansi"
+fi
+if (( statusline_columns > 0 && ${#rendered_plain} > statusline_columns )) && [[ -n "$context_percent" ]]; then
+  rendered_plain="$mandatory_plain · ${context_percent}% context"
+  rendered_ansi="$mandatory_ansi · ${context_percent}% context"
+fi
+if (( statusline_columns > 0 && ${#rendered_plain} > statusline_columns )); then
+  rendered_plain="$mandatory_plain"
+  rendered_ansi="$mandatory_ansi"
+fi
+if (( statusline_columns > 0 && ${#rendered_plain} > statusline_columns )); then
+  prefix_plain="$brand_plain · "
+  available_model=$(( statusline_columns - ${#prefix_plain} ))
+  if (( available_model >= 2 )); then
+    shortened_model="${model_name:0:available_model-1}…"
+    rendered_plain="$prefix_plain$shortened_model"
+    rendered_ansi="$brand_ansi · "$'\033[1m'"$shortened_model"$'\033[0m'
+  else
+    rendered_plain="${brand_plain:0:statusline_columns}"
+    rendered_ansi=$'\033[38;5;81m'"$rendered_plain"$'\033[0m'
+  fi
+fi
+
+printf '%s\n' "$rendered_ansi"

@@ -59,10 +59,11 @@ if [[ "${1:-}" == "--help" ]]; then
   exit
 fi
 if [[ "${1:-}" == "auto-mode" && "${2:-}" == "defaults" ]]; then
+  [[ "${FAKE_AUTO_MODE_DEFAULTS_FAIL:-0}" != 1 ]] || exit 1
   if [[ "${FAKE_AUTO_MODE_DEFAULT_VERSION:-1}" == 2 ]]; then
-    printf '%s\n' '{"allow":["Updated default allow rule"],"environment":["Updated default environment rule"],"soft_deny":["Updated soft deny"],"hard_deny":["Updated hard deny"]}'
+    printf '%s\n' '{"allow":["Updated default allow rule"],"environment":["Updated default environment rule"],"soft_deny":["Updated soft deny"],"hard_deny":["Data Exfiltration: updated hard deny"]}'
   else
-    printf '%s\n' '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Default hard deny"]}'
+    printf '%s\n' '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Data Exfiltration: default hard deny"]}'
   fi
   exit
 fi
@@ -98,6 +99,12 @@ if [[ "${FAKE_PROXY_RECOVERY:-0}" == 1 ]]; then
   else printf '%s\n' 'PROXY_RECOVERED=0'
   fi
 fi
+if [[ "${FAKE_PROXY_TRANSIENT_ONCE:-0}" == 1 ]]; then
+  rm -f "$FAKE_PROXY_READY_FILE"
+  sleep 1.2
+  : > "$FAKE_PROXY_READY_FILE"
+  sleep 1.2
+fi
 printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
 printf '%s\n' "BG=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
 printf '%s\n' "SUBAGENT=${CLAUDE_CODE_SUBAGENT_MODEL}"
@@ -107,6 +114,7 @@ printf '%s\n' "CONTEXT=${CLAUDE_CODE_MAX_CONTEXT_TOKENS}"
 printf '%s\n' "COMPACT=${CLAUDE_CODE_AUTO_COMPACT_WINDOW}"
 printf '%s\n' "NO_FLICKER=${CLAUDE_CODE_NO_FLICKER}"
 printf '%s\n' "ACCESSIBILITY=${CLAUDE_CODE_ACCESSIBILITY}"
+printf '%s\n' "DISABLE_1M=${CLAUDE_CODE_DISABLE_1M_CONTEXT:-}"
 printf '%s\n' "OPUS=${ANTHROPIC_DEFAULT_OPUS_MODEL}"
 printf '%s\n' "OPUS_NAME=${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME}"
 printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
@@ -154,14 +162,79 @@ run_wrapper() {
     "$root/claudex" "$@"
 }
 
+auth_recovery_helper="$tmp/auth-recovery-helper"
+cat > "$auth_recovery_helper" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${1:-missing}" >> "$CLAUDEX_TEST_AUTH_RECOVERY_LOG"
+case "${1:-}" in
+  sync)
+    if [[ ! -e "$CLAUDEX_TEST_AUTH_RECOVERY_MARKER" ]]; then
+      : > "$CLAUDEX_TEST_AUTH_RECOVERY_MARKER"
+      exit 11
+    fi
+    ;;
+  login|watch|status) ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$auth_recovery_helper"
+
 bash -n "$root/claudex"
 bash -n "$root/statusline"
 bash -n "$root/usage-limit"
 bash -n "$root/install.sh"
+bash -n "$root/bootstrap.sh"
 sh -n "$root/install.zsh"
 node --check "$root/preload.cjs"
 node --check "$root/bin/claudex-package.mjs"
 node "$root/scripts/check-package.mjs"
+
+auth_recovery_log="$tmp/auth-recovery.log"
+auth_recovery_marker="$tmp/auth-recovery.marker"
+interactive_auth_output=$(
+  HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
+    CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=1 \
+    CLAUDEX_CODEX_SESSION_HELPER="$auth_recovery_helper" \
+    CLAUDEX_TEST_AUTH_RECOVERY_LOG="$auth_recovery_log" CLAUDEX_TEST_AUTH_RECOVERY_MARKER="$auth_recovery_marker" \
+    CLAUDEX_TEST_TTY_INPUT=1 CLAUDEX_TEST_TTY_OUTPUT=1 \
+    "$root/claudex" --terra auth-recovery-test 2>&1
+)
+[[ "$interactive_auth_output" == *'Codex sign-in is required. Opening the official Codex browser login'* ]]
+[[ "$interactive_auth_output" == *'AUTO=gpt-5.6-terra'* ]]
+[[ "$(grep -c '^sync$' "$auth_recovery_log")" == 2 ]]
+[[ "$(grep -c '^login$' "$auth_recovery_log")" == 1 ]]
+
+rm -f "$auth_recovery_log" "$auth_recovery_marker"
+if noninteractive_auth_output=$(
+  HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
+    CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=1 \
+    CLAUDEX_CODEX_SESSION_HELPER="$auth_recovery_helper" \
+    CLAUDEX_TEST_AUTH_RECOVERY_LOG="$auth_recovery_log" CLAUDEX_TEST_AUTH_RECOVERY_MARKER="$auth_recovery_marker" \
+    "$root/claudex" --terra auth-recovery-test 2>&1
+); then
+  printf '%s\n' 'expected noninteractive Codex auth failure to remain prompt-free' >&2
+  exit 1
+fi
+[[ "$noninteractive_auth_output" == *'Run `claudex --login` in an interactive terminal'* ]]
+[[ "$noninteractive_auth_output" != *'Opening the official Codex browser login'* ]]
+[[ "$(grep -c '^sync$' "$auth_recovery_log")" == 1 ]]
+! grep -q '^login$' "$auth_recovery_log"
+
+rm -f "$auth_recovery_log" "$auth_recovery_marker"
+if ci_auth_output=$(
+  HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
+    CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=1 CI=1 \
+    CLAUDEX_CODEX_SESSION_HELPER="$auth_recovery_helper" \
+    CLAUDEX_TEST_AUTH_RECOVERY_LOG="$auth_recovery_log" CLAUDEX_TEST_AUTH_RECOVERY_MARKER="$auth_recovery_marker" \
+    CLAUDEX_TEST_TTY_INPUT=1 CLAUDEX_TEST_TTY_OUTPUT=1 \
+    "$root/claudex" --terra auth-recovery-test 2>&1
+); then
+  printf '%s\n' 'expected CI Codex auth failure to remain prompt-free' >&2
+  exit 1
+fi
+[[ "$ci_auth_output" != *'Opening the official Codex browser login'* ]]
+! grep -q '^login$' "$auth_recovery_log"
 input_alias_output=$(CLAUDEX_TEST_TTY_INPUT=1 node -e '
   const preload = require(process.argv[1]);
   process.stdout.write(Buffer.from(preload.rewriteSolplanInput("/model solplan\r")).toString("hex"));
@@ -174,11 +247,7 @@ input_listener_output=$(printf '/model solplan\r' | CLAUDEX_TEST_TTY_INPUT=1 nod
 jq -e '
   .model == "opus"
   and .permissions.defaultMode == "auto"
-  and (.autoMode.environment | any(startswith("User-designated task boundary:")))
-  and (.autoMode.environment | any(startswith("Explicitly approved development transfer:")))
-  and (.autoMode.allow | any(startswith("Explicit Action Approval:")))
-  and (.autoMode.allow | any(contains("approve that")))
-  and (.autoMode.allow | any(startswith("Requested Agent Configuration:")))
+  and (.autoMode | not)
   and .autoCompactEnabled == true
   and .autoCompactWindow == 280000
   and .precomputeCompactionEnabled == true
@@ -193,8 +262,38 @@ jq -e '
   and (.env | not)
 ' "$root/settings.json" >/dev/null
 
-jq '.autoMode.allow += ["User custom allow rule"]
-  | .autoMode.environment += ["User custom environment rule"]' \
+legacy_auto_config="$tmp/legacy-auto-config"
+mkdir -p "$legacy_auto_config"
+cp "$tmp/home/.config/claudex/env" "$legacy_auto_config/env"
+jq '.autoMode = {
+    allow: ["Explicit Action Approval: legacy managed seed"],
+    environment: ["User-designated task boundary: legacy managed seed"]
+  }' "$root/settings.json" > "$legacy_auto_config/settings.json"
+HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CONFIG_DIR="$legacy_auto_config" \
+  CLAUDEX_SKIP_AUTO_UPDATE=1 FAKE_AUTO_MODE_DEFAULTS_FAIL=1 \
+  "$root/claudex" auto-mode config >/dev/null
+jq -e '.autoMode | not' "$legacy_auto_config/settings.json" >/dev/null
+
+custom_fallback_config="$tmp/custom-fallback-config"
+mkdir -p "$custom_fallback_config"
+cp "$tmp/home/.config/claudex/env" "$custom_fallback_config/env"
+jq '.autoMode = {allow: ["User custom allow rule"]}' \
+  "$root/settings.json" > "$custom_fallback_config/settings.json"
+if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CONFIG_DIR="$custom_fallback_config" \
+    CLAUDEX_SKIP_AUTO_UPDATE=1 FAKE_AUTO_MODE_DEFAULTS_FAIL=1 \
+    "$root/claudex" auto-mode config >/dev/null 2>&1; then
+  printf '%s\n' 'expected unavailable defaults with custom auto-mode rules to fail safely' >&2
+  exit 1
+fi
+jq -e '.autoMode.allow == ["User custom allow rule"]' \
+  "$custom_fallback_config/settings.json" >/dev/null
+
+jq '.autoMode = {
+    allow: ["User custom allow rule"],
+    environment: ["User custom environment rule"],
+    soft_deny: ["User custom soft deny rule"],
+    hard_deny: ["User custom hard deny rule"]
+  }' \
   "$tmp/home/.config/claudex/settings.json" > "$tmp/custom-auto-mode-settings.json"
 mv "$tmp/custom-auto-mode-settings.json" "$tmp/home/.config/claudex/settings.json"
 default_output=$(run_wrapper --terra test-prompt)
@@ -217,11 +316,12 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" == *'BG=gpt-5.6-luna'* ]]
 [[ "$default_output" == *'SUBAGENT=gpt-5.6-terra'* ]]
 [[ "$default_output" == *'CONCURRENCY=3'* ]]
-[[ "$default_output" == *'RETRIES=4'* ]]
+[[ "$default_output" == *'RETRIES=15'* ]]
 [[ "$default_output" == *'CONTEXT=400000'* ]]
 [[ "$default_output" == *'COMPACT=280000'* ]]
 [[ "$default_output" == *'NO_FLICKER=1'* ]]
 [[ "$default_output" == *'ACCESSIBILITY=1'* ]]
+[[ "$default_output" == *'DISABLE_1M=1'* ]]
 [[ "$default_output" == *'OPUS=gpt-5.6-sol'* ]]
 [[ "$default_output" == *'OPUS_NAME=GPT-5.6 Sol'* ]]
 [[ "$default_output" == *'BASE=http://127.0.0.1:8318'* ]]
@@ -256,6 +356,13 @@ jq -e '
   and ([.autoMode.environment[] | select(. == "User custom environment rule")] | length == 1)
   and (.autoMode.environment | any(startswith("User-designated task boundary:")))
   and (.autoMode.environment | any(startswith("Explicitly approved development transfer:")))
+  and ([.autoMode.soft_deny[] | select(. == "Default soft deny")] | length == 1)
+  and ([.autoMode.soft_deny[] | select(. == "User custom soft deny rule")] | length == 1)
+  and (.autoMode.soft_deny | any(startswith("Approved Private Development Transfer")))
+  and ([.autoMode.hard_deny[] | select(. == "User custom hard deny rule")] | length == 1)
+  and (.autoMode.hard_deny | any(startswith("Data Exfiltration:")
+    and contains("Claudex scoped private development transfer exception:")
+    and contains("public destination") and contains("credentials or secrets") and contains("different host")))
 ' "$tmp/home/.config/claudex/settings.json" >/dev/null
 FAKE_AUTO_MODE_DEFAULT_VERSION=2 run_wrapper --terra test-prompt >/dev/null
 jq -e '
@@ -265,6 +372,11 @@ jq -e '
   and (.autoMode.environment | index("Default environment rule") == null)
   and (.autoMode.environment | index("Updated default environment rule") != null)
   and ([.autoMode.environment[] | select(. == "User custom environment rule")] | length == 1)
+  and (.autoMode.soft_deny | index("Default soft deny") == null)
+  and (.autoMode.soft_deny | index("Updated soft deny") != null)
+  and ([.autoMode.soft_deny[] | select(. == "User custom soft deny rule")] | length == 1)
+  and (.autoMode.hard_deny | any(startswith("Data Exfiltration: updated hard deny") and contains("Claudex scoped private development transfer exception:")))
+  and ([.autoMode.hard_deny[] | select(. == "User custom hard deny rule")] | length == 1)
 ' "$tmp/home/.config/claudex/settings.json" >/dev/null
 
 proxy_ready_file="$tmp/proxy-ready"
@@ -278,6 +390,15 @@ proxy_recovery_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN=
 [[ "$proxy_recovery_output" == *'PROXY_RECOVERED=1'* ]]
 [[ "$(wc -l < "$proxy_start_log" | tr -d ' ')" == 1 ]]
 [[ ! -e "$tmp/home/.config/claudex/run/proxy-start.lock" ]]
+
+transient_proxy_start_log="$tmp/transient-proxy-start.log"
+: > "$proxy_ready_file"
+HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=0 \
+  CLAUDEX_TEST_PROXY_REACHABLE_FILE="$proxy_ready_file" \
+  FAKE_PROXY_READY_FILE="$proxy_ready_file" FAKE_PROXY_START_LOG="$transient_proxy_start_log" \
+  FAKE_PROXY_TRANSIENT_ONCE=1 "$root/claudex" transient-health-test >/dev/null
+[[ ! -s "$transient_proxy_start_log" ]]
 
 auto_output=$(run_wrapper --auto --luna test-prompt)
 [[ "$auto_output" == *'--permission-mode auto'* ]]
@@ -324,9 +445,10 @@ bare_output=$(run_wrapper --bare --print test-prompt)
 [[ "$bare_output" != *'--append-system-prompt'* ]]
 [[ "$bare_output" != *'--permission-mode'* ]]
 
-maintenance_output=$(run_wrapper mcp list)
+maintenance_output=$(CLAUDE_CODE_DISABLE_1M_CONTEXT=inherited run_wrapper mcp list)
 [[ "$maintenance_output" == *'BASE='* ]]
 [[ "$maintenance_output" != *"BASE=http"* ]]
+[[ "$maintenance_output" == *$'DISABLE_1M=\n'* ]]
 [[ "$maintenance_output" != *'--agents'* ]]
 
 for maintenance_command in agents auth auto-mode doctor gateway install mcp plugin plugins project setup-token ultrareview update upgrade; do
@@ -357,11 +479,15 @@ explicit_permission_output=$(run_wrapper --permission-mode plan test-prompt)
 explicit_agents_output=$(run_wrapper --agents '{}' test-prompt)
 [[ "$explicit_agents_output" == *'--agents {}'* ]]
 [[ "$explicit_agents_output" != *'"Terra"'* ]]
+[[ "$explicit_agents_output" == *'Ask as few questions as possible'* ]]
+[[ "$explicit_agents_output" == *'Never repeat a question the user already answered'* ]]
+[[ "$explicit_agents_output" == *'Treat the user'"'"'s explicit approval as decisive'* ]]
 
-chrome_output=$(run_wrapper --claude-chrome --print chrome-test)
+chrome_output=$(CLAUDE_CODE_DISABLE_1M_CONTEXT=inherited run_wrapper --claude-chrome --print chrome-test)
 [[ "$chrome_output" == *'ARGS=--chrome --print chrome-test'* ]]
 [[ "$chrome_output" == *$'CONFIG=\n'* ]]
 [[ "$chrome_output" == *$'BUN=\n'* ]]
+[[ "$chrome_output" == *$'DISABLE_1M=\n'* ]]
 chrome_configured_model=$(CLAUDEX_MODEL=gpt-5.6-luna run_wrapper --claude-chrome --print chrome-test)
 [[ "$chrome_configured_model" != *'--model gpt-5.6-luna'* ]]
 
@@ -379,7 +505,7 @@ doctor_output=$(run_wrapper --doctor)
 [[ "$doctor_output" == *'Subagent model: gpt-5.6-terra (Sol is reserved for the leader)'* ]]
 [[ "$doctor_output" == *'Agent concurrency: 3'* ]]
 [[ "$doctor_output" == *'Task lifecycle: Sol-owned with final-response reconciliation'* ]]
-[[ "$doctor_output" == *'API retries: 4'* ]]
+[[ "$doctor_output" == *'API retries: 15'* ]]
 [[ "$doctor_output" == *'Context window: 400000 tokens'* ]]
 [[ "$doctor_output" == *'Auto-compact window: 280000 tokens (precompute enabled)'* ]]
 [[ "$doctor_output" == *'Context status: session-stabilized (transient zero suppressed)'* ]]
@@ -505,6 +631,24 @@ status_output=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt
 [[ "$status_output" == *'Codex 7d 16% left'* ]]
 [[ "$status_output" != *$'\033]0;'* ]]
 
+printf '%s\n' 'Codex 7d 16% left · Review 7d 9% left · Extra-long-capacity-window 30d 8% left' \
+  > "$tmp/home/.config/claudex/usage-cache/summary"
+date +%s > "$tmp/home/.config/claudex/usage-cache/last-success"
+narrow_status=$(printf '%s\n' '{"session_id":"narrow-session","model":{"id":"gpt-5.6-sol"},"effort":{"level":"xhigh"},"context_window":{"used_percentage":42.9}}' | \
+  CLAUDEX_STATUSLINE_COLUMNS=40 CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+narrow_plain=$(printf '%s' "$narrow_status" | sed $'s/\033\\[[0-9;]*m//g')
+[[ ${#narrow_plain} -le 40 ]]
+[[ "$narrow_plain" == *'GPT-5.6 Sol'* ]]
+[[ "$narrow_plain" == *'42% context'* ]]
+[[ "$narrow_plain" != *'Extra-long-capacity-window'* ]]
+[[ "$narrow_status" == *$'\033[38;5;81mClaudex\033[0m'* ]]
+
+tiny_status=$(printf '%s\n' '{"session_id":"tiny-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":42.9}}' | \
+  CLAUDEX_STATUSLINE_COLUMNS=18 CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+tiny_plain=$(printf '%s' "$tiny_status" | sed $'s/\033\\[[0-9;]*m//g')
+[[ ${#tiny_plain} -le 18 ]]
+[[ "$tiny_plain" == *'…' ]]
+
 solplan_settings="$tmp/home/.config/claudex/settings.json"
 solplan_settings_backup="$tmp/settings-before-solplan.json"
 cp "$solplan_settings" "$solplan_settings_backup"
@@ -566,9 +710,11 @@ install_output=$(HOME="$install_home" PATH="$tmp/bin:$PATH" \
 [[ -x "$install_home/.config/claudex/usage-limit" ]]
 [[ -x "$install_home/.config/claudex/codex-session" ]]
 [[ -r "$install_home/.config/claudex/preload.cjs" ]]
+[[ -x "$install_home/.config/claudex/self-update" ]]
 [[ -r "$install_home/.config/claudex/skills/usage-limit/SKILL.md" ]]
 [[ -r "$install_home/.config/claudex/settings.json" ]]
 [[ -r "$install_home/.config/claudex/env" ]]
+[[ -r "$install_home/.config/claudex/install.json" ]]
 [[ "$install_output" != *'installer-test-token'* ]]
 printf -v expected_statusline '%q' "$install_home/.config/claudex/statusline"
 jq -e --arg expected "/usr/bin/env bash $expected_statusline" \
@@ -585,6 +731,8 @@ installed_env=$(<"$install_home/.config/claudex/env")
 [[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'request-retry: 3'* ]]
 [[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'transient-error-cooldown-seconds: 1'* ]]
 [[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *'bootstrap-retries: 2'* ]]
+jq -e '.schema == 1 and .version == "1.4.0" and .method == "git" and .repository == "BeamoINT/Claudex"' \
+  "$install_home/.config/claudex/install.json" >/dev/null
 
 custom_proxy_config="$tmp/custom-claudex-proxy.yaml"
 custom_proxy_bin="$tmp/custom-claudex-proxy"
@@ -604,6 +752,7 @@ custom_installed_env=$(<"$install_home/.config/claudex/env")
 [[ "$custom_installed_env" == *"CLAUDEX_PROXY_CONFIG=$custom_proxy_config"* ]]
 [[ "$custom_installed_env" == *"CLAUDEX_PROXY_BIN=$custom_proxy_bin"* ]]
 [[ "$custom_installed_env" == *"CLAUDEX_CODEX_AUTH_DIR=$custom_auth_dir"* ]]
+[[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == *"auth-dir: \"$custom_auth_dir\""* ]]
 invocation_proxy_config="$tmp/invocation-claudex-proxy.yaml"
 invocation_proxy_bin="$tmp/invocation-claudex-proxy"
 invocation_auth_dir="$tmp/invocation-claudex-auth"
@@ -618,6 +767,17 @@ invocation_installed_env=$(<"$install_home/.config/claudex/env")
 [[ "$invocation_installed_env" == *"CLAUDEX_PROXY_CONFIG=$invocation_proxy_config"* ]]
 [[ "$invocation_installed_env" == *"CLAUDEX_PROXY_BIN=$invocation_proxy_bin"* ]]
 [[ "$invocation_installed_env" == *"CLAUDEX_CODEX_AUTH_DIR=$invocation_auth_dir"* ]]
+
+# Changing only the managed loopback port migrates the matching managed URL,
+# while a genuinely custom endpoint remains authoritative.
+HOME="$install_home" PATH="$tmp/bin:$PATH" CLAUDEX_PROXY_PORT=9345 \
+  CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 CLAUDEX_SKIP_SERVICE_START=1 "$root/install.sh" >/dev/null
+port_migrated_env=$(<"$install_home/.config/claudex/env")
+[[ "$port_migrated_env" == *'CLAUDEX_PROXY_URL=http://127.0.0.1:9345'* ]]
+HOME="$install_home" PATH="$tmp/bin:$PATH" CLAUDEX_PROXY_PORT=9456 CLAUDEX_PROXY_URL='https://proxy.example.test' \
+  CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 CLAUDEX_SKIP_SERVICE_START=1 "$root/install.sh" >/dev/null
+custom_url_env=$(<"$install_home/.config/claudex/env")
+[[ "$custom_url_env" == *'CLAUDEX_PROXY_URL=https://proxy.example.test'* ]]
 if HOME="$install_home" PATH="$tmp/bin:$PATH" CLAUDEX_PROXY_PORT='invalid-port' \
   CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 CLAUDEX_SKIP_SERVICE_START=1 "$root/install.sh" >/dev/null 2>&1; then
   printf '%s\n' 'expected invalid installer proxy port to fail' >&2
@@ -627,17 +787,18 @@ fi
 package_home="$tmp/package home"
 mkdir -p "$package_home/.codex"
 cp "$tmp/home/.codex/auth.json" "$package_home/.codex/auth.json"
-HOME="$package_home" PATH="$tmp/bin:$PATH" \
+package_setup_output=$(HOME="$package_home" PATH="$tmp/bin:$PATH" \
   CLAUDEX_PROXY_TOKEN='package-test-token' CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 \
-  CLAUDEX_SKIP_SERVICE_START=1 node "$root/bin/claudex-package.mjs" --package-setup >/dev/null
+  CLAUDEX_SKIP_SERVICE_START=1 CLAUDEX_SKIP_AUTO_UPDATE=1 node "$root/bin/claudex-package.mjs" --package-setup)
+[[ "$package_setup_output" != *'Add this directory to PATH:'* ]]
 jq -e --arg version "$(node -p "require('$root/package.json').version")" \
-  '.package == "claudex-codex" and .version == $version' \
+  '.package == "claudex-codex" and .version == $version and .method == "npm"' \
   "$package_home/.config/claudex/package-manager.json" >/dev/null
-[[ -x "$package_home/.local/bin/claudex" ]]
+[[ -x "$package_home/.config/claudex/package-bin/claudex" ]]
 rm -f "$package_home/.config/claudex/preload.cjs"
 HOME="$package_home" PATH="$tmp/bin:$PATH" \
   CLAUDEX_PROXY_TOKEN='package-test-token' CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 \
-  CLAUDEX_SKIP_SERVICE_START=1 node "$root/bin/claudex-package.mjs" --version >/dev/null
+  CLAUDEX_SKIP_SERVICE_START=1 CLAUDEX_SKIP_AUTO_UPDATE=1 node "$root/bin/claudex-package.mjs" --version >/dev/null
 [[ -r "$package_home/.config/claudex/preload.cjs" ]]
 
 package_conflict_home="$tmp/package conflict home"
@@ -647,9 +808,95 @@ cp "$tmp/home/.codex/auth.json" "$package_conflict_home/.codex/auth.json"
 ln -s "$root/bin/claudex-package.mjs" "$package_conflict_bin/claudex"
 HOME="$package_conflict_home" PATH="$tmp/bin:$PATH" CLAUDEX_BIN_DIR="$package_conflict_bin" \
   CLAUDEX_PROXY_TOKEN='package-conflict-token' CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 \
-  CLAUDEX_SKIP_SERVICE_START=1 node "$root/bin/claudex-package.mjs" --package-setup >/dev/null
+  CLAUDEX_SKIP_SERVICE_START=1 CLAUDEX_SKIP_AUTO_UPDATE=1 node "$root/bin/claudex-package.mjs" --package-setup >/dev/null
 [[ "$(readlink "$package_conflict_bin/claudex")" == "$root/bin/claudex-package.mjs" ]]
 [[ -x "$package_conflict_home/.config/claudex/package-bin/claudex" ]]
+
+# A missing Codex CLI is installed into the user's normal ~/.local prefix, and
+# an interactive installation performs the required official login exactly once.
+codex_install_home="$tmp/codex install home"
+codex_install_bin="$tmp/codex-install-bin"
+mkdir -p "$codex_install_home/.config/claudex/bin" "$codex_install_home/.codex" "$codex_install_bin"
+for command in claude curl; do ln -s "$tmp/bin/$command" "$codex_install_bin/$command"; done
+ln -s "$(command -v jq)" "$codex_install_bin/jq"
+ln -s "$(command -v node)" "$codex_install_bin/node"
+cat > "$codex_install_bin/npm" <<'EOF'
+#!/usr/bin/env bash
+prefix=""
+while (( $# > 0 )); do
+  if [[ "$1" == --prefix ]]; then prefix="$2"; shift 2; continue; fi
+  shift
+done
+[[ -n "$prefix" ]] || exit 2
+mkdir -p "$prefix/bin"
+cat > "$prefix/bin/codex" <<'CODEX'
+#!/usr/bin/env bash
+if [[ "${1:-}" == login && "${2:-}" == status ]]; then [[ -r "$HOME/.codex/auth.json" ]]; exit; fi
+if [[ "${1:-}" == -c && "${3:-}" == login ]]; then
+  mkdir -p "$HOME/.codex"
+  printf '%s\n' '{"auth_mode":"chatgpt","tokens":{"access_token":"installed-access","refresh_token":"installed-refresh","account_id":"installed-account"}}' > "$HOME/.codex/auth.json"
+  printf '%s\n' login >> "$FAKE_CODEX_LOGIN_LOG"
+  exit 0
+fi
+exit 2
+CODEX
+chmod +x "$prefix/bin/codex"
+EOF
+cat > "$codex_install_home/.config/claudex/bin/cliproxyapi" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == -version ]] && { printf '%s\n' 'Version: 7.2.80'; exit; }
+exit 0
+EOF
+chmod +x "$codex_install_bin/npm" "$codex_install_home/.config/claudex/bin/cliproxyapi"
+codex_login_log="$tmp/codex-install-login.log"
+HOME="$codex_install_home" PATH="$codex_install_bin:/usr/bin:/bin" \
+  FAKE_CODEX_LOGIN_LOG="$codex_login_log" CLAUDEX_TEST_INTERACTIVE_INSTALL=1 \
+  CLAUDEX_SKIP_SERVICE_START=1 "$root/install.sh" >/dev/null
+[[ -x "$codex_install_home/.local/bin/codex" ]]
+[[ "$(wc -l < "$codex_login_log" | tr -d ' ')" == 1 ]]
+[[ ! -e "$codex_install_home/.config/claudex/run/install.lock" ]]
+
+# The website bootstrap executes only a checksum-valid, path-safe release and
+# removes its extraction directory after the installer returns.
+bootstrap_fixture="$tmp/bootstrap-fixture"
+bootstrap_version=9.8.7
+bootstrap_root="$bootstrap_fixture/claudex-$bootstrap_version"
+bootstrap_tmp="$tmp/bootstrap-tmp"
+mkdir -p "$bootstrap_root" "$bootstrap_tmp" "$tmp/bootstrap-bin"
+printf '%s\n' '{"version":"9.8.7"}' > "$bootstrap_root/package.json"
+for required in claudex codex-session settings.json; do : > "$bootstrap_root/$required"; done
+cat > "$bootstrap_root/install.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${CLAUDEX_INSTALL_METHOD:-}:$*" > "$FAKE_BOOTSTRAP_INSTALL_LOG"
+EOF
+chmod +x "$bootstrap_root/install.sh"
+(cd "$bootstrap_fixture" && tar -czf "claudex-$bootstrap_version.tar.gz" "claudex-$bootstrap_version")
+bootstrap_archive="$bootstrap_fixture/claudex-$bootstrap_version.tar.gz"
+bootstrap_digest=$(shasum -a 256 "$bootstrap_archive" | awk '{print $1}')
+printf '%s  %s\n' "$bootstrap_digest" "claudex-$bootstrap_version.tar.gz" > "$bootstrap_fixture/SHA256SUMS"
+cat > "$tmp/bootstrap-bin/curl" <<'EOF'
+#!/usr/bin/env bash
+output=""; url=""
+while (( $# > 0 )); do
+  case "$1" in --output) output="$2"; shift 2 ;; --write-out) shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac
+done
+if [[ "$output" == /dev/null ]]; then printf '%s' 'https://github.com/BeamoINT/Claudex/releases/tag/v9.8.7'; exit; fi
+case "$url" in */SHA256SUMS) cp "$FAKE_BOOTSTRAP_FIXTURE/SHA256SUMS" "$output" ;; *) cp "$FAKE_BOOTSTRAP_FIXTURE/claudex-9.8.7.tar.gz" "$output" ;; esac
+EOF
+chmod +x "$tmp/bootstrap-bin/curl"
+bootstrap_install_log="$tmp/bootstrap-install.log"
+PATH="$tmp/bootstrap-bin:/usr/bin:/bin" TMPDIR="$bootstrap_tmp" \
+  FAKE_BOOTSTRAP_FIXTURE="$bootstrap_fixture" FAKE_BOOTSTRAP_INSTALL_LOG="$bootstrap_install_log" \
+  "$root/bootstrap.sh" --login >/dev/null
+[[ "$(<"$bootstrap_install_log")" == 'archive:--login' ]]
+[[ -z "$(find "$bootstrap_tmp" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+printf x >> "$bootstrap_archive"
+if PATH="$tmp/bootstrap-bin:/usr/bin:/bin" TMPDIR="$bootstrap_tmp" \
+  FAKE_BOOTSTRAP_FIXTURE="$bootstrap_fixture" FAKE_BOOTSTRAP_INSTALL_LOG="$bootstrap_install_log" \
+  "$root/bootstrap.sh" >/dev/null 2>&1; then
+  printf '%s\n' 'expected tampered bootstrap archive to fail' >&2
+  exit 1
+fi
 
 auth_status=$(run_wrapper --auth-status)
 [[ "$auth_status" == *'Codex authentication: ready (shared ChatGPT session)'* ]]
@@ -763,6 +1010,7 @@ HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUD
 [[ "$(wc -l < "$update_log" | tr -d ' ')" == 1 ]]
 
 "$root/tests/auth-usage-regressions.sh"
+"$root/tests/self-update-regressions.sh"
 node "$root/scripts/check-docs.mjs"
 
 printf '%s\n' 'all Claudex tests passed'

@@ -35,15 +35,24 @@ boundaries and actions outside that scope remain blocked. Classifier overrides
 accept managed Codex GPT model IDs only.
 
 An approval may clearly refer to the immediately preceding denial (for example,
-"I approve that" or "go ahead") without restating the full command. An exact,
-approved source transfer between a named repository and named build/deploy host
-is treated as in-boundary for that transfer; public destinations, credentials,
-unrelated files, and broader transfers remain blocked.
+"I approve that" or "go ahead") without restating the full command. One narrow
+private-development transfer is treated as named-and-specific soft consent: the
+task-required source from the current trusted repository to an explicitly named,
+private, user-controlled build or deployment host. Public or agent-selected
+destinations, credentials and secrets, unrelated files, broader source trees,
+and a different host remain under the hard data-exfiltration boundary.
+
+Claudex composes these additions with all four rule arrays reported by the
+installed Claude Code build. It never ships a partial replacement for upstream
+defaults; if defaults are temporarily unavailable, it uses the last validated
+snapshot or removes only a recognizable legacy Claudex-only seed.
 
 The Sol leader is tuned to inspect context and make safe, reasonable assumptions
 instead of asking for routine confirmations. It asks only when an answer cannot
 be discovered and would materially change the result, expand scope, or precede
-an irreversible action, and it does not repeat questions already answered.
+an irreversible action, and it does not repeat questions already answered. This
+leader guidance remains active when callers provide their own `--agents` JSON;
+only Claudex's built-in Terra and Luna definitions are replaced in that case.
 
 ## Model picker
 

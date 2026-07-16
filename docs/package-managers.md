@@ -5,8 +5,10 @@ installer. On first launch, a small cross-platform bootstrap installs the
 managed files into `~/.config/claudex`, downloads the checksum-verified local
 compatibility service, and then hands off to the normal launcher.
 
-Codex and Claude Code are still required. Sign in with `claudex --login` after
-installation if the standard file-backed Codex session is not already active.
+Codex and Claude Code are required at runtime, but the first-run bootstrap now
+installs either missing CLI. In an interactive terminal it opens Codex's
+official browser sign-in automatically when the standard file-backed session is
+not ready. `claudex --login` remains available to retry or switch accounts.
 
 ## Homebrew
 
@@ -75,6 +77,14 @@ claudex --package-setup --login
 Package metadata contains no credentials or generated user state. The setup
 command creates those files locally with the same restrictive permissions as
 the source installer.
+
+The public `claudex` command remains owned by the package manager. Claudex keeps
+its internal managed launcher under `~/.config/claudex/package-bin`, preventing
+it from shadowing npm, Homebrew, Scoop, or WinGet after a later upgrade. The
+installer records the manager in a private install receipt, and
+`claudex self-update --apply` delegates to that manager without invoking
+`sudo`. If manager policy or permissions reject the update, the current release
+is retained and the normal manual upgrade command above remains available.
 
 ## Uninstall
 

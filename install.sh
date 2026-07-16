@@ -14,6 +14,8 @@ readonly usage_limit_target="$config_dir/usage-limit"
 readonly codex_session_target="$config_dir/codex-session"
 readonly usage_skill_target="$config_dir/skills/usage-limit/SKILL.md"
 readonly preload_target="$config_dir/preload.cjs"
+readonly self_update_target="$config_dir/self-update"
+readonly install_receipt_target="$config_dir/install.json"
 readonly proxy_config_target="$config_dir/cliproxyapi.yaml"
 readonly launcher_target="$bin_dir/claudex"
 readonly proxy_version="7.2.80"
@@ -29,7 +31,12 @@ caller_proxy_url_set=${CLAUDEX_PROXY_URL+x}; caller_proxy_url=${CLAUDEX_PROXY_UR
 caller_proxy_config_set=${CLAUDEX_PROXY_CONFIG+x}; caller_proxy_config=${CLAUDEX_PROXY_CONFIG-}
 caller_proxy_bin_set=${CLAUDEX_PROXY_BIN+x}; caller_proxy_bin=${CLAUDEX_PROXY_BIN-}
 caller_auth_dir_set=${CLAUDEX_CODEX_AUTH_DIR+x}; caller_auth_dir=${CLAUDEX_CODEX_AUTH_DIR-}
+caller_proxy_port_set=${CLAUDEX_PROXY_PORT+x}
 login=0
+install_lock_owned=0
+install_lock_nonce=""
+claude_installer=""
+settings_tmp=""
 
 usage() {
   printf '%s\n' 'Usage: ./install.sh [--login]'
@@ -53,14 +60,14 @@ done
 [[ "$proxy_port" =~ ^[0-9]+$ ]] && (( proxy_port >= 1 && proxy_port <= 65535 )) || \
   fail 'CLAUDEX_PROXY_PORT must be an integer from 1 to 65535'
 
-for source_file in claudex codex-session statusline usage-limit preload.cjs settings.json skills/usage-limit/SKILL.md; do
+for source_file in claudex codex-session statusline usage-limit preload.cjs self-update package.json settings.json skills/usage-limit/SKILL.md; do
   [[ -r "$root/$source_file" ]] || fail "missing repository file: $source_file"
 done
 
 run_as_root() {
   if [[ "$(id -u)" == 0 ]]; then "$@"
   elif command -v sudo >/dev/null 2>&1; then sudo "$@"
-  else fail 'installing jq requires root privileges, but sudo is unavailable'
+  else fail 'installing a system dependency requires root privileges, but sudo is unavailable'
   fi
 }
 
@@ -74,6 +81,75 @@ install_jq() {
   elif command -v apk >/dev/null 2>&1; then run_as_root apk add jq
   else fail 'jq is required and no supported package manager was found'
   fi
+}
+
+install_node() {
+  printf '%s\n' 'Installing Node.js and npm for the official Codex CLI package...'
+  if command -v brew >/dev/null 2>&1; then brew install node
+  elif command -v apt-get >/dev/null 2>&1; then run_as_root apt-get update; run_as_root apt-get install -y nodejs npm
+  elif command -v dnf >/dev/null 2>&1; then run_as_root dnf install -y nodejs npm
+  elif command -v yum >/dev/null 2>&1; then run_as_root yum install -y nodejs npm
+  elif command -v zypper >/dev/null 2>&1; then run_as_root zypper --non-interactive install nodejs npm
+  elif command -v pacman >/dev/null 2>&1; then run_as_root pacman -S --needed --noconfirm nodejs npm
+  elif command -v apk >/dev/null 2>&1; then run_as_root apk add nodejs npm
+  else fail 'Node.js and npm are required to install Codex CLI, and no supported package manager was found'
+  fi
+}
+
+install_codex() {
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then install_node; fi
+  command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 || \
+    fail 'Node.js or npm was installed but is not available in PATH; open a new terminal and rerun the installer'
+  local npm_prefix="$HOME/.local"
+  printf '%s\n' 'Installing Codex CLI from the official @openai/codex npm package...'
+  npm install --global --prefix "$npm_prefix" @openai/codex
+  export PATH="$HOME/.local/bin:$PATH"
+  command -v codex >/dev/null 2>&1 || fail "Codex CLI was installed but 'codex' was not found in $HOME/.local/bin"
+}
+
+install_lock_mtime() {
+  if stat -f '%m' "$1" >/dev/null 2>&1; then stat -f '%m' "$1"
+  else stat -c '%Y' "$1" 2>/dev/null || printf 0
+  fi
+}
+
+release_install_lock() {
+  (( install_lock_owned == 1 )) || return 0
+  local recorded=""
+  [[ -r "$config_dir/run/install.lock/owner" ]] && read -r recorded < "$config_dir/run/install.lock/owner" || true
+  if [[ "$recorded" == "$$ $install_lock_nonce" ]]; then rm -rf "$config_dir/run/install.lock"; fi
+  install_lock_owned=0
+}
+
+cleanup() {
+  [[ -z "$claude_installer" ]] || rm -f "$claude_installer"
+  [[ -z "$settings_tmp" ]] || rm -f "$settings_tmp"
+  release_install_lock
+}
+
+acquire_install_lock() {
+  local lock_dir="$config_dir/run/install.lock" deadline=$(( $(date +%s) + 300 )) now mtime age owner_pid="" owner_nonce=""
+  mkdir -p "$config_dir/run"
+  while (( $(date +%s) < deadline )); do
+    if mkdir "$lock_dir" 2>/dev/null; then
+      install_lock_nonce="$$-${RANDOM:-0}-$(date +%s)"
+      (umask 077; printf '%s %s\n' "$$" "$install_lock_nonce" > "$lock_dir/owner")
+      install_lock_owned=1
+      return 0
+    fi
+    if [[ -r "$lock_dir/owner" ]]; then read -r owner_pid owner_nonce < "$lock_dir/owner" || true; fi
+    now=$(date +%s); mtime=$(install_lock_mtime "$lock_dir"); age=$(( now - mtime ))
+    if (( age >= 2 )) && { [[ ! "$owner_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$owner_pid" 2>/dev/null; }; then
+      local quarantine="$config_dir/run/install.lock.stale.$$.$now"
+      if mv "$lock_dir" "$quarantine" 2>/dev/null; then rm -rf "$quarantine"; continue; fi
+    fi
+    sleep 0.1
+  done
+  fail 'timed out waiting for another Claudex installation; retry after it finishes'
+}
+
+installer_is_interactive() {
+  [[ "${CLAUDEX_TEST_INTERACTIVE_INSTALL:-0}" == 1 ]] || [[ -t 0 && -t 1 ]]
 }
 
 proxy_asset_details() {
@@ -127,19 +203,20 @@ install_proxy() {
 
 mkdir -p "$bin_dir" "$config_dir" "$managed_bin_dir" "$auth_dir"
 chmod 700 "$config_dir" "$managed_bin_dir" "$auth_dir"
+acquire_install_lock
+trap cleanup EXIT
 
 if [[ "$skip_deps" != 1 ]]; then
   command -v curl >/dev/null 2>&1 || fail 'curl is required to install Claudex'
   command -v jq >/dev/null 2>&1 || install_jq
-  command -v codex >/dev/null 2>&1 || fail "Codex CLI is required. Install Codex, run 'codex login', then rerun this installer."
+  command -v codex >/dev/null 2>&1 || install_codex
   if ! command -v claude >/dev/null 2>&1; then
     printf '%s\n' "Installing Claude Code with Anthropic's native installer..."
     claude_installer=$(mktemp "${TMPDIR:-/tmp}/claude-install.XXXXXX")
-    trap 'rm -f "$claude_installer"' EXIT
     curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --output "$claude_installer" https://claude.ai/install.sh
     bash "$claude_installer"
     rm -f "$claude_installer"
-    trap - EXIT
+    claude_installer=""
     export PATH="$HOME/.local/bin:$PATH"
   fi
   if ! managed_proxy_is_current; then install_proxy; fi
@@ -159,10 +236,6 @@ if [[ "$skip_deps" != 1 && "${CLAUDEX_SKIP_CLAUDE_UPDATE:-0}" != 1 ]]; then
   fi
 fi
 
-if (( login )); then
-  codex -c 'cli_auth_credentials_store="file"' login
-fi
-
 proxy_token="${CLAUDEX_PROXY_TOKEN:-}"
 if [[ -r "$env_file" ]]; then
   # shellcheck disable=SC1090
@@ -170,10 +243,19 @@ if [[ -r "$env_file" ]]; then
   proxy_token="${CLAUDEX_PROXY_TOKEN:-$proxy_token}"
 fi
 if [[ -n "$caller_proxy_token_set" ]]; then proxy_token="$caller_proxy_token"; fi
-if [[ -n "$caller_proxy_url_set" ]]; then runtime_proxy_url="$caller_proxy_url"; else runtime_proxy_url="${CLAUDEX_PROXY_URL:-http://127.0.0.1:$proxy_port}"; fi
+existing_proxy_url="${CLAUDEX_PROXY_URL:-}"
+if [[ -n "$caller_proxy_url_set" ]]; then
+  runtime_proxy_url="${caller_proxy_url:-http://127.0.0.1:$proxy_port}"
+elif [[ -n "$caller_proxy_port_set" && ( -z "$existing_proxy_url" || "$existing_proxy_url" =~ ^http://127\.0\.0\.1:[0-9]+/?$ ) ]]; then
+  runtime_proxy_url="http://127.0.0.1:$proxy_port"
+else
+  runtime_proxy_url="${existing_proxy_url:-http://127.0.0.1:$proxy_port}"
+fi
 if [[ -n "$caller_proxy_config_set" ]]; then runtime_proxy_config="$caller_proxy_config"; else runtime_proxy_config="${CLAUDEX_PROXY_CONFIG:-$proxy_config_target}"; fi
 if [[ -n "$caller_proxy_bin_set" ]]; then runtime_proxy_bin="$caller_proxy_bin"; else runtime_proxy_bin="${CLAUDEX_PROXY_BIN:-$managed_proxy}"; fi
 if [[ -n "$caller_auth_dir_set" ]]; then runtime_auth_dir="$caller_auth_dir"; else runtime_auth_dir="${CLAUDEX_CODEX_AUTH_DIR:-$auth_dir}"; fi
+mkdir -p "$runtime_auth_dir"
+chmod 700 "$runtime_auth_dir"
 if [[ -z "$proxy_token" ]]; then
   if command -v openssl >/dev/null 2>&1; then proxy_token=$(openssl rand -hex 32)
   else proxy_token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
@@ -182,7 +264,7 @@ fi
 [[ "$proxy_token" != *$'\n'* && "$proxy_token" != *$'\r'* ]] || fail 'local compatibility key contains a newline'
 
 json_token=$(printf '%s' "$proxy_token" | jq -Rs '.')
-json_auth_dir=$(printf '%s' "$auth_dir" | jq -Rs '.')
+json_auth_dir=$(printf '%s' "$runtime_auth_dir" | jq -Rs '.')
 umask 077
 {
   printf 'host: "127.0.0.1"\n'
@@ -213,7 +295,7 @@ chmod 600 "$env_file"
 timestamp=$(date +%Y%m%d-%H%M%S)
 backup_dir="$config_dir/backups/install-$timestamp"
 backed_up=0
-for managed_file in "$launcher_target" "$settings_target" "$statusline_target" "$usage_limit_target" "$codex_session_target" "$preload_target" "$usage_skill_target"; do
+for managed_file in "$launcher_target" "$settings_target" "$statusline_target" "$usage_limit_target" "$codex_session_target" "$preload_target" "$self_update_target" "$usage_skill_target" "$install_receipt_target"; do
   if [[ -e "$managed_file" ]]; then
     mkdir -p "$backup_dir"
     cp -p "$managed_file" "$backup_dir/$(basename "$managed_file")"
@@ -227,23 +309,48 @@ install -m 755 "$root/statusline" "$statusline_target"
 install -m 755 "$root/usage-limit" "$usage_limit_target"
 install -m 755 "$root/codex-session" "$codex_session_target"
 install -m 644 "$root/preload.cjs" "$preload_target"
+install -m 755 "$root/self-update" "$self_update_target"
 mkdir -p "$(dirname "$usage_skill_target")"
 install -m 644 "$root/skills/usage-limit/SKILL.md" "$usage_skill_target"
 
 printf -v quoted_statusline '%q' "$statusline_target"
 settings_tmp=$(mktemp "$config_dir/settings.json.tmp.XXXXXX")
-trap 'rm -f "$settings_tmp"' EXIT
 jq --arg command "/usr/bin/env bash $quoted_statusline" '.statusLine.command = $command' "$root/settings.json" > "$settings_tmp"
 install -m 600 "$settings_tmp" "$settings_target"
 rm -f "$settings_tmp"
-trap - EXIT
+settings_tmp=""
+
+install_method="${CLAUDEX_INSTALL_METHOD:-}"
+if [[ -z "$install_method" ]]; then
+  if [[ -d "$root/.git" ]]; then install_method=git; else install_method=archive; fi
+fi
+[[ "$install_method" =~ ^(npm|homebrew|scoop|winget|archive|git)$ ]] || fail "unsupported CLAUDEX_INSTALL_METHOD: $install_method"
+install_version=$(jq -r '.version' "$root/package.json")
+[[ "$install_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'package.json contains an invalid Claudex version'
+receipt_tmp=$(mktemp "$config_dir/install.json.tmp.XXXXXX")
+jq -n --arg version "$install_version" --arg method "$install_method" --arg binDir "$bin_dir" \
+  '{schema: 1, version: $version, method: $method, binDir: $binDir, repository: "BeamoINT/Claudex"}' > "$receipt_tmp"
+chmod 600 "$receipt_tmp"
+mv -f "$receipt_tmp" "$install_receipt_target"
+receipt_tmp=""
 
 printf 'Installed Claudex launcher: %s\n' "$launcher_target"
 printf 'Installed isolated config: %s\n' "$config_dir"
-if [[ ":$PATH:" != *":$bin_dir:"* ]]; then printf 'Add this directory to PATH: %s\n' "$bin_dir"; fi
+if [[ -z "${CLAUDEX_PACKAGE_ROOT:-}" && ! "${CLAUDEX_INSTALL_METHOD:-}" =~ ^(npm|homebrew|scoop|winget)$ && ":$PATH:" != *":$bin_dir:"* ]]; then
+  printf 'Add this directory to PATH: %s\n' "$bin_dir"
+fi
 
 auth_ready=0
-if "$codex_session_target" sync; then auth_ready=1
+if "$codex_session_target" sync >/dev/null 2>&1; then
+  auth_ready=1
+elif (( login )); then
+  "$codex_session_target" login
+  auth_ready=1
+elif [[ "$skip_deps" != 1 ]] && installer_is_interactive; then
+  printf '%s\n' 'Codex sign-in is required. Opening the official browser login now...'
+  if "$codex_session_target" login; then auth_ready=1
+  else printf '%s\n' "Claudex is installed, but Codex sign-in did not finish. Run 'claudex --login' to retry." >&2
+  fi
 else
   printf '%s\n' "Claudex is installed. Sign in with 'claudex --login', then run 'claudex'." >&2
 fi

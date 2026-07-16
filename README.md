@@ -7,11 +7,11 @@
 Claudex is an open-source compatibility layer for using Codex GPT models through the Claude Code interface. It reuses the Codex login already on your computer, configures the local bridge automatically, and preserves the Claude Code workflows people already know.
 
 > [!IMPORTANT]
-> Claudex is an independent community project. It is not affiliated with, endorsed by, or supported by OpenAI or Anthropic. You need locally installed copies of [Codex](https://developers.openai.com/codex/cli/) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview), and you remain responsible for the terms and usage limits of those services.
+> Claudex is an independent community project. It is not affiliated with, endorsed by, or supported by OpenAI or Anthropic. Its installer uses the official [Codex CLI](https://developers.openai.com/codex/cli/) npm package and [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) installer when either prerequisite is missing. You remain responsible for the terms and usage limits of those services.
 
 ## Quick start
 
-Sign in to Codex first with the desktop app or `codex login`, then install Claudex.
+Install Claudex, then complete the official Codex browser sign-in when prompted.
 
 ### Package managers
 
@@ -35,20 +35,23 @@ usage, and WinGet submission status.
 ### macOS, Linux, or WSL
 
 ```bash
-git clone https://github.com/BeamoINT/Claudex.git
-cd Claudex
-./install.sh --login
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output /tmp/claudex-bootstrap.sh \
+  https://raw.githubusercontent.com/BeamoINT/Claudex/main/bootstrap.sh
+bash /tmp/claudex-bootstrap.sh
 claudex
 ```
 
-The `--login` flag is optional when `codex login status` already succeeds. If `~/.local/bin` is not on your `PATH`, follow the instruction printed by the installer.
+The bootstrap verifies the latest release archive before running it. The installer
+opens Codex's official browser login only when authentication is needed and the
+terminal is interactive. If `~/.local/bin` is not on your `PATH`, follow the
+instruction printed by the installer.
 
 ### Windows
 
 ```powershell
-git clone https://github.com/BeamoINT/Claudex.git
-Set-Location Claudex
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Login
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/BeamoINT/Claudex/main/bootstrap.ps1 -OutFile "$env:TEMP\claudex-bootstrap.ps1"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\claudex-bootstrap.ps1"
 claudex
 ```
 
@@ -87,6 +90,8 @@ claudex --accounts         List locally available Codex usage accounts
 claudex --doctor           Check installation, authentication, and models
 claudex --login            Sign in through Codex and synchronize the session
 claudex --logout           Sign out and clear the managed bridge session
+claudex self-update --status  Inspect automatic update state
+claudex self-update --apply   Apply the latest stable release now
 claudex --claude-chrome    Use the direct Claude profile with Chrome support
 ```
 

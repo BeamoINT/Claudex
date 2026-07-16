@@ -8,12 +8,18 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const packageLauncher = readFileSync(join(root, 'bin', 'claudex-package.mjs'), 'utf8');
 
 assert.equal(manifest.name, 'claudex-codex');
 assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
 assert.equal(manifest.license, 'MIT');
 assert.equal(manifest.bin?.claudex, 'bin/claudex-package.mjs');
 assert.equal(manifest.publishConfig?.access, 'public');
+assert.doesNotMatch(
+  packageLauncher,
+  /normalizedRoot\.includes\('\/homebrew\/'\)/,
+  'an npm global install below /opt/homebrew must not be misclassified as a Homebrew formula',
+);
 
 const versionResult = spawnSync(
   process.execPath,
@@ -43,11 +49,15 @@ for (const required of [
   'LICENSE',
   'README.md',
   'bin/claudex-package.mjs',
+  'bootstrap.ps1',
+  'bootstrap.sh',
   'claudex-package.cmd',
   'install.sh',
   'install.ps1',
   'claudex',
   'claudex.ps1',
+  'self-update',
+  'self-update.ps1',
   'skills/usage-limit/SKILL.md',
 ]) {
   assert(paths.has(required), `npm package is missing ${required}`);

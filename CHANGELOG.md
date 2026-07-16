@@ -5,6 +5,50 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-15
+
+### Added
+
+- Added verified one-command source bootstraps for macOS, Linux, WSL, and
+  Windows. They resolve the latest stable GitHub release, validate SHA-256 and
+  archive paths, and then run the release's native installer.
+- Added a production self-updater with automatic background updates by default,
+  explicit check/apply/status commands, stable-version and downgrade guards,
+  package-manager delegation, safe staging, rollback, backoff, and install
+  provenance on both Unix and Windows.
+- Added prerequisite setup for missing Claude Code, Codex CLI, Node.js, and npm.
+  Interactive installs and foreground launches open Codex's official browser
+  sign-in when required, while noninteractive, CI, and watcher paths remain
+  prompt-free.
+
+### Changed
+
+- Made auto mode honor explicit consent for a narrowly scoped transfer of
+  task-required source to a named private build or deployment host, while
+  keeping secrets, public destinations, broader trees, and agent-selected
+  targets hard-blocked.
+- Increased transient retry tolerance and slowed semantic bridge monitoring to
+  reduce noisy connection failures without hiding persistent faults.
+- Kept the fewer-question execution policy active even when callers provide
+  their own subagent definitions.
+- Disabled Claude Code's Anthropic-only Opus 1M selector in proxied sessions;
+  all normal Claudex routes continue to use managed Codex/OpenAI models.
+
+### Fixed
+
+- Prevented narrow terminals from wrapping or corrupting the bottom status row
+  by progressively eliding optional status details to fit the available width.
+- Reconciled every auto-mode rule category with upstream defaults instead of
+  shipping partial arrays that could replace Claude Code's current rules.
+- Fixed custom authentication-directory installation, managed proxy-port
+  migration, concurrent installer runs, and package-manager launcher ownership.
+- Fixed first-run Claude Code discovery on Windows and restored inherited
+  model-selector environment state after every Claudex session.
+- Avoided misclassifying npm packages installed below `/opt/homebrew` as a
+  Homebrew formula, which could send future updates through the wrong manager.
+- Strengthened byte-level terminal regressions for split UTF-8, typed-array
+  views, JSON output, callbacks, and fullscreen ANSI frames.
+
 ## [1.3.1] - 2026-07-15
 
 ### Changed
@@ -135,7 +179,9 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first-party profile support.
 - Cross-platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/BeamoINT/Claudex/compare/v1.3.1...v1.4.0
+[1.3.1]: https://github.com/BeamoINT/Claudex/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/BeamoINT/Claudex/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/BeamoINT/Claudex/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/BeamoINT/Claudex/compare/v1.1.0...v1.1.1

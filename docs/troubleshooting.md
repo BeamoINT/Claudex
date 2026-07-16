@@ -28,6 +28,18 @@ Claudex uses Codex's official ChatGPT sign-in. If `codex login status` succeeds
 but no standard `auth.json` exists, `claudex --login` requests file-backed
 credential storage. Claudex does not scrape the OS keyring.
 
+When a normal interactive Claudex launch detects that this session is missing,
+it explains the problem, opens Codex's official browser sign-in once, and
+retries synchronization. CI, redirected/noninteractive launches, and background
+recovery watchers never open a browser; use `claudex --login` interactively
+before rerunning those jobs.
+
+If the Codex CLI itself is missing, rerun the Claudex installer. It installs
+Node.js/npm through a supported system package manager when necessary and then
+installs OpenAI's official `@openai/codex` package into the user launcher
+directory. Noninteractive installations never start a browser login; run
+`claudex --login` afterward.
+
 ## Model is not advertised
 
 Run `claudex --doctor`. The signed-in account must advertise Sol, Terra, and
@@ -108,7 +120,9 @@ terminal name and version in a sanitized bug report.
 Claudex leaves interactive fullscreen cursor and redraw frames byte-for-byte
 native. If the bottom input or status area is clipped after upgrading, close
 the older running session and start a new `claudex` session so the updated
-preload is active.
+preload is active. On narrow terminals, the status line intentionally removes
+lower-priority quota and effort details rather than wrapping into the input
+area.
 
 ## Windows script execution is blocked
 

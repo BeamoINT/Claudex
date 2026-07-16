@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly config_dir="${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}"
+readonly receipt_file="$config_dir/install.json"
+readonly update_dir="$config_dir/update/claudex"
+readonly state_file="$update_dir/state.json"
+readonly lock_dir="$update_dir/lock"
+readonly repository="BeamoINT/Claudex"
+readonly api_url="https://api.github.com/repos/$repository/releases/latest"
+readonly curl_bin="${CLAUDEX_CURL_BIN:-curl}"
+readonly background="${CLAUDEX_UPDATE_BACKGROUND:-0}"
+readonly interval="${CLAUDEX_UPDATE_INTERVAL_SECONDS:-86400}"
+action="status"
+
+fail() { printf 'claudex self-update: %s\n' "$*" >&2; exit 1; }
+say() { (( background )) || printf '%s\n' "$*"; }
+usage() {
+  printf '%s\n' 'Usage: claudex self-update [--check|--apply|--status]'
+  printf '%s\n' '  --check   Check the stable release channel without installing.'
+  printf '%s\n' '  --apply   Install the newest stable release when available.'
+  printf '%s\n' '  --status  Show installed and available versions.'
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --check) action=check ;;
+    --apply) action=apply ;;
+    --status) action=status ;;
+    --background) ;;
+    --help|-h) usage; exit 0 ;;
+    *) fail "unknown option: $1" ;;
+  esac
+  shift
+done
+
+[[ "$interval" =~ ^[0-9]+$ ]] && (( interval >= 3600 && interval <= 2592000 )) || \
+  fail 'CLAUDEX_UPDATE_INTERVAL_SECONDS must be from 3600 to 2592000'
+command -v jq >/dev/null 2>&1 || fail 'jq is required'
+[[ -r "$receipt_file" ]] || fail "missing install receipt; rerun the Claudex installer: $receipt_file"
+
+current=$(jq -r 'if (.version | type) == "string" then .version else empty end' "$receipt_file")
+method=$(jq -r 'if (.method | type) == "string" then .method else empty end' "$receipt_file")
+bin_dir=$(jq -r 'if (.binDir | type) == "string" then .binDir else empty end' "$receipt_file")
+receipt_repository=$(jq -r 'if (.repository | type) == "string" then .repository else empty end' "$receipt_file")
+
+parse_semver() {
+  local value="$1"
+  [[ "$value" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || return 1
+  (( ${#BASH_REMATCH[1]} <= 9 && ${#BASH_REMATCH[2]} <= 9 && ${#BASH_REMATCH[3]} <= 9 )) || return 1
+  SEMVER_MAJOR=$((10#${BASH_REMATCH[1]}))
+  SEMVER_MINOR=$((10#${BASH_REMATCH[2]}))
+  SEMVER_PATCH=$((10#${BASH_REMATCH[3]}))
+}
+
+version_is_newer() {
+  local candidate="$1" installed="$2" c_major c_minor c_patch
+  parse_semver "$candidate" || return 2
+  c_major=$SEMVER_MAJOR; c_minor=$SEMVER_MINOR; c_patch=$SEMVER_PATCH
+  parse_semver "$installed" || return 2
+  (( c_major > SEMVER_MAJOR )) ||
+    (( c_major == SEMVER_MAJOR && c_minor > SEMVER_MINOR )) ||
+    (( c_major == SEMVER_MAJOR && c_minor == SEMVER_MINOR && c_patch > SEMVER_PATCH ))
+}
+
+parse_semver "$current" || fail "install receipt has an invalid stable version: $current"
+case "$method" in npm|homebrew|scoop|winget|archive|git) ;; *) fail "unsupported install method in receipt: $method" ;; esac
+[[ "$receipt_repository" == "$repository" ]] || fail 'install receipt names an untrusted release repository'
+[[ "$bin_dir" == /* ]] || fail 'install receipt has an invalid launcher directory'
+
+mkdir -p "$update_dir"
+chmod 700 "$update_dir"
+
+read_state_number() {
+  local field="$1" value=0
+  if [[ -r "$state_file" ]]; then value=$(jq -r --arg field "$field" '.[$field] // 0' "$state_file" 2>/dev/null || printf 0); fi
+  [[ "$value" =~ ^[0-9]+$ ]] || value=0
+  printf '%s\n' "$value"
+}
+
+write_state() {
+  local checked="$1" available="$2" error="$3" failures="$4" next="$5" applied="${6:-}"
+  local temporary="$update_dir/.state.$$.tmp"
+  jq -n --arg current "$current" --arg available "$available" --arg error "$error" \
+    --arg applied "$applied" --arg method "$method" --argjson checked "$checked" \
+    --argjson failures "$failures" --argjson next "$next" \
+    '{schema:1,currentVersion:$current,availableVersion:$available,appliedVersion:$applied,
+      installMethod:$method,lastCheckedAt:$checked,failureCount:$failures,nextAttemptAt:$next,lastError:$error}' \
+    > "$temporary"
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$state_file"
+}
+
+release_lock() {
+  if [[ -r "$lock_dir/owner" ]]; then
+    local owner
+    read -r owner < "$lock_dir/owner" || owner=0
+    [[ "$owner" == "$$" ]] && rm -rf "$lock_dir"
+  fi
+}
+
+acquire_lock() {
+  local owner=0 age=0 now
+  now=$(date +%s)
+  if mkdir "$lock_dir" 2>/dev/null; then printf '%s\n' "$$" > "$lock_dir/owner"; trap release_lock EXIT; return 0; fi
+  if [[ -r "$lock_dir/owner" ]]; then read -r owner < "$lock_dir/owner" || owner=0; fi
+  if stat -f '%m' "$lock_dir" >/dev/null 2>&1; then age=$(( now - $(stat -f '%m' "$lock_dir") ))
+  else age=$(( now - $(stat -c '%Y' "$lock_dir" 2>/dev/null || printf '%s' "$now") )); fi
+  if { [[ ! "$owner" =~ ^[0-9]+$ ]] || ! kill -0 "$owner" 2>/dev/null; } && (( age >= 300 )); then
+    local stale="$update_dir/lock.stale.$$.$now"
+    if mv "$lock_dir" "$stale" 2>/dev/null; then rm -rf "$stale"; mkdir "$lock_dir"; printf '%s\n' "$$" > "$lock_dir/owner"; trap release_lock EXIT; return 0; fi
+  fi
+  return 1
+}
+
+curl_https() {
+  local effective
+  effective=$("$curl_bin" --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    --connect-timeout 8 --max-time "$1" --output "$2" --write-out '%{url_effective}' "$3") || return
+  case "$effective" in
+    https://api.github.com/*|https://github.com/*|https://objects.githubusercontent.com/*|https://release-assets.githubusercontent.com/*) ;;
+    *) rm -f "$2"; return 22 ;;
+  esac
+}
+
+record_failure() {
+  local message="$1" now failures delay next available
+  now=$(date +%s); failures=$(read_state_number failureCount); failures=$(( failures + 1 ))
+  delay=300
+  local index=1
+  while (( index < failures && delay < 86400 )); do delay=$(( delay * 2 )); index=$(( index + 1 )); done
+  (( delay <= 86400 )) || delay=86400
+  next=$(( now + delay ))
+  available=""
+  [[ -r "$state_file" ]] && available=$(jq -r '.availableVersion // ""' "$state_file" 2>/dev/null || true)
+  write_state "$now" "$available" "$message" "$failures" "$next"
+  (( background )) || printf 'claudex self-update: %s\n' "$message" >&2
+}
+
+check_release() {
+  local now next metadata tag candidate
+  now=$(date +%s); next=$(read_state_number nextAttemptAt)
+  if (( background && now < next )); then return 3; fi
+  if (( background )); then
+    local last
+    last=$(read_state_number lastCheckedAt)
+    (( now - last >= interval )) || return 3
+  fi
+  acquire_lock || return 3
+  metadata="$update_dir/release.$$.json"
+  if ! curl_https 15 "$metadata" "$api_url"; then rm -f "$metadata"; record_failure 'stable release check failed; will retry later'; return 1; fi
+  tag=$(jq -r 'if (.draft == false and .prerelease == false and (.tag_name | type) == "string") then .tag_name else empty end' "$metadata" 2>/dev/null || true)
+  rm -f "$metadata"
+  [[ "$tag" =~ ^v(.+)$ ]] || { record_failure 'release service returned no valid stable release'; return 1; }
+  candidate=${BASH_REMATCH[1]}
+  parse_semver "$candidate" || { record_failure 'release service returned an invalid stable version'; return 1; }
+  if version_is_newer "$candidate" "$current"; then latest="$candidate"
+  else
+    case $? in
+      1) latest="" ;;
+      *) record_failure 'release version could not be compared safely'; return 1 ;;
+    esac
+  fi
+  write_state "$now" "$latest" "" 0 $(( now + interval ))
+  return 0
+}
+
+state_available() {
+  [[ -r "$state_file" ]] || return 1
+  latest=$(jq -r 'if (.availableVersion | type) == "string" then .availableVersion else empty end' "$state_file")
+  [[ -n "$latest" ]] && version_is_newer "$latest" "$current"
+}
+
+apply_manager_update() {
+  local installed_version manager_wrapper="" candidate
+  case "$method" in
+    npm)
+      command -v npm >/dev/null 2>&1 || fail 'npm is not available; run: npm install --global claudex-codex@latest'
+      npm install --global "claudex-codex@$latest"
+      ;;
+    homebrew)
+      command -v brew >/dev/null 2>&1 || fail 'Homebrew is not available; run: brew upgrade claudex'
+      brew upgrade beamoint/tap/claudex
+      ;;
+    scoop)
+      command -v scoop >/dev/null 2>&1 || fail 'Scoop is not available; run: scoop update claudex'
+      scoop update claudex
+      ;;
+    winget)
+      command -v winget >/dev/null 2>&1 || fail 'WinGet is not available'
+      winget upgrade --id BeamoINT.Claudex --exact --accept-package-agreements --accept-source-agreements
+      ;;
+  esac
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    case "$candidate" in "$bin_dir/claudex"|"$config_dir/package-bin/claudex") continue ;; esac
+    manager_wrapper="$candidate"
+    break
+  done < <(type -a -p claudex 2>/dev/null | awk '!seen[$0]++')
+  [[ -n "$manager_wrapper" ]] || fail 'package manager completed, but its public Claudex wrapper is not available'
+  installed_version=$("$manager_wrapper" --package-version 2>/dev/null || true)
+  [[ "$installed_version" == "$latest" ]] || fail "package manager did not activate expected Claudex $latest; current managed installation was retained"
+  "$manager_wrapper" --package-setup
+  [[ "$(jq -r '.version // empty' "$receipt_file" 2>/dev/null || true)" == "$latest" ]] || \
+    fail 'package setup did not confirm the expected release; current managed installation was retained'
+}
+
+validate_archive() {
+  local archive="$1" expected_root="claudex-$latest/" entry type valid=1 names="$update_dir/names.$$" types="$update_dir/types.$$"
+  tar -tzf "$archive" > "$names" || { rm -f "$names" "$types"; return 1; }
+  tar -tvzf "$archive" | awk '{print substr($1,1,1)}' > "$types" || { rm -f "$names" "$types"; return 1; }
+  while IFS= read -r entry; do
+    [[ -n "$entry" && "$entry" != /* && "$entry" != *\\* ]] || { valid=0; break; }
+    [[ "$entry" == "$expected_root"* ]] || { valid=0; break; }
+    case "/$entry/" in */../*|*/./*) valid=0; break ;; esac
+  done < "$names"
+  if (( valid )); then
+    while IFS= read -r type; do case "$type" in -|d) ;; *) valid=0; break ;; esac; done < "$types"
+  fi
+  rm -f "$names" "$types"
+  (( valid ))
+}
+
+backup_managed_files() {
+  local destination="$1" path relative existed
+  mkdir -p "$destination"
+  for path in "$bin_dir/claudex" "$config_dir/settings.json" "$config_dir/statusline" \
+    "$config_dir/usage-limit" "$config_dir/codex-session" "$config_dir/preload.cjs" \
+    "$config_dir/self-update" "$config_dir/skills/usage-limit/SKILL.md" "$config_dir/env" "$config_dir/cliproxyapi.yaml" \
+    "$config_dir/install.json"; do
+    relative=${path#"$config_dir"/}
+    [[ "$relative" != "$path" ]] || relative="launcher/claudex"
+    existed=0
+    [[ -e "$path" ]] && existed=1
+    printf '%s\t%s\n' "$existed" "$relative" >> "$destination/.manifest"
+    (( existed )) || continue
+    mkdir -p "$destination/$(dirname "$relative")"
+    cp -p "$path" "$destination/$relative"
+  done
+}
+
+restore_managed_files() {
+  local source="$1" existed relative target
+  [[ -r "$source/.manifest" ]] || return 1
+  while IFS=$'\t' read -r existed relative; do
+    if [[ "$relative" == launcher/claudex ]]; then target="$bin_dir/claudex"
+    else target="$config_dir/$relative"; fi
+    if [[ "$existed" == 1 ]]; then
+      mkdir -p "$(dirname "$target")"
+      cp -p "$source/$relative" "$target"
+    else
+      rm -f "$target"
+    fi
+  done < "$source/.manifest"
+}
+
+apply_archive_update() {
+  local asset="claudex-$latest.tar.gz" base archive sums expected actual stage backup staged_root
+  base="https://github.com/$repository/releases/download/v$latest"
+  archive="$update_dir/$asset.$$"; sums="$update_dir/SHA256SUMS.$$"; stage="$update_dir/stage.$$"; backup="$update_dir/rollback.$$"
+  rm -rf "$archive" "$sums" "$stage" "$backup"
+  curl_https 180 "$archive" "$base/$asset" || { rm -f "$archive"; fail 'release archive download failed; current installation was not changed'; }
+  curl_https 30 "$sums" "$base/SHA256SUMS" || { rm -f "$archive" "$sums"; fail 'release checksum download failed; current installation was not changed'; }
+  expected=$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset {print tolower($1)}' "$sums")
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || { rm -f "$archive" "$sums"; fail 'release checksum manifest is invalid'; }
+  if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$archive" | awk '{print tolower($1)}')
+  else actual=$(shasum -a 256 "$archive" | awk '{print tolower($1)}'); fi
+  [[ "$actual" == "$expected" ]] || { rm -f "$archive" "$sums"; fail 'release archive checksum mismatch; current installation was not changed'; }
+  validate_archive "$archive" || { rm -f "$archive" "$sums"; fail 'release archive contains unsafe paths or file types'; }
+  mkdir -p "$stage"; tar -xzf "$archive" -C "$stage"
+  staged_root="$stage/claudex-$latest"
+  [[ -x "$staged_root/install.sh" ]] || { rm -rf "$archive" "$sums" "$stage"; fail 'release archive is missing its installer'; }
+  [[ "$(jq -r '.version // empty' "$staged_root/package.json")" == "$latest" ]] || { rm -rf "$archive" "$sums" "$stage"; fail 'release archive version does not match its tag'; }
+  bash -n "$staged_root/install.sh" "$staged_root/claudex" "$staged_root/self-update" || { rm -rf "$archive" "$sums" "$stage"; fail 'release scripts failed validation'; }
+  backup_managed_files "$backup"
+  if ! CLAUDEX_INSTALL_METHOD=archive CLAUDEX_BIN_DIR="$bin_dir" CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 \
+      CLAUDEX_SKIP_SERVICE_START=1 CLAUDEX_SKIP_CLAUDE_UPDATE=1 bash "$staged_root/install.sh"; then
+    restore_managed_files "$backup"
+    rm -rf "$archive" "$sums" "$stage" "$backup"
+    fail 'installer failed; restored the previous managed files'
+  fi
+  if [[ "$(jq -r '.version // empty' "$receipt_file" 2>/dev/null || true)" != "$latest" ]]; then
+    restore_managed_files "$backup"
+    rm -rf "$archive" "$sums" "$stage" "$backup"
+    fail 'installer did not confirm the expected release; restored the previous managed files'
+  fi
+  rm -rf "$archive" "$sums" "$stage" "$backup"
+}
+
+case "$action" in
+  status)
+    available=""; error=""; checked=0
+    if [[ -r "$state_file" ]]; then
+      available=$(jq -r '.availableVersion // ""' "$state_file"); error=$(jq -r '.lastError // ""' "$state_file"); checked=$(jq -r '.lastCheckedAt // 0' "$state_file")
+    fi
+    printf 'Claudex: %s\nInstall method: %s\n' "$current" "$method"
+    [[ -z "$available" ]] || printf 'Available: %s\n' "$available"
+    (( checked == 0 )) || printf 'Last checked: %s\n' "$checked"
+    [[ -z "$error" ]] || printf 'Last update error: %s\n' "$error"
+    ;;
+  check)
+    if check_release; then
+      if [[ -n "${latest:-}" ]]; then say "Claudex $latest is available. Run: claudex self-update --apply"
+      else say "Claudex $current is up to date."; fi
+    else
+      result=$?; (( result == 3 )) || exit "$result"
+    fi
+    ;;
+  apply)
+    check_result=0
+    check_release || check_result=$?
+    if (( check_result != 0 )); then
+      # Code 3 means another updater owns the lock or this background check is
+      # intentionally deferred. Never continue into an unlocked stale-state
+      # apply; a later launch will retry safely.
+      (( check_result == 3 )) && exit 0
+      exit "$check_result"
+    fi
+    state_available || { say "Claudex $current is up to date."; exit 0; }
+    case "$method" in
+      npm|homebrew|scoop|winget) apply_manager_update ;;
+      archive|git) apply_archive_update ;;
+    esac
+    applied="$latest"; current="$latest"
+    now=$(date +%s); write_state "$now" "" "" 0 $(( now + interval )) "$applied"
+    say "Updated Claudex to $applied. New sessions will use the updated release."
+    ;;
+esac

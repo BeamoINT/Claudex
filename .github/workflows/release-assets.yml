@@ -17,7 +17,12 @@ jobs:
       - name: Build distribution archives
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: ./scripts/build-release.sh "${RELEASE_TAG#v}"
+        run: |
+          test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
+          npm test
+          ./scripts/build-release.sh "${RELEASE_TAG#v}"
+          tar -tzf "dist/claudex-${RELEASE_TAG#v}.tar.gz" | grep -Fx "claudex-${RELEASE_TAG#v}/install.sh"
+          unzip -Z1 "dist/claudex-${RELEASE_TAG#v}-windows.zip" | grep -Fx "claudex-${RELEASE_TAG#v}/install.ps1"
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}

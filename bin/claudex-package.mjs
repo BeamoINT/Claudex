@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { constants as osConstants, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -13,27 +13,29 @@ const packageName = manifest.name;
 const isWindows = process.platform === 'win32';
 const home = isWindows ? process.env.USERPROFILE || homedir() : process.env.HOME || homedir();
 const configDir = process.env.CLAUDEX_CONFIG_DIR || join(home, '.config', 'claudex');
-const requestedBinDir = process.env.CLAUDEX_BIN_DIR || join(home, '.local', 'bin');
 const markerPath = join(configDir, 'package-manager.json');
 const setupLockPath = join(configDir, 'package-setup.lock');
 const envPath = join(configDir, 'env');
-const packageEntrypoint = fileURLToPath(import.meta.url);
 
-function sameFile(left, right) {
-  try {
-    return realpathSync(left) === realpathSync(right);
-  } catch {
-    return false;
-  }
+// A package manager owns the public `claudex` shim. Keep the managed launcher
+// private so it cannot shadow or overwrite npm, Homebrew, Scoop, or WinGet's
+// command and prevent a later package version from running this bootstrap.
+const binDir = join(configDir, 'package-bin');
+const launcherPath = join(binDir, isWindows ? 'claudex.ps1' : 'claudex');
+
+function detectedInstallMethod() {
+  const explicit = process.env.CLAUDEX_INSTALL_METHOD;
+  if (['npm', 'homebrew', 'scoop', 'winget'].includes(explicit)) return explicit;
+  const normalizedRoot = packageRoot.replaceAll('\\', '/').toLowerCase();
+  // npm commonly installs global packages below /opt/homebrew/lib/node_modules
+  // on Apple Silicon. Only a Cellar path proves that Homebrew owns this shim.
+  if (normalizedRoot.includes('/cellar/')) return 'homebrew';
+  if (normalizedRoot.includes('/scoop/apps/')) return 'scoop';
+  if (normalizedRoot.includes('/microsoft/winget/packages/') || normalizedRoot.includes('/winget/packages/')) return 'winget';
+  return 'npm';
 }
 
-// Never let the bootstrap installer replace the package manager's own command
-// shim when an npm/Homebrew/Scoop bin directory is supplied as CLAUDEX_BIN_DIR.
-const requestedLauncher = join(requestedBinDir, isWindows ? 'claudex.ps1' : 'claudex');
-const binDir = sameFile(requestedLauncher, packageEntrypoint)
-  ? join(configDir, 'package-bin')
-  : requestedBinDir;
-const launcherPath = join(binDir, isWindows ? 'claudex.ps1' : 'claudex');
+const installMethod = detectedInstallMethod();
 
 function fail(message, code = 1) {
   process.stderr.write(`claudex: ${message}\n`);
@@ -55,6 +57,7 @@ function writeMarker() {
   const marker = {
     package: packageName,
     version,
+    method: installMethod,
     installedAt: new Date().toISOString(),
   };
   writeFileSync(temporary, `${JSON.stringify(marker, null, 2)}\n`, { mode: 0o600 });
@@ -154,7 +157,12 @@ function run(command, args, env = process.env) {
 
 function runInstaller(login) {
   process.stderr.write(`claudex: preparing ${packageName} ${version}...\n`);
-  const installerEnvironment = { ...process.env, CLAUDEX_BIN_DIR: binDir };
+  const installerEnvironment = {
+    ...process.env,
+    CLAUDEX_BIN_DIR: binDir,
+    CLAUDEX_INSTALL_METHOD: installMethod,
+    CLAUDEX_PACKAGE_ROOT: packageRoot,
+  };
   let status;
   if (isWindows) {
     const args = [
@@ -187,6 +195,7 @@ function needsSetup() {
         join(configDir, 'usage-limit.ps1'),
         join(configDir, 'codex-session.ps1'),
         join(configDir, 'preload.cjs'),
+        join(configDir, 'self-update.ps1'),
         join(configDir, 'skills', 'usage-limit', 'SKILL.md'),
         join(configDir, 'cliproxyapi.yaml'),
       ]
@@ -197,6 +206,7 @@ function needsSetup() {
         join(configDir, 'usage-limit'),
         join(configDir, 'codex-session'),
         join(configDir, 'preload.cjs'),
+        join(configDir, 'self-update'),
         join(configDir, 'skills', 'usage-limit', 'SKILL.md'),
         join(configDir, 'cliproxyapi.yaml'),
       ];
@@ -204,7 +214,8 @@ function needsSetup() {
     !existsSync(envPath) ||
     managedFiles.some((path) => !existsSync(path)) ||
     marker?.package !== packageName ||
-    marker?.version !== version
+    marker?.version !== version ||
+    marker?.method !== installMethod
   );
 }
 

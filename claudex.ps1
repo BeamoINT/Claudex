@@ -22,7 +22,7 @@ $sessionEnvironmentNames = @(
     'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES', 'CLAUDE_CODE_AUTO_MODE_MODEL',
     'CLAUDE_CODE_BG_CLASSIFIER_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_ALWAYS_ENABLE_EFFORT',
     'CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY', 'CLAUDE_CODE_MAX_RETRIES', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
-    'CLAUDE_CODE_AUTO_COMPACT_WINDOW'
+    'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_CODE_DISABLE_1M_CONTEXT'
 )
 $previousSessionEnvironment = @{}
 foreach ($environmentName in $sessionEnvironmentNames) {
@@ -70,7 +70,7 @@ $backgroundModel = Env-OrDefault 'CLAUDEX_BACKGROUND_MODEL' 'gpt-5.6-luna'
 $subagentModel = Env-OrDefault 'CLAUDEX_SUBAGENT_MODEL' 'gpt-5.6-terra'
 $toolConcurrency = Env-OrDefault 'CLAUDEX_MAX_TOOL_USE_CONCURRENCY' '3'
 $agentConcurrency = Env-OrDefault 'CLAUDEX_MAX_AGENT_CONCURRENCY' '3'
-$maxRetries = Env-OrDefault 'CLAUDEX_MAX_RETRIES' '4'
+$maxRetries = Env-OrDefault 'CLAUDEX_MAX_RETRIES' '15'
 $contextWindow = Env-OrDefault 'CLAUDEX_CONTEXT_WINDOW' '400000'
 $compactWindow = Env-OrDefault 'CLAUDEX_AUTO_COMPACT_WINDOW' '280000'
 $mousePointer = Env-OrDefault 'CLAUDEX_MOUSE_POINTER_SHAPE' 'pointer'
@@ -82,8 +82,28 @@ $usageSource = Env-OrDefault 'CLAUDEX_USAGE_SOURCE' 'auto'
 $usageAlert = Env-OrDefault 'CLAUDEX_USAGE_ALERT_PERCENT' '20'
 $claudeAutoUpdate = Env-OrDefault 'CLAUDEX_CLAUDE_AUTO_UPDATE' 'on'
 $claudeUpdateInterval = Env-OrDefault 'CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS' '86400'
+$claudexAutoUpdate = Env-OrDefault 'CLAUDEX_AUTO_UPDATE' 'on'
+$claudexUpdateInterval = Env-OrDefault 'CLAUDEX_UPDATE_INTERVAL_SECONDS' '86400'
 $planModePolicy = Env-OrDefault 'CLAUDEX_PLAN_MODE_POLICY' 'conservative'
 $codexSessionHelper = Env-OrDefault 'CLAUDEX_CODEX_SESSION_HELPER' (Join-Path $configDir 'codex-session.ps1')
+$selfUpdateHelper = Env-OrDefault 'CLAUDEX_SELF_UPDATE_HELPER' (Join-Path $configDir 'self-update.ps1')
+
+if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq 'self-update') {
+    if (-not (Test-Path -LiteralPath $selfUpdateHelper -PathType Leaf)) { Fail 'self-update helper is missing; rerun the installer.' }
+    $selfUpdateOption = if ($ClaudeArguments.Count -ge 2) { [string]$ClaudeArguments[1] } else { '--status' }
+    $selfUpdateSwitch = switch ($selfUpdateOption) {
+        '--check' { '-Check' }
+        '--apply' { '-Apply' }
+        '--status' { '-Status' }
+        default { Fail 'self-update accepts --check, --apply, or --status.' 2 }
+    }
+    if ($ClaudeArguments.Count -gt 2) { Fail 'self-update accepts exactly one action.' 2 }
+    $powerShellHost = if (Get-Command powershell.exe -CommandType Application -ErrorAction SilentlyContinue) {
+        (Get-Command powershell.exe -CommandType Application).Source
+    } else { (Get-Process -Id $PID).Path }
+    & $powerShellHost -NoLogo -NoProfile -ExecutionPolicy Bypass -File $selfUpdateHelper $selfUpdateSwitch
+    exit $LASTEXITCODE
+}
 
 if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('--login', '--logout', '--auth-status')) {
     if (-not (Test-Path -LiteralPath $codexSessionHelper -PathType Leaf)) { Fail 'authentication helper is missing; reinstall Claudex.' }
@@ -93,7 +113,7 @@ if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('--login', '--lo
 }
 
 $earlyRuntimeBypass = $false
-$earlyMaintenanceCommands = @('--help', '-h', '--version', '-v', 'agents', 'auth', 'gateway', 'install', 'mcp', 'plugin', 'plugins', 'project', 'setup-token', 'ultrareview', 'update', 'upgrade')
+$earlyMaintenanceCommands = @('--help', '-h', '--version', '-v', 'agents', 'auth', 'gateway', 'install', 'mcp', 'plugin', 'plugins', 'project', 'self-update', 'setup-token', 'ultrareview', 'update', 'upgrade')
 foreach ($earlyArgument in $ClaudeArguments) {
     if ($earlyArgument -eq '--claude-chrome') { $earlyRuntimeBypass = $true; break }
     if ($earlyArgument -in @('--sol', '--terra', '--luna', '--solplan', '--manual', '--auto', '--accept-edits', '--ultracode', '--max-effort')) { continue }
@@ -149,20 +169,23 @@ if (-not $earlyRuntimeBypass) {
     $usageMaxStaleNumber = Require-Integer 'CLAUDEX_USAGE_MAX_STALE_SECONDS' $usageMaxStale $usageRefreshNumber 604800
     $usageAlertNumber = Require-Integer 'CLAUDEX_USAGE_ALERT_PERCENT' $usageAlert 0 100
     $claudeUpdateIntervalNumber = Require-Integer 'CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS' $claudeUpdateInterval 3600 2592000
+    $claudexUpdateIntervalNumber = Require-Integer 'CLAUDEX_UPDATE_INTERVAL_SECONDS' $claudexUpdateInterval 3600 2592000
     if ($mousePointer -notin @('pointer', 'default', 'off')) { Fail 'CLAUDEX_MOUSE_POINTER_SHAPE must be pointer, default, or off.' 2 }
     if ($usageDisplay -notin @('on', 'off')) { Fail 'CLAUDEX_USAGE_DISPLAY must be on or off.' 2 }
     if ($usageSource -notin @('auto', 'web', 'app-server')) { Fail 'CLAUDEX_USAGE_SOURCE must be auto, web, or app-server.' 2 }
     if ($claudeAutoUpdate -notin @('on', 'off')) { Fail 'CLAUDEX_CLAUDE_AUTO_UPDATE must be on or off.' 2 }
+    if ($claudexAutoUpdate -notin @('on', 'notify', 'off')) { Fail 'CLAUDEX_AUTO_UPDATE must be on, notify, or off.' 2 }
     if ($planModePolicy -notin @('conservative', 'normal')) { Fail 'CLAUDEX_PLAN_MODE_POLICY must be conservative or normal.' 2 }
 } else {
     $toolConcurrencyNumber = 3; $agentConcurrencyNumber = 3; $maxRetriesNumber = 4
     $contextWindowNumber = 400000; $compactWindowNumber = 280000
     $usageRefreshNumber = 300; $usageTimeoutNumber = 8; $usageMaxStaleNumber = 86400; $usageAlertNumber = 20
-    $claudeUpdateIntervalNumber = 86400
+    $claudeUpdateIntervalNumber = 86400; $claudexUpdateIntervalNumber = 86400
     if ($mousePointer -notin @('pointer', 'default', 'off')) { $mousePointer = 'pointer' }
     if ($usageDisplay -notin @('on', 'off')) { $usageDisplay = 'on' }
     if ($usageSource -notin @('auto', 'web', 'app-server')) { $usageSource = 'auto' }
     if ($claudeAutoUpdate -notin @('on', 'off')) { $claudeAutoUpdate = 'on' }
+    if ($claudexAutoUpdate -notin @('on', 'notify', 'off')) { $claudexAutoUpdate = 'on' }
     if ($planModePolicy -notin @('conservative', 'normal')) { $planModePolicy = 'conservative' }
     if ($permissionMode -notin @('manual', 'auto', 'acceptEdits', 'dontAsk', 'plan')) { $permissionMode = 'auto' }
     if ($autoModeModel -notin $managedCodexModelIds) { $autoModeModel = 'gpt-5.6-terra' }
@@ -180,21 +203,48 @@ $managedModels = @(
 )
 
 function Update-ModelCache {
-    $state = $null
-    if (Test-Path -LiteralPath $stateFile -PathType Leaf) {
-        try { $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json } catch { $state = $null }
+    $lockDirectory = Join-Path (Join-Path $configDir 'run') 'model-display.lock'
+    [IO.Directory]::CreateDirectory((Split-Path $lockDirectory -Parent)) | Out-Null
+    $lockHeld = $false
+    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        try {
+            New-Item -Path $lockDirectory -ItemType Directory -ErrorAction Stop | Out-Null
+            $lockHeld = $true
+            break
+        } catch {
+            try {
+                $age = ([DateTime]::UtcNow - (Get-Item -LiteralPath $lockDirectory -ErrorAction Stop).LastWriteTimeUtc).TotalSeconds
+                if ($age -ge 60) { Remove-Item -LiteralPath $lockDirectory -Force -ErrorAction SilentlyContinue }
+            } catch { }
+            Start-Sleep -Milliseconds 20
+        }
     }
-    if ($null -eq $state) { $state = [pscustomobject]@{} }
-    $managedIds = @($managedModels | ForEach-Object { $_.value })
-    $preserved = @()
-    if ($null -ne $state.PSObject.Properties['additionalModelOptionsCache']) {
-        $preserved = @($state.additionalModelOptionsCache | Where-Object { $_.value -notin $managedIds })
+    if (-not $lockHeld) { return }
+
+    $tempFile = $null
+    try {
+        $state = $null
+        if (Test-Path -LiteralPath $stateFile -PathType Leaf) {
+            try { $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json } catch { $state = $null }
+        }
+        if ($null -eq $state) { $state = [pscustomobject]@{} }
+        $managedIds = @($managedModels | ForEach-Object { $_.value })
+        $preserved = @()
+        if ($null -ne $state.PSObject.Properties['additionalModelOptionsCache']) {
+            $preserved = @($state.additionalModelOptionsCache | Where-Object { $_.value -notin $managedIds })
+        }
+        $state | Add-Member -NotePropertyName additionalModelOptionsCache -NotePropertyValue @($preserved + $managedModels) -Force
+        [IO.Directory]::CreateDirectory($configDir) | Out-Null
+        $tempFile = Join-Path $configDir ('.claude.json.tmp.' + [guid]::NewGuid().ToString('N'))
+        [IO.File]::WriteAllText($tempFile, ($state | ConvertTo-Json -Depth 100), $utf8)
+        Move-Item -LiteralPath $tempFile -Destination $stateFile -Force
+        $tempFile = $null
+    } finally {
+        if ($tempFile -and (Test-Path -LiteralPath $tempFile -PathType Leaf)) {
+            Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $lockDirectory -Force -ErrorAction SilentlyContinue
     }
-    $state | Add-Member -NotePropertyName additionalModelOptionsCache -NotePropertyValue @($preserved + $managedModels) -Force
-    [IO.Directory]::CreateDirectory($configDir) | Out-Null
-    $tempFile = Join-Path $configDir ('.claude.json.tmp.' + [guid]::NewGuid().ToString('N'))
-    [IO.File]::WriteAllText($tempFile, ($state | ConvertTo-Json -Depth 100), $utf8)
-    Move-Item -LiteralPath $tempFile -Destination $stateFile -Force
 }
 
 function ConvertTo-WindowsCommandLineArgument([string] $Value) {
@@ -407,13 +457,24 @@ function Assert-ProxyModelAvailable([string] $RequiredModel) {
     }
 }
 
+$script:lastProxyFailureWasAuthSync = $false
+$script:lastProxyAuthSyncExitCode = 0
+$script:interactiveLoginAttempted = $false
+
 function Ensure-Proxy([string] $RequiredModel = $model) {
+    $script:lastProxyFailureWasAuthSync = $false
+    $script:lastProxyAuthSyncExitCode = 0
     Write-ProxyWatcherTestTrace 'recovery: begin'
     if (-not (Test-Path -LiteralPath $codexSessionHelper -PathType Leaf)) {
         throw "authentication helper is missing: $codexSessionHelper; reinstall Claudex."
     }
     & $codexSessionHelper sync
-    if ($LASTEXITCODE -ne 0) { throw "authentication synchronization failed with exit code $LASTEXITCODE." }
+    if ($LASTEXITCODE -ne 0) {
+        $syncExitCode = $LASTEXITCODE
+        $script:lastProxyFailureWasAuthSync = $true
+        $script:lastProxyAuthSyncExitCode = $syncExitCode
+        throw "authentication synchronization failed with exit code $syncExitCode."
+    }
     Write-ProxyWatcherTestTrace 'recovery: authentication synchronized'
     $initialHealth = Get-ProxyHealth 3000
     if ($initialHealth -eq 'healthy') { Assert-ProxyModelAvailable $RequiredModel; return }
@@ -557,6 +618,55 @@ function Ensure-Proxy([string] $RequiredModel = $model) {
     }
 }
 
+function Test-InteractiveCodexLoginAllowed {
+    if ($env:CLAUDEX_DISABLE_INTERACTIVE_LOGIN -eq '1') { return $false }
+    if ($env:CI -and $env:CI -notin @('0', 'false', 'FALSE', 'no', 'NO')) { return $false }
+    if (-not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) { return $true }
+    return ($env:CLAUDEX_TEST_TTY_INPUT -eq '1' -and $env:CLAUDEX_TEST_TTY_OUTPUT -eq '1')
+}
+
+# Keep login browser launches exclusive to the foreground startup path. The
+# proxy watcher deliberately calls Ensure-Proxy directly and therefore remains
+# prompt-free even when its parent owns an interactive console.
+function Ensure-ProxyForLaunch([string] $RequiredModel = $model) {
+    try {
+        Ensure-Proxy $RequiredModel
+        return
+    } catch {
+        $initialFailure = $_
+    }
+    if (-not $script:lastProxyFailureWasAuthSync) { throw $initialFailure }
+    if ($script:lastProxyAuthSyncExitCode -notin @(11, 13, 14)) { throw $initialFailure }
+
+    if ($script:interactiveLoginAttempted) {
+        [Console]::Error.WriteLine('claudex: Codex authentication is still unavailable after the sign-in attempt. Run `claudex --login` to retry.')
+        throw $initialFailure
+    }
+    if (-not (Test-InteractiveCodexLoginAllowed)) {
+        [Console]::Error.WriteLine('claudex: Codex sign-in is required. Run `claudex --login` in an interactive terminal, then retry.')
+        throw $initialFailure
+    }
+
+    $script:interactiveLoginAttempted = $true
+    [Console]::Error.WriteLine('claudex: Codex sign-in is required. Opening the official Codex browser login...')
+    Write-ProxyRecoveryDiagnostic 'foreground startup requested official Codex browser login'
+    & $codexSessionHelper login
+    if ($LASTEXITCODE -ne 0) {
+        Write-ProxyRecoveryDiagnostic "foreground Codex browser login failed with exit code $LASTEXITCODE"
+        throw 'Codex sign-in did not complete. Run `claudex --login` to retry.'
+    }
+
+    try {
+        Ensure-Proxy $RequiredModel
+        Write-ProxyRecoveryDiagnostic 'foreground Codex browser login synchronized successfully'
+    } catch {
+        if ($script:lastProxyFailureWasAuthSync) {
+            [Console]::Error.WriteLine('claudex: Codex authentication is still unavailable after sign-in. Run `claudex --login` to retry.')
+        }
+        throw
+    }
+}
+
 function Start-AuthWatcher {
     if ($env:CLAUDEX_SKIP_AUTH_WATCHER -eq '1') { return $null }
     $hostExecutable = (Get-Process -Id $PID).Path
@@ -580,10 +690,16 @@ function Write-ProxyWatcherTestTrace([string] $Message) {
 
 function Invoke-ProxyWatchLoop([int] $ParentProcessId) {
     Write-ProxyWatcherTestTrace "watcher entered for parent $ParentProcessId"
+    $consecutiveFailures = 0
     while (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue) {
         Start-Sleep -Seconds 1
         if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { break }
-        if (-not (Test-ProxyReachable)) {
+        if (Test-ProxyReachable) {
+            $consecutiveFailures = 0
+        } else {
+            $consecutiveFailures++
+        }
+        if ($consecutiveFailures -ge 2) {
             Write-ProxyWatcherTestTrace 'proxy unreachable; starting recovery'
             try {
                 Ensure-Proxy
@@ -592,6 +708,7 @@ function Invoke-ProxyWatchLoop([int] $ParentProcessId) {
                 Write-ProxyWatcherTestTrace ("proxy recovery failed: " + $_.Exception.Message)
                 Write-ProxyRecoveryDiagnostic ("proxy recovery failed: " + $_.Exception.Message)
             }
+            $consecutiveFailures = 0
         }
     }
     Write-ProxyWatcherTestTrace 'watcher exited'
@@ -662,7 +779,35 @@ function Update-AutoModeRules {
             }
             $defaultsAreFresh = $true
         } catch {
-            if ($null -eq $previousSnapshot) { return }
+            if ($null -eq $previousSnapshot) {
+                $fallbackSettings = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
+                if ($null -eq $fallbackSettings.PSObject.Properties['autoMode']) { return }
+                $fallbackAutoMode = $fallbackSettings.autoMode
+                $fallbackAllow = if ($null -ne $fallbackAutoMode.PSObject.Properties['allow']) { @($fallbackAutoMode.allow) } else { @() }
+                $fallbackEnvironment = if ($null -ne $fallbackAutoMode.PSObject.Properties['environment']) { @($fallbackAutoMode.environment) } else { @() }
+                $fallbackSoftDeny = if ($null -ne $fallbackAutoMode.PSObject.Properties['soft_deny']) { @($fallbackAutoMode.soft_deny) } else { @() }
+                $fallbackHardDeny = if ($null -ne $fallbackAutoMode.PSObject.Properties['hard_deny']) { @($fallbackAutoMode.hard_deny) } else { @() }
+                $managedAllowOnly = @($fallbackAllow | Where-Object {
+                    -not ($_.StartsWith('Explicit Action Approval:') -or $_.StartsWith('Requested Agent Configuration:'))
+                }).Count -eq 0
+                $managedEnvironmentOnly = @($fallbackEnvironment | Where-Object {
+                    -not ($_.StartsWith('User-designated task boundary:') -or $_.StartsWith('Explicitly approved development transfer:'))
+                }).Count -eq 0
+                if ($managedAllowOnly -and $managedEnvironmentOnly -and
+                    $fallbackSoftDeny.Count -eq 0 -and $fallbackHardDeny.Count -eq 0) {
+                    $fallbackAutoMode.PSObject.Properties.Remove('allow')
+                    $fallbackAutoMode.PSObject.Properties.Remove('environment')
+                    if (@($fallbackAutoMode.PSObject.Properties).Count -eq 0) {
+                        $fallbackSettings.PSObject.Properties.Remove('autoMode')
+                    }
+                    $fallbackSerialized = $fallbackSettings | ConvertTo-Json -Depth 100
+                    $fallbackTemp = Join-Path $configDir ('settings.json.tmp.' + [guid]::NewGuid().ToString('N'))
+                    [IO.File]::WriteAllText($fallbackTemp, $fallbackSerialized, $utf8)
+                    Move-Item -LiteralPath $fallbackTemp -Destination $settingsFile -Force
+                    return
+                }
+                throw 'Claude Code auto-mode defaults are unavailable; custom rules were preserved instead of composing an unsafe partial configuration. Update Claude Code or restore the defaults snapshot, then retry.'
+            }
             $defaults = $previousSnapshot
         }
         $settings = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
@@ -671,14 +816,20 @@ function Update-AutoModeRules {
         }
         $previousAllow = @()
         $previousEnvironment = @()
+        $previousSoftDeny = @()
+        $previousHardDeny = @()
         if ($null -ne $previousSnapshot) {
             $previousAllow = @($previousSnapshot.allow)
             $previousEnvironment = @($previousSnapshot.environment)
+            $previousSoftDeny = @($previousSnapshot.soft_deny)
+            $previousHardDeny = @($previousSnapshot.hard_deny)
         }
         $approval = 'Explicit Action Approval: A user message that explicitly approves a specific action and target, including reissuing it after a denial or unambiguously referring to the immediately preceding blocked action with language such as approve that, go ahead, or proceed, satisfies named-and-specific consent for matching SOFT BLOCK rules. Do not force the user to restate the command, ask for duplicate confirmation, or treat the prior denial as permanent. This does not override HARD BLOCK rules or authorize a broader action.'
         $requestedConfig = 'Requested Agent Configuration: Editing agent configuration is routine when the user explicitly asks for that specific configuration or permission change. Treat that edit as user-requested rather than Self-Modification; unrelated permission widening remains blocked.'
         $taskBoundary = 'User-designated task boundary: A repository, cloud project, host, bucket, service, or destination that the user explicitly identifies in their own message as owned or controlled infrastructure and as the intended target is trusted for the specifically requested operation and data flow only. Merely naming a target does not establish trust; do not infer trust for agent-selected destinations, unrelated resources, or broader scopes.'
-        $approvedTransfer = 'Explicitly approved development transfer: When the user explicitly approves an exact source transfer between a named repository and a named build, deployment, or cloud host, treat that named source and destination as inside the task trust boundary for that transfer. Approval may unambiguously refer to the immediately preceding blocked command without repeating it. This never covers a public destination, credentials or secrets, unrelated files, a broader source tree, or a different host.'
+        $approvedTransfer = 'Explicitly approved development transfer: When the user explicitly approves an exact transfer of task-required source from the current trusted repository to an explicitly named, private, user-controlled build or deployment host, treat that source and destination as inside the task trust boundary for that transfer only. Approval may unambiguously refer to the immediately preceding blocked command without repeating it. This never covers a public destination, credentials or secrets, unrelated files, a broader source tree, an agent-selected target, or a different host.'
+        $transferSoftDeny = 'Approved Private Development Transfer [named+specifics — must name the current source repository, the private user-controlled build or deployment host, and the requested transfer]: Transferring only the task-required source from the current trusted repository to that exact named private host requires the user to request or explicitly approve that transfer. Approval may unambiguously refer to the immediately preceding denied transfer. This consent never clears credentials or secrets, a public destination, unrelated files, a broader source tree, an agent-selected target, or a different host.'
+        $hardException = "`n  - Claudex scoped private development transfer exception: Notwithstanding the bulk-scale treatment above, an exact transfer of only task-required source from the current trusted repository to an explicitly named, private, user-controlled build or deployment host is not HARD Data Exfiltration when the user requested or explicitly approved that exact source, destination, and transfer. Evaluate it under Approved Private Development Transfer as named-and-specific SOFT consent. The exception never covers credentials or secrets, a public destination, unrelated files, a broader source tree, an agent-selected target, or a different host; if any condition is missing, the HARD rule remains in force."
         $existingAllow = if ($null -ne $settings.autoMode.PSObject.Properties['allow']) {
             @($settings.autoMode.allow | Where-Object {
                 -not $_.StartsWith('Explicit Action Approval:') -and
@@ -693,10 +844,30 @@ function Update-AutoModeRules {
                 $_ -notin $previousEnvironment
             })
         } else { @() }
+        $existingSoftDeny = if ($null -ne $settings.autoMode.PSObject.Properties['soft_deny']) {
+            @($settings.autoMode.soft_deny | Where-Object {
+                -not $_.StartsWith('Approved Private Development Transfer') -and
+                $_ -notin $previousSoftDeny
+            })
+        } else { @() }
+        $existingHardDeny = if ($null -ne $settings.autoMode.PSObject.Properties['hard_deny']) {
+            @($settings.autoMode.hard_deny | Where-Object {
+                -not $_.Contains('Claudex scoped private development transfer exception:') -and
+                $_ -notin $previousHardDeny
+            })
+        } else { @() }
         $composedAllow = @(@($defaults.allow) + $existingAllow + @($approval, $requestedConfig) | Select-Object -Unique)
         $composedEnvironment = @(@($defaults.environment) + $existingEnvironment + @($taskBoundary, $approvedTransfer) | Select-Object -Unique)
+        $managedHardDeny = @($defaults.hard_deny | ForEach-Object {
+            if ([string] $_ -and ([string] $_).StartsWith('Data Exfiltration:')) { ([string] $_) + $hardException }
+            else { [string] $_ }
+        })
+        $composedSoftDeny = @(@($defaults.soft_deny) + $existingSoftDeny + @($transferSoftDeny) | Select-Object -Unique)
+        $composedHardDeny = @($managedHardDeny + $existingHardDeny | Select-Object -Unique)
         $settings.autoMode | Add-Member -NotePropertyName allow -NotePropertyValue $composedAllow -Force
         $settings.autoMode | Add-Member -NotePropertyName environment -NotePropertyValue $composedEnvironment -Force
+        $settings.autoMode | Add-Member -NotePropertyName soft_deny -NotePropertyValue $composedSoftDeny -Force
+        $settings.autoMode | Add-Member -NotePropertyName hard_deny -NotePropertyValue $composedHardDeny -Force
         $serializedSettings = $settings | ConvertTo-Json -Depth 100
         if ($serializedSettings -ne (Get-Content -LiteralPath $settingsFile -Raw)) {
             $tempFile = Join-Path $configDir ('settings.json.tmp.' + [guid]::NewGuid().ToString('N'))
@@ -717,6 +888,9 @@ function Update-AutoModeRules {
             $snapshotTemp = $null
         }
     } catch {
+        if ($_.Exception.Message.StartsWith('Claude Code auto-mode defaults are unavailable; custom rules were preserved')) {
+            Fail $_.Exception.Message
+        }
         # Older Claude Code builds may not expose auto-mode defaults. The
         # shipped settings remain valid and capability negotiation continues.
     } finally {
@@ -759,6 +933,39 @@ function Start-ClaudeUpdateCheck {
             }
         } finally { Remove-Item -LiteralPath $Lock -Recurse -Force -ErrorAction SilentlyContinue }
     } -ArgumentList $claudePath, $log, $stamp, $lock | Out-Null
+}
+
+function Start-ClaudexUpdateCheck {
+    if ($claudexAutoUpdate -eq 'off' -or $env:CLAUDEX_SKIP_AUTO_UPDATE -eq '1' -or
+        -not (Test-Path -LiteralPath $selfUpdateHelper -PathType Leaf)) { return }
+    $updateDirectory = Join-Path $configDir 'update\claudex'
+    [IO.Directory]::CreateDirectory($updateDirectory) | Out-Null
+    $powerShellHost = if (Get-Command powershell.exe -CommandType Application -ErrorAction SilentlyContinue) {
+        (Get-Command powershell.exe -CommandType Application).Source
+    } else { (Get-Process -Id $PID).Path }
+    $action = if ($claudexAutoUpdate -eq 'on') { '-Apply' } else { '-Check' }
+    $quotedHelper = '"' + $selfUpdateHelper.Replace('"', '\"') + '"'
+    $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedHelper, $action, '-Background')
+    $previousBackground = [Environment]::GetEnvironmentVariable('CLAUDEX_UPDATE_BACKGROUND', 'Process')
+    $previousInterval = [Environment]::GetEnvironmentVariable('CLAUDEX_UPDATE_INTERVAL_SECONDS', 'Process')
+    try {
+        $env:CLAUDEX_UPDATE_BACKGROUND = '1'
+        $env:CLAUDEX_UPDATE_INTERVAL_SECONDS = [string]$claudexUpdateIntervalNumber
+        $parameters = @{
+            FilePath = $powerShellHost
+            ArgumentList = $arguments
+            RedirectStandardOutput = (Join-Path $updateDirectory 'background.stdout.log')
+            RedirectStandardError = (Join-Path $updateDirectory 'background.stderr.log')
+        }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $parameters.WindowStyle = 'Hidden' }
+        Start-Process @parameters | Out-Null
+    } catch {
+        # Background update failures are persisted by the helper when it
+        # starts; a process-launch failure must never break Claudex startup.
+    } finally {
+        [Environment]::SetEnvironmentVariable('CLAUDEX_UPDATE_BACKGROUND', $previousBackground, 'Process')
+        [Environment]::SetEnvironmentVariable('CLAUDEX_UPDATE_INTERVAL_SECONDS', $previousInterval, 'Process')
+    }
 }
 
 function Model-Name([string] $Id) {
@@ -810,6 +1017,7 @@ function Invoke-Doctor {
     Write-Output 'Effort shortcuts: --max-effort and --ultracode (xhigh plus dynamic workflows)'
     Write-Output 'Claude in Chrome: use --claude-chrome for the direct Anthropic profile required by the extension'
     Write-Output "Claude Code updates: $claudeAutoUpdate (checked every ${claudeUpdateIntervalNumber}s)"
+    Write-Output "Claudex updates: $claudexAutoUpdate (checked every ${claudexUpdateIntervalNumber}s; inspect with claudex self-update --status)"
     Write-Output "Plan mode policy: $planModePolicy (implementation-first unless planning is genuinely required)"
     Write-Output 'Rendering: no-flicker mode with native terminal cursor'
     Write-Output 'Terminal UI: fullscreen (launch command hidden while Claudex is open)'
@@ -897,20 +1105,23 @@ while ($index -lt $ClaudeArguments.Count) {
 }
 
 $useProxy = $true
-$injectSessionCustomizations = $true
+$injectAgents = $true
+$injectLeaderGuard = $true
 $injectPermission = $true
-$maintenanceCommands = @('--help', '-h', '--version', '-v', 'agents', 'auth', 'auto-mode', 'doctor', 'gateway', 'install', 'mcp', 'plugin', 'plugins', 'project', 'setup-token', 'ultrareview', 'update', 'upgrade')
+$maintenanceCommands = @('--help', '-h', '--version', '-v', 'agents', 'auth', 'auto-mode', 'doctor', 'gateway', 'install', 'mcp', 'plugin', 'plugins', 'project', 'self-update', 'setup-token', 'ultrareview', 'update', 'upgrade')
 if ($forwardArguments.Count -gt 0 -and $forwardArguments[0] -in $maintenanceCommands) {
     $useProxy = $false
-    $injectSessionCustomizations = $false
+    $injectAgents = $false
+    $injectLeaderGuard = $false
     $injectPermission = $false
 }
 foreach ($argument in $forwardArguments) {
     if ($argument -in @('--safe-mode', '--bare')) {
-        $injectSessionCustomizations = $false
+        $injectAgents = $false
+        $injectLeaderGuard = $false
         $injectPermission = $false
     }
-    if ($argument -eq '--agents') { $injectSessionCustomizations = $false }
+    if ($argument -eq '--agents') { $injectAgents = $false }
     if ($argument -in @('--permission-mode', '--dangerously-skip-permissions', '--allow-dangerously-skip-permissions')) { $injectPermission = $false }
     if ($effortMode -and ($argument -in @('--effort', '--settings') -or $argument.StartsWith('--effort=') -or $argument.StartsWith('--settings='))) {
         Fail "$argument conflicts with the selected Claudex effort shortcut." 2
@@ -920,7 +1131,8 @@ foreach ($argument in $forwardArguments) {
 if ($directChrome) {
     if ($startModel) { Fail '--sol, --terra, --luna, and --solplan cannot be combined with --claude-chrome because Chrome requires a first-party Anthropic model.' 2 }
     $useProxy = $false
-    $injectSessionCustomizations = $false
+    $injectAgents = $false
+    $injectLeaderGuard = $false
     $injectPermission = $false
     if ($env:CLAUDEX_CHROME_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR = $env:CLAUDEX_CHROME_CONFIG_DIR }
     else { Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
@@ -969,10 +1181,13 @@ if ($useProxy) {
 if ($useProxy -or $effortMode) { Load-ClaudeCapabilities }
 else { Resolve-ClaudeCommand; $script:claudeHelp = '' }
 if ($useProxy -or ($forwardArguments.Count -gt 0 -and $forwardArguments[0] -eq 'auto-mode')) { Update-AutoModeRules }
-if ($forwardArguments.Count -eq 0 -or $forwardArguments[0] -notin @('update', 'upgrade')) { Start-ClaudeUpdateCheck }
+if ($forwardArguments.Count -eq 0 -or $forwardArguments[0] -notin @('update', 'upgrade')) {
+    Start-ClaudeUpdateCheck
+    Start-ClaudexUpdateCheck
+}
 
 if ($useProxy) {
-    try { Ensure-Proxy $startModel } catch { Fail $_.Exception.Message }
+    try { Ensure-ProxyForLaunch $startModel } catch { Fail $_.Exception.Message }
     $authWatcher = Start-AuthWatcher
     $proxyWatcher = Start-ProxyWatcher
 
@@ -999,11 +1214,15 @@ if ($useProxy) {
     $env:CLAUDE_CODE_MAX_RETRIES = [string] $maxRetriesNumber
     $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = [string] $contextWindowNumber
     $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = [string] $compactWindowNumber
+    # Hide Anthropic's built-in 1M model variant on the Codex bridge. Claudex
+    # supplies its own explicit context-window and compaction controls.
+    $env:CLAUDE_CODE_DISABLE_1M_CONTEXT = '1'
 } else {
     $authWatcher = $null
     $proxyWatcher = $null
     Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
     Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue
+    Remove-Item Env:CLAUDE_CODE_DISABLE_1M_CONTEXT -ErrorAction SilentlyContinue
 }
 $env:CLAUDE_CODE_USE_POWERSHELL_TOOL = '1'
 $env:CLAUDEX_USAGE_DISPLAY = $usageDisplay
@@ -1028,9 +1247,11 @@ $planGuard = if ($planModePolicy -eq 'conservative') { 'Claudex plan-mode rule: 
 $leaderGuard = @($capacityGuard, $taskGuard, $codexGuard, $planGuard) -join ([Environment]::NewLine + [Environment]::NewLine)
 
 $claudeLaunchArguments = New-Object 'System.Collections.Generic.List[string]'
-if ($injectSessionCustomizations) {
-    if (Test-ClaudeOption '--agents') { foreach ($value in @('--agents', $agentsJson)) { $claudeLaunchArguments.Add($value) } }
-    if (Test-ClaudeOption '--append-system-prompt') { foreach ($value in @('--append-system-prompt', $leaderGuard)) { $claudeLaunchArguments.Add($value) } }
+if ($injectAgents -and (Test-ClaudeOption '--agents')) {
+    foreach ($value in @('--agents', $agentsJson)) { $claudeLaunchArguments.Add($value) }
+}
+if ($injectLeaderGuard -and (Test-ClaudeOption '--append-system-prompt')) {
+    foreach ($value in @('--append-system-prompt', $leaderGuard)) { $claudeLaunchArguments.Add($value) }
 }
 if ($injectPermission -and (Test-ClaudeOption '--permission-mode')) {
     $claudeLaunchArguments.Add('--permission-mode'); $claudeLaunchArguments.Add($launchPermissionMode)

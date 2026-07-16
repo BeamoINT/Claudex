@@ -21,7 +21,7 @@ key.
 | `CLAUDEX_SUBAGENT_MODEL` | `gpt-5.6-terra` | Default delegated model |
 | `CLAUDEX_MAX_TOOL_USE_CONCURRENCY` | `3` | Positive integer |
 | `CLAUDEX_MAX_AGENT_CONCURRENCY` | `3` | Positive integer |
-| `CLAUDEX_MAX_RETRIES` | `4` | Integer from 0 through 15 |
+| `CLAUDEX_MAX_RETRIES` | `15` | Integer from 0 through 15; the default covers the local bridge recovery window |
 | `CLAUDEX_CONTEXT_WINDOW` | `400000` | Integer from 100000 through 1000000 |
 | `CLAUDEX_AUTO_COMPACT_WINDOW` | `280000` | Integer from 100000 through the context window |
 | `CLAUDEX_PLAN_MODE_POLICY` | `conservative` | `conservative` or `normal` |
@@ -31,6 +31,11 @@ key.
 The concurrency values are Claudex safeguards, not promises that an upstream
 account will always accept that many simultaneous requests. Lower them when an
 account or provider has tighter capacity.
+
+For proxied sessions, Claudex hides Claude Code's Anthropic-only 1M model
+variant and uses `CLAUDEX_CONTEXT_WINDOW` plus the managed compaction boundary
+instead. Direct `--claude-chrome` and maintenance commands do not inherit that
+override.
 
 ## Usage-limit display
 
@@ -49,6 +54,11 @@ Codex app-server's `account/rateLimits/read` interface. The app-server fallback
 is disabled while a specific bridge account is selected because that process
 may represent a different account.
 
+The status line detects the available terminal width and removes the usage,
+effort, and finally excess model detail as space becomes tight. This keeps the
+footer on one row while preserving the model and context percentage whenever
+they fit.
+
 ## Authentication and local proxy
 
 | Variable | Default | Purpose |
@@ -60,6 +70,7 @@ may represent a different account.
 | `CLAUDEX_CODEX_AUTH_DIR` | `<config>/codex-accounts` | Private bridge credential directory |
 | `CLAUDEX_CODEX_SOURCE_AUTH_FILE` | `$CODEX_HOME/auth.json` | Standard Codex source credential |
 | `CLAUDEX_CODEX_AUTH_FILE` | automatic | Explicit credential for advanced usage selection |
+| `CLAUDEX_DISABLE_INTERACTIVE_LOGIN` | `0` | Set to `1` to keep foreground startup browser-free and require an explicit `claudex --login` |
 
 Do not point the proxy at a non-loopback address without a separate security
 review. Never share or commit `CLAUDEX_PROXY_TOKEN` or any Codex credential.
@@ -71,12 +82,19 @@ recovered blip does not flash as a user-facing API error.
 
 | Variable | Default | Accepted values or purpose |
 | --- | --- | --- |
+| `CLAUDEX_AUTO_UPDATE` | `on` | `on` applies stable Claudex releases, `notify` only checks, `off` disables checks |
+| `CLAUDEX_UPDATE_INTERVAL_SECONDS` | `86400` | 3600 through 2592000 |
 | `CLAUDEX_CLAUDE_AUTO_UPDATE` | `on` | `on` or `off` |
 | `CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS` | `86400` | 3600 through 2592000 |
 | `CLAUDEX_SKIP_CLAUDE_UPDATE` | unset | Set to `1` to skip the install-time Claude update |
 
-The runtime update check is non-blocking and uses a stale-lock recovery guard.
-An explicit `claudex update` never races the background check.
+Claudex and Claude Code use separate non-blocking update state and stale-lock
+recovery guards. Failed or offline Claudex checks stay quiet in the background
+and use bounded exponential backoff. Inspect or control the stable channel with
+`claudex self-update --status`, `--check`, or `--apply`. Package installations
+delegate updates to their recorded package manager without `sudo`; archive and
+source installations accept only checksum-matched stable GitHub release assets.
+An explicit `claudex update` remains Claude Code's native update command.
 
 ## Installer-only overrides
 

@@ -94,8 +94,10 @@ passes:
 2. run local tests and confirm hosted CI;
 3. create an annotated `vMAJOR.MINOR.PATCH` tag on the verified main commit;
 4. push the tag;
-5. publish a GitHub Release with installation notes and user-visible changes;
-6. verify the release archive and the latest-release link.
+5. build both release archives and `SHA256SUMS`, and verify the tag version,
+   archive roots, file types, and hashes before exposing the release as latest;
+6. publish a GitHub Release with installation notes and user-visible changes;
+7. verify the release archive, checksum asset, and latest-release link.
 
 For a package-manager release, also:
 

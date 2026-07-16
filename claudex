@@ -14,7 +14,7 @@ for early_argument in "$@"; do
   esac
 done
 case "${1:-}" in
-  --help|-h|--version|-v|agents|auth|doctor|gateway|install|mcp|plugin|plugins|project|setup-token|ultrareview|update|upgrade)
+  --help|-h|--version|-v|agents|auth|doctor|gateway|install|mcp|plugin|plugins|project|self-update|setup-token|ultrareview|update|upgrade)
     early_runtime_bypass=1
     ;;
 esac
@@ -27,7 +27,14 @@ fi
 if [[ -r "$config_file" ]]; then source "$config_file"; fi
 readonly settings_file="${CLAUDEX_SETTINGS_FILE:-$claudex_config_dir/settings.json}"
 readonly codex_session_helper="${CLAUDEX_CODEX_SESSION_HELPER:-$claudex_config_dir/codex-session}"
+readonly self_update_helper="${CLAUDEX_SELF_UPDATE_HELPER:-$claudex_config_dir/self-update}"
 export CLAUDEX_CODEX_AUTH_DIR CLAUDEX_CODEX_SOURCE_AUTH_FILE CLAUDEX_CODEX_AUTH_FILE
+
+if [[ "${1:-}" == self-update ]]; then
+  shift
+  [[ -x "$self_update_helper" ]] || { printf '%s\n' 'claudex: self-update helper is missing; rerun the installer.' >&2; exit 1; }
+  exec "$self_update_helper" "$@"
+fi
 
 # Authentication recovery must keep working even when the main settings or jq
 # installation is damaged. The helper performs its own action-specific checks.
@@ -64,7 +71,7 @@ fi
 : "${CLAUDEX_SUBAGENT_MODEL:=gpt-5.6-terra}"
 : "${CLAUDEX_MAX_TOOL_USE_CONCURRENCY:=3}"
 : "${CLAUDEX_MAX_AGENT_CONCURRENCY:=3}"
-: "${CLAUDEX_MAX_RETRIES:=4}"
+: "${CLAUDEX_MAX_RETRIES:=15}"
 : "${CLAUDEX_CONTEXT_WINDOW:=400000}"
 : "${CLAUDEX_AUTO_COMPACT_WINDOW:=280000}"
 : "${CLAUDEX_MOUSE_POINTER_SHAPE:=pointer}"
@@ -76,6 +83,8 @@ fi
 : "${CLAUDEX_USAGE_ALERT_PERCENT:=20}"
 : "${CLAUDEX_CLAUDE_AUTO_UPDATE:=on}"
 : "${CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS:=86400}"
+: "${CLAUDEX_AUTO_UPDATE:=on}"
+: "${CLAUDEX_UPDATE_INTERVAL_SECONDS:=86400}"
 : "${CLAUDEX_PLAN_MODE_POLICY:=conservative}"
 
 if (( ! early_runtime_bypass )) && [[ -z "$CLAUDEX_PROXY_TOKEN" ]]; then
@@ -184,6 +193,13 @@ fi
 case "$CLAUDEX_CLAUDE_AUTO_UPDATE" in on|off) ;;
   *) printf '%s\n' 'claudex: CLAUDEX_CLAUDE_AUTO_UPDATE must be on or off.' >&2; exit 2 ;;
 esac
+case "$CLAUDEX_AUTO_UPDATE" in on|notify|off) ;;
+  *) printf '%s\n' 'claudex: CLAUDEX_AUTO_UPDATE must be on, notify, or off.' >&2; exit 2 ;;
+esac
+if [[ ! "$CLAUDEX_UPDATE_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || (( CLAUDEX_UPDATE_INTERVAL_SECONDS < 3600 || CLAUDEX_UPDATE_INTERVAL_SECONDS > 2592000 )); then
+  printf '%s\n' 'claudex: CLAUDEX_UPDATE_INTERVAL_SECONDS must be from 3600 to 2592000.' >&2
+  exit 2
+fi
 if [[ ! "$CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || (( CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS < 3600 || CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS > 2592000 )); then
   printf '%s\n' 'claudex: CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS must be from 3600 to 2592000.' >&2
   exit 2
@@ -340,17 +356,20 @@ proxy_ready() {
 }
 
 selected_model_is_available() {
-  local selected_model="$1" models required_models
+  local selected_model="$1" models required_models fetch_status=0
   case "$selected_model" in
     opusplan) required_models='["gpt-5.6-sol", "gpt-5.6-terra"]' ;;
     *) required_models=$(printf '["%s"]' "$selected_model") ;;
   esac
-  models=$(fetch_models 2) || return 1
-  printf '%s\n' "$models" | jq -e --argjson required "$required_models" '
+  models=$(fetch_models 2) || fetch_status=$?
+  (( fetch_status == 0 )) || return "$fetch_status"
+  if ! printf '%s\n' "$models" | jq -e --argjson required "$required_models" '
     [.data[]?.id] as $ids
     | [$required[] as $model | select(($ids | index($model)) == null)]
     | length == 0
-  ' >/dev/null 2>&1
+  ' >/dev/null 2>&1; then
+    return 44
+  fi
 }
 
 proxy_reachable() {
@@ -383,12 +402,20 @@ start_auth_watcher() {
 
 start_proxy_watcher() {
   [[ "${CLAUDEX_SKIP_PROXY_WATCHER:-0}" != 1 ]] || return 0
-  local parent_pid=$$
+  local parent_pid=$$ consecutive_failures=0
   (
     while kill -0 "$parent_pid" 2>/dev/null; do
       sleep 1
       kill -0 "$parent_pid" 2>/dev/null || break
-      if ! proxy_reachable; then ensure_proxy >/dev/null 2>&1 || true; fi
+      if proxy_reachable; then
+        consecutive_failures=0
+      else
+        consecutive_failures=$((consecutive_failures + 1))
+        if (( consecutive_failures >= 2 )); then
+          ensure_proxy >/dev/null 2>&1 || true
+          consecutive_failures=0
+        fi
+      fi
     done
   ) &
   proxy_watcher_pid=$!
@@ -516,8 +543,14 @@ stop_unhealthy_managed_proxy() {
   record_proxy_recovery "stopped unresponsive managed proxy pid=$pid"
 }
 
+claudex_auth_sync_failed=0
+claudex_auth_sync_status=0
+claudex_interactive_login_attempted=0
+
 ensure_proxy() {
   local health_status=0
+  claudex_auth_sync_failed=0
+  claudex_auth_sync_status=0
   if [[ ! -x "$codex_session_helper" ]]; then
     record_proxy_recovery "authentication helper is missing"
     printf '%s\n' "claudex: authentication helper is missing: $codex_session_helper" >&2
@@ -527,6 +560,8 @@ ensure_proxy() {
   local sync_status=0
   "$codex_session_helper" sync || sync_status=$?
   if (( sync_status != 0 )); then
+    claudex_auth_sync_failed=1
+    claudex_auth_sync_status=$sync_status
     record_proxy_recovery "authentication synchronization failed status=$sync_status"
     return "$sync_status"
   fi
@@ -672,6 +707,61 @@ ensure_proxy() {
   return 1
 }
 
+interactive_codex_login_allowed() {
+  [[ "${CLAUDEX_DISABLE_INTERACTIVE_LOGIN:-0}" != 1 ]] || return 1
+  case "${CI:-}" in
+    ''|0|false|FALSE|no|NO) ;;
+    *) return 1 ;;
+  esac
+  { [[ -t 0 && -t 1 ]] \
+      || { [[ "${CLAUDEX_TEST_TTY_INPUT:-0}" == 1 ]] && [[ "${CLAUDEX_TEST_TTY_OUTPUT:-0}" == 1 ]]; }; }
+}
+
+# Only the foreground launcher may open Codex's browser sign-in. The proxy and
+# auth watchers call ensure_proxy directly, so background recovery always stays
+# prompt-free even when it inherits a terminal from the parent session.
+ensure_proxy_for_launch() {
+  local required_model="${1:-}" ensure_status=0 login_status=0
+  if ensure_proxy; then return 0; else ensure_status=$?; fi
+  if (( claudex_auth_sync_failed != 1 )); then return "$ensure_status"; fi
+  case "$claudex_auth_sync_status" in
+    11|13|14) ;;
+    *) return "$ensure_status" ;;
+  esac
+
+  if (( claudex_interactive_login_attempted )); then
+    printf '%s\n' 'claudex: Codex authentication is still unavailable after the sign-in attempt. Run `claudex --login` to retry.' >&2
+    return "$ensure_status"
+  fi
+  if ! interactive_codex_login_allowed; then
+    printf '%s\n' 'claudex: Codex sign-in is required. Run `claudex --login` in an interactive terminal, then retry.' >&2
+    return "$ensure_status"
+  fi
+
+  claudex_interactive_login_attempted=1
+  printf '%s\n' 'claudex: Codex sign-in is required. Opening the official Codex browser login...' >&2
+  record_proxy_recovery 'foreground startup requested official Codex browser login'
+  "$codex_session_helper" login || login_status=$?
+  if (( login_status != 0 )); then
+    record_proxy_recovery "foreground Codex browser login failed status=$login_status"
+    printf '%s\n' 'claudex: Codex sign-in did not complete. Run `claudex --login` to retry.' >&2
+    return "$login_status"
+  fi
+
+  ensure_status=0
+  if [[ -n "$required_model" ]]; then
+    ensure_proxy "$required_model" || ensure_status=$?
+  else
+    ensure_proxy || ensure_status=$?
+  fi
+  if (( ensure_status != 0 )); then
+    printf '%s\n' 'claudex: Codex authentication is still unavailable after sign-in. Run `claudex --login` to retry.' >&2
+    return "$ensure_status"
+  fi
+  record_proxy_recovery 'foreground Codex browser login synchronized successfully'
+  return 0
+}
+
 maybe_update_claude() {
   [[ "$CLAUDEX_CLAUDE_AUTO_UPDATE" == on ]] || return 0
   [[ "${CLAUDEX_SKIP_AUTO_UPDATE:-0}" != 1 ]] || return 0
@@ -710,6 +800,16 @@ maybe_update_claude() {
       rmdir "$lock_dir" 2>/dev/null || true
     ) &
   fi
+}
+
+maybe_self_update() {
+  [[ "$CLAUDEX_AUTO_UPDATE" != off && -x "$self_update_helper" ]] || return 0
+  [[ "${CLAUDEX_SKIP_AUTO_UPDATE:-0}" != 1 ]] || return 0
+  local action=--check log_dir="$claudex_config_dir/update/claudex"
+  [[ "$CLAUDEX_AUTO_UPDATE" == on ]] && action=--apply
+  mkdir -p "$log_dir"
+  CLAUDEX_UPDATE_BACKGROUND=1 CLAUDEX_UPDATE_INTERVAL_SECONDS="$CLAUDEX_UPDATE_INTERVAL_SECONDS" \
+    nohup "$self_update_helper" "$action" --background </dev/null >"$log_dir/background.log" 2>&1 &
 }
 
 claude_supports() {
@@ -760,8 +860,38 @@ ensure_auto_mode_rules() {
   elif [[ "$previous_defaults" != '{}' ]]; then
     defaults_json="$previous_defaults"
   else
+    # Older Claudex releases shipped only the managed allow/environment
+    # additions. Because Claude Code replaces a configured array wholesale,
+    # leaving those partial arrays active after an upstream-defaults failure
+    # would discard every upstream exception and make auto mode fail closed in
+    # surprising ways. Remove only that recognizable legacy seed; never erase
+    # user-authored rules when their provenance cannot be established.
+    tmp_file=$(mktemp "$claudex_config_dir/settings.json.tmp.XXXXXX")
+    if jq '
+      def managed_allow:
+        startswith("Explicit Action Approval:") or startswith("Requested Agent Configuration:");
+      def managed_environment:
+        startswith("User-designated task boundary:") or startswith("Explicitly approved development transfer:");
+      (.autoMode // {}) as $auto
+      | if all($auto.allow[]?; managed_allow)
+          and all($auto.environment[]?; managed_environment)
+          and (($auto.soft_deny // []) | length) == 0
+          and (($auto.hard_deny // []) | length) == 0
+        then del(.autoMode.allow, .autoMode.environment)
+          | if ((.autoMode // {}) | length) == 0 then del(.autoMode) else . end
+        else error("auto-mode defaults unavailable with non-managed custom rules")
+        end
+    ' "$settings_file" > "$tmp_file" 2>/dev/null; then
+      chmod 600 "$tmp_file" 2>/dev/null || true
+      mv -f "$tmp_file" "$settings_file"
+      release_state_lock "$lock_dir"
+      return 0
+    fi
+    rm -f "$tmp_file"
+    printf '%s\n' 'claudex: Claude Code auto-mode defaults are unavailable; preserving custom rules and refusing an unsafe partial composition.' >&2
+    printf '%s\n' 'claudex: update Claude Code or restore the auto-mode defaults snapshot, then retry.' >&2
     release_state_lock "$lock_dir"
-    return 0
+    return 1
   fi
 
   tmp_file=$(mktemp "$claudex_config_dir/settings.json.tmp.XXXXXX")
@@ -770,12 +900,16 @@ ensure_auto_mode_rules() {
       --arg approval 'Explicit Action Approval: A user message that explicitly approves a specific action and target, including reissuing it after a denial or unambiguously referring to the immediately preceding blocked action with language such as approve that, go ahead, or proceed, satisfies named-and-specific consent for matching SOFT BLOCK rules. Do not force the user to restate the command, ask for duplicate confirmation, or treat the prior denial as permanent. This does not override HARD BLOCK rules or authorize a broader action.' \
       --arg requested_config 'Requested Agent Configuration: Editing agent configuration is routine when the user explicitly asks for that specific configuration or permission change. Treat that edit as user-requested rather than Self-Modification; unrelated permission widening remains blocked.' \
       --arg task_boundary 'User-designated task boundary: A repository, cloud project, host, bucket, service, or destination that the user explicitly identifies in their own message as owned or controlled infrastructure and as the intended target is trusted for the specifically requested operation and data flow only. Merely naming a target does not establish trust; do not infer trust for agent-selected destinations, unrelated resources, or broader scopes.' \
-      --arg approved_transfer 'Explicitly approved development transfer: When the user explicitly approves an exact source transfer between a named repository and a named build, deployment, or cloud host, treat that named source and destination as inside the task trust boundary for that transfer. Approval may unambiguously refer to the immediately preceding blocked command without repeating it. This never covers a public destination, credentials or secrets, unrelated files, a broader source tree, or a different host.' '
+      --arg approved_transfer 'Explicitly approved development transfer: When the user explicitly approves an exact transfer of task-required source from the current trusted repository to an explicitly named, private, user-controlled build or deployment host, treat that source and destination as inside the task trust boundary for that transfer only. Approval may unambiguously refer to the immediately preceding blocked command without repeating it. This never covers a public destination, credentials or secrets, unrelated files, a broader source tree, an agent-selected target, or a different host.' \
+      --arg transfer_soft 'Approved Private Development Transfer [named+specifics — must name the current source repository, the private user-controlled build or deployment host, and the requested transfer]: Transferring only the task-required source from the current trusted repository to that exact named private host requires the user to request or explicitly approve that transfer. Approval may unambiguously refer to the immediately preceding denied transfer. This consent never clears credentials or secrets, a public destination, unrelated files, a broader source tree, an agent-selected target, or a different host.' \
+      --arg hard_exception $'\n  - Claudex scoped private development transfer exception: Notwithstanding the bulk-scale treatment above, an exact transfer of only task-required source from the current trusted repository to an explicitly named, private, user-controlled build or deployment host is not HARD Data Exfiltration when the user requested or explicitly approved that exact source, destination, and transfer. Evaluate it under Approved Private Development Transfer as named-and-specific SOFT consent. The exception never covers credentials or secrets, a public destination, unrelated files, a broader source tree, an agent-selected target, or a different host; if any condition is missing, the HARD rule remains in force.' '
         def stable_unique:
           reduce .[] as $item ([]; if index($item) == null then . + [$item] else . end);
         .autoMode = (.autoMode // {})
         | ($previous.allow // []) as $previous_allow
         | ($previous.environment // []) as $previous_environment
+        | ($previous.soft_deny // []) as $previous_soft_deny
+        | ($previous.hard_deny // []) as $previous_hard_deny
         | ((.autoMode.allow // []) | map(. as $rule | select(
             ((startswith("Explicit Action Approval:") or startswith("Requested Agent Configuration:")) | not)
             and (($previous_allow | index($rule)) == null)
@@ -784,8 +918,21 @@ ensure_auto_mode_rules() {
             ((startswith("User-designated task boundary:") or startswith("Explicitly approved development transfer:")) | not)
             and (($previous_environment | index($rule)) == null)
           ))) as $custom_environment
+        | ((.autoMode.soft_deny // []) | map(. as $rule | select(
+            (startswith("Approved Private Development Transfer") | not)
+            and (($previous_soft_deny | index($rule)) == null)
+          ))) as $custom_soft_deny
+        | ((.autoMode.hard_deny // []) | map(. as $rule | select(
+            (contains("Claudex scoped private development transfer exception:") | not)
+            and (($previous_hard_deny | index($rule)) == null)
+          ))) as $custom_hard_deny
+        | ($defaults.hard_deny | map(
+            if startswith("Data Exfiltration:") then . + $hard_exception else . end
+          )) as $managed_hard_deny
         | .autoMode.allow = (($defaults.allow + $custom_allow + [$approval, $requested_config]) | stable_unique)
         | .autoMode.environment = (($defaults.environment + $custom_environment + [$task_boundary, $approved_transfer]) | stable_unique)
+        | .autoMode.soft_deny = (($defaults.soft_deny + $custom_soft_deny + [$transfer_soft]) | stable_unique)
+        | .autoMode.hard_deny = (($managed_hard_deny + $custom_hard_deny) | stable_unique)
       ' "$settings_file" > "$tmp_file"; then
     if cmp -s "$tmp_file" "$settings_file"; then
       rm -f "$tmp_file"
@@ -858,6 +1005,7 @@ doctor() {
   printf '%s\n' 'Effort shortcuts: --max-effort and --ultracode (xhigh plus dynamic workflows)'
   printf '%s\n' 'Claude in Chrome: use --claude-chrome for the direct Anthropic profile required by the extension'
   printf '%s\n' "Claude Code updates: ${CLAUDEX_CLAUDE_AUTO_UPDATE} (checked every ${CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS}s)"
+  printf '%s\n' "Claudex updates: ${CLAUDEX_AUTO_UPDATE} (checked every ${CLAUDEX_UPDATE_INTERVAL_SECONDS}s; inspect with claudex self-update --status)"
   printf '%s\n' "Plan mode policy: ${CLAUDEX_PLAN_MODE_POLICY} (implementation-first unless planning is genuinely required)"
   printf '%s\n' "Rendering: no-flicker mode with native terminal cursor"
   printf '%s\n' "Terminal UI: fullscreen (launch command hidden while Claudex is open)"
@@ -963,13 +1111,15 @@ while (( $# > 0 )); do
   shift
 done
 use_proxy=1
-inject_session_customizations=1
+inject_agents=1
+inject_leader_guard=1
 inject_permission=1
 
 case "${forwarded_args[0]:-}" in
-  --help|-h|--version|-v|agents|auth|auto-mode|doctor|gateway|install|mcp|plugin|plugins|project|setup-token|ultrareview|update|upgrade)
+  --help|-h|--version|-v|agents|auth|auto-mode|doctor|gateway|install|mcp|plugin|plugins|project|self-update|setup-token|ultrareview|update|upgrade)
     use_proxy=0
-    inject_session_customizations=0
+    inject_agents=0
+    inject_leader_guard=0
     inject_permission=0
     ;;
 esac
@@ -977,10 +1127,11 @@ esac
 for argument in ${forwarded_args[@]+"${forwarded_args[@]}"}; do
   case "$argument" in
     --safe-mode|--bare)
-      inject_session_customizations=0
+      inject_agents=0
+      inject_leader_guard=0
       inject_permission=0
       ;;
-    --agents) inject_session_customizations=0 ;;
+    --agents) inject_agents=0 ;;
     --permission-mode|--dangerously-skip-permissions|--allow-dangerously-skip-permissions)
       inject_permission=0
       ;;
@@ -999,14 +1150,15 @@ if (( direct_chrome )); then
     exit 2
   }
   use_proxy=0
-  inject_session_customizations=0
+  inject_agents=0
+  inject_leader_guard=0
   inject_permission=0
   if [[ -n "${CLAUDEX_CHROME_CONFIG_DIR:-}" ]]; then
     export CLAUDE_CONFIG_DIR="$CLAUDEX_CHROME_CONFIG_DIR"
   else
     unset CLAUDE_CONFIG_DIR
   fi
-  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
+  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_DISABLE_1M_CONTEXT
   start_model=""
   # Bash 3.2 (the system Bash on macOS) treats an empty array expansion as an
   # unbound variable under `set -u`; use its compatible conditional expansion.
@@ -1038,14 +1190,28 @@ load_claude_capabilities
 if (( use_proxy )) || [[ "${forwarded_args[0]:-}" == auto-mode ]]; then ensure_auto_mode_rules; fi
 case "${forwarded_args[0]:-}" in
   update|upgrade) ;;
-  *) maybe_update_claude ;;
+  *) maybe_update_claude; maybe_self_update ;;
 esac
 
 if (( use_proxy )); then
-  ensure_proxy
-  if ! selected_model_is_available "$start_model"; then
-    printf '%s\n' "claudex: selected model '$start_model' is not advertised by the authenticated Codex account." >&2
-    printf '%s\n' 'claudex: choose an available managed model or run `claudex --doctor` for the full catalog check.' >&2
+  ensure_proxy_for_launch "$start_model"
+  selected_model_status=0
+  selected_model_is_available "$start_model" || selected_model_status=$?
+  if (( selected_model_status != 0 && selected_model_status != 44 )); then
+    # The bridge can exit after the initial semantic readiness check. Recover
+    # transport failures once instead of misreporting them as a missing model.
+    ensure_proxy_for_launch "$start_model"
+    selected_model_status=0
+    selected_model_is_available "$start_model" || selected_model_status=$?
+  fi
+  if (( selected_model_status != 0 )); then
+    if (( selected_model_status == 44 )); then
+      printf '%s\n' "claudex: selected model '$start_model' is not advertised by the authenticated Codex account." >&2
+      printf '%s\n' 'claudex: choose an available managed model or run `claudex --doctor` for the full catalog check.' >&2
+    else
+      printf '%s\n' 'claudex: the local Codex bridge became unavailable while validating the selected model.' >&2
+      printf '%s\n' 'claudex: run `claudex --doctor` and retry.' >&2
+    fi
     exit 1
   fi
   auth_watcher_pid=""
@@ -1087,8 +1253,12 @@ if (( use_proxy )); then
 # client-side summarization before the session grows without bound.
   export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$CLAUDEX_CONTEXT_WINDOW"
   export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$CLAUDEX_AUTO_COMPACT_WINDOW"
+  # Claude Code's built-in 1M selector is an Anthropic model feature. Keeping
+  # it visible on the Codex bridge can produce a misleading `/model opus 1m`
+  # entry even though Claudex manages its own explicit context window.
+  export CLAUDE_CODE_DISABLE_1M_CONTEXT=1
 else
-  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
+  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_DISABLE_1M_CONTEXT
 fi
 
 export CLAUDEX_USAGE_DISPLAY CLAUDEX_USAGE_REFRESH_SECONDS CLAUDEX_USAGE_TIMEOUT_SECONDS CLAUDEX_USAGE_MAX_STALE_SECONDS
@@ -1117,13 +1287,11 @@ ${claudex_codex_guard}
 ${claudex_plan_guard}"
 
 claude_args=()
-if (( inject_session_customizations )); then
-  if claude_supports '--agents'; then
-    claude_args+=(--agents "$claudex_agents")
-  fi
-  if claude_supports '--append-system-prompt'; then
-    claude_args+=(--append-system-prompt "$claudex_leader_guard")
-  fi
+if (( inject_agents )) && claude_supports '--agents'; then
+  claude_args+=(--agents "$claudex_agents")
+fi
+if (( inject_leader_guard )) && claude_supports '--append-system-prompt'; then
+  claude_args+=(--append-system-prompt "$claudex_leader_guard")
 fi
 if (( inject_permission )) && claude_supports '--permission-mode'; then
   claude_args+=(--permission-mode "$permission_mode")

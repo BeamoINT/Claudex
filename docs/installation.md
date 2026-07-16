@@ -1,21 +1,24 @@
 # Installation
 
-Claudex installs a small launcher and private configuration around existing
-Codex and Claude Code installations. Users do not manually create provider
-keys or configure model endpoints.
+Claudex installs a small launcher and private configuration around Codex and
+Claude Code. When either CLI is missing, the installer installs it from its
+official distribution. Users do not manually create provider keys or configure
+model endpoints.
 
 ## Requirements
 
 | Requirement | Purpose |
 | --- | --- |
-| Codex desktop app or CLI | Supplies the user's existing ChatGPT/Codex sign-in |
-| Claude Code | Supplies the terminal UI and tool protocol |
+| Codex CLI | Supplies the user's ChatGPT/Codex sign-in; installed automatically when missing |
+| Claude Code | Supplies the terminal UI and tool protocol; installed automatically when missing |
 | Internet connection during installation | Downloads or updates dependencies and verifies the model endpoint |
 | Supported account access | The signed-in Codex account must advertise the configured models |
 
 The Unix installer also needs `curl`, `tar`, and a supported package manager if
-`jq` is missing. The Windows installer uses built-in PowerShell download and
-archive commands.
+`jq`, Node.js, or npm is missing. The Windows installer uses built-in PowerShell
+download and archive commands and can install Node.js through WinGet,
+Chocolatey, or Scoop. Codex CLI is installed from OpenAI's official
+`@openai/codex` npm package.
 
 ## Download
 
@@ -24,7 +27,26 @@ The shortest installation path is a supported package manager. See
 commands. Package installs configure themselves on first use and refresh the
 managed launcher after upgrades.
 
-Choose one of these methods:
+For the simplest verified source installation on macOS, Linux, or WSL:
+
+```bash
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output /tmp/claudex-bootstrap.sh \
+  https://raw.githubusercontent.com/BeamoINT/Claudex/main/bootstrap.sh
+bash /tmp/claudex-bootstrap.sh
+```
+
+Windows PowerShell:
+
+```powershell
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/BeamoINT/Claudex/main/bootstrap.ps1 -OutFile "$env:TEMP\claudex-bootstrap.ps1"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\claudex-bootstrap.ps1"
+```
+
+The bootstrap resolves the latest GitHub release, verifies its SHA-256 entry,
+rejects unsafe archive paths, confirms the embedded package version, and only
+then runs the platform installer. To inspect or contribute to the source,
+choose one of these methods instead:
 
 1. Download the source archive from the
    [latest release](https://github.com/BeamoINT/Claudex/releases/latest) and
@@ -53,14 +75,15 @@ and the standard Codex `auth.json` exists.
 
 The installer:
 
-1. checks required commands and installs `jq` when supported;
-2. installs Claude Code from Anthropic's installer if it is missing;
+1. checks required commands and installs `jq`, Node.js, and npm when needed;
+2. installs Codex CLI from OpenAI's official npm package and Claude Code from Anthropic's installer when missing;
 3. updates Claude Code on a best-effort basis;
 4. downloads the pinned CLIProxyAPI archive and verifies its SHA-256 digest;
 5. generates a random localhost-only proxy key;
 6. creates private state in `~/.config/claudex`;
 7. installs `claudex` into `~/.local/bin`;
-8. synchronizes the Codex login and runs `claudex --doctor`.
+8. opens the official Codex browser login when needed in an interactive terminal;
+9. synchronizes the Codex login and runs `claudex --doctor`.
 
 If `~/.local/bin` is not on `PATH`, add it to the shell profile:
 
@@ -103,9 +126,21 @@ an actionable error instead of silently substituting a model.
 
 ## Update
 
-For a package-manager installation, use the normal package-manager upgrade
-command. Claudex detects the new package version and refreshes its managed
-files on the next launch. See [package-managers.md](package-managers.md).
+Claudex checks its stable release channel once per day without blocking startup
+and applies updates by default. Inspect, check immediately, or apply immediately
+with:
+
+```text
+claudex self-update --status
+claudex self-update --check
+claudex self-update --apply
+```
+
+Package installations delegate to their recorded package manager without
+requesting `sudo`. Release-archive and source installs use an exact stable
+GitHub release asset only after its version, checksum, and archive paths pass
+validation. A failed or offline update keeps the installed release intact and
+retries later with backoff. See [package-managers.md](package-managers.md).
 
 For a Git checkout:
 
@@ -126,9 +161,8 @@ directory, and rerun the installer. Existing private credentials and custom
 environment entries are preserved. Replaced managed files are backed up under
 `~/.config/claudex/backups`.
 
-The launcher also performs a non-blocking Claude Code update check every 24
-hours by default. See [configuration.md](configuration.md) to change or disable
-that check.
+The separate Claude Code update check also runs every 24 hours by default. See
+[configuration.md](configuration.md) to configure either update channel.
 
 ## Install on another machine
 

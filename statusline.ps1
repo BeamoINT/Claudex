@@ -18,6 +18,7 @@ $contextPercent = $null
 $sessionId = ''
 $totalInputTokens = 0
 $contextWindowSize = 0
+$inputColumns = 0
 if ($data) {
     if ($null -ne $data.PSObject.Properties['model'] -and $data.model) {
         if ($null -ne $data.model.PSObject.Properties['id']) { $modelId = [string] $data.model.id }
@@ -36,6 +37,7 @@ if ($data) {
             $contextWindowSize = [long] $data.context_window.context_window_size
         }
     }
+    if ($null -ne $data.PSObject.Properties['columns']) { [int]::TryParse([string] $data.columns, [ref] $inputColumns) | Out-Null }
 }
 
 if (-not $contextPercent -or $contextPercent -eq '0') {
@@ -175,9 +177,66 @@ if (-not $selectedModelMode) {
 }
 if ($selectedModelMode -eq 'solplan') { $modelName = 'GPT-5.6 Solplan' }
 
+$statuslineColumns = 0
+foreach ($candidate in @($env:CLAUDEX_STATUSLINE_COLUMNS, $inputColumns, $env:COLUMNS)) {
+    $parsedColumns = 0
+    if ([int]::TryParse([string] $candidate, [ref] $parsedColumns) -and $parsedColumns -gt 0) {
+        $statuslineColumns = $parsedColumns
+        break
+    }
+}
+if ($statuslineColumns -le 0) {
+    try {
+        if ([Console]::WindowWidth -gt 0) { $statuslineColumns = [Console]::WindowWidth }
+    } catch { $statuslineColumns = 0 }
+}
+
 $separator = [char] 0x00B7
 $escape = [char] 27
-$line = "${escape}[38;5;81mClaudex${escape}[0m $separator ${escape}[1m$modelName${escape}[0m $separator $effort effort"
-if ($null -ne $contextPercent) { $line += " $separator $contextPercent% context" }
-if ($usageSummary) { $line += " $separator $usageSummary" }
-Write-Output $line
+$brandPlain = 'Claudex'
+$brandAnsi = "${escape}[38;5;81mClaudex${escape}[0m"
+$modelAnsi = "${escape}[1m$modelName${escape}[0m"
+$mandatoryPlain = "$brandPlain $separator $modelName"
+$mandatoryAnsi = "$brandAnsi $separator $modelAnsi"
+$corePlain = "$mandatoryPlain $separator $effort effort"
+$coreAnsi = "$mandatoryAnsi $separator $effort effort"
+if ($null -ne $contextPercent) {
+    $corePlain += " $separator $contextPercent% context"
+    $coreAnsi += " $separator $contextPercent% context"
+}
+$fullPlain = $corePlain
+$fullAnsi = $coreAnsi
+if ($usageSummary) {
+    $fullPlain += " $separator $usageSummary"
+    $fullAnsi += " $separator $usageSummary"
+}
+
+$renderedPlain = $fullPlain
+$renderedAnsi = $fullAnsi
+if ($statuslineColumns -gt 0 -and $renderedPlain.Length -gt $statuslineColumns) {
+    $renderedPlain = $corePlain
+    $renderedAnsi = $coreAnsi
+}
+if ($statuslineColumns -gt 0 -and $renderedPlain.Length -gt $statuslineColumns -and $null -ne $contextPercent) {
+    $renderedPlain = "$mandatoryPlain $separator $contextPercent% context"
+    $renderedAnsi = "$mandatoryAnsi $separator $contextPercent% context"
+}
+if ($statuslineColumns -gt 0 -and $renderedPlain.Length -gt $statuslineColumns) {
+    $renderedPlain = $mandatoryPlain
+    $renderedAnsi = $mandatoryAnsi
+}
+if ($statuslineColumns -gt 0 -and $renderedPlain.Length -gt $statuslineColumns) {
+    $prefixPlain = "$brandPlain $separator "
+    $availableModel = $statuslineColumns - $prefixPlain.Length
+    if ($availableModel -ge 2) {
+        $shortenedModel = $modelName.Substring(0, [Math]::Min($modelName.Length, $availableModel - 1)) + [char] 0x2026
+        $renderedPlain = $prefixPlain + $shortenedModel
+        $renderedAnsi = "$brandAnsi $separator ${escape}[1m$shortenedModel${escape}[0m"
+    } else {
+        $visibleBrandLength = [Math]::Min($brandPlain.Length, $statuslineColumns)
+        $renderedPlain = $brandPlain.Substring(0, $visibleBrandLength)
+        $renderedAnsi = "${escape}[38;5;81m$renderedPlain${escape}[0m"
+    }
+}
+
+Write-Output $renderedAnsi
