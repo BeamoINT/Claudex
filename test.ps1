@@ -727,7 +727,7 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
 
     $delimiterCommandLine = '"' + (Join-Path $root 'claudex.cmd') + '" --terra -- --safe-mode --agents --permission-mode --model literal-prompt-token'
     $delimiterOutput = (& $env:ComSpec /d /s /c $delimiterCommandLine | Out-String)
-    Assert-True ($delimiterOutput.Contains('"Terra (high)"')) 'flag-like prompt text after the delimiter does not disable managed agents'
+    Assert-True ($delimiterOutput.Contains('"Terra (high)"')) "flag like prompt text after the delimiter does not disable managed agents; output=$delimiterOutput"
     Assert-True ($delimiterOutput.Contains('--permission-mode auto')) 'flag-like prompt text after the delimiter does not disable managed permissions'
     Assert-True ($delimiterOutput.Contains('--model gpt-5.6-terra')) 'flag-like model text after the delimiter does not replace the selected startup model'
 
