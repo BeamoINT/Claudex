@@ -138,35 +138,46 @@ function installWelcomePlanFilter() {
   const originalWrite = process.stdout.write;
   let inspectedBytes = 0;
   let active = true;
+  let sawAlternateScreen = false;
+  let sawClaudeCode = false;
   const restore = () => {
     if (!active) return;
     active = false;
     if (process.stdout.write === filteredWrite) process.stdout.write = originalWrite;
   };
-  function filteredWrite(chunk, encoding, callback) {
-    if (!active) return originalWrite.call(this, chunk, encoding, callback);
+  function filterWelcomeChunk(chunk, encoding) {
     let output = chunk;
     let replaced = false;
-    let sawWelcomeFrame = false;
     if (typeof chunk === 'string') {
-      sawWelcomeFrame = chunk.includes(welcomeFrameMarker) && chunk.includes('Claude Code');
-      const result = replaceWelcomeBillingColumns(chunk, chatGptPlanLabel(), { requireWelcomeFrame: true });
+      sawAlternateScreen ||= chunk.includes(welcomeFrameMarker);
+      sawClaudeCode ||= chunk.includes('Claude Code');
+      const result = sawAlternateScreen && sawClaudeCode
+        ? replaceWelcomeBillingColumns(chunk)
+        : { output: chunk, replaced: false };
       output = result.output;
       replaced = result.replaced;
       inspectedBytes += Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : 'utf8');
     } else if (Buffer.isBuffer(chunk) || chunk instanceof Uint8Array) {
       const source = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
       const sourceText = source.toString('latin1');
-      sawWelcomeFrame = sourceText.includes(welcomeFrameMarker) && sourceText.includes('Claude Code');
-      const result = replaceWelcomeBillingColumns(sourceText, chatGptPlanLabel(), { requireWelcomeFrame: true });
+      sawAlternateScreen ||= sourceText.includes(welcomeFrameMarker);
+      sawClaudeCode ||= sourceText.includes('Claude Code');
+      const result = sawAlternateScreen && sawClaudeCode
+        ? replaceWelcomeBillingColumns(sourceText)
+        : { output: sourceText, replaced: false };
       if (result.replaced) output = Buffer.from(result.output, 'latin1');
       replaced = result.replaced;
       inspectedBytes += source.length;
     }
-    // Current Claude Code emits its complete welcome frame atomically. Restore
-    // after that frame even if its layout changes: keeping cross-write text
-    // state would risk corrupting arbitrary terminal and machine output.
-    if (sawWelcomeFrame || replaced || inspectedBytes >= 1024 * 1024) restore();
+    // Claude Code writes the alternate-screen/title prelude separately from
+    // the positioned banner. Carry only those two booleans across writes; do
+    // not buffer, decode, or reorder any terminal bytes.
+    if (replaced || inspectedBytes >= 1024 * 1024) restore();
+    return output;
+  }
+  function filteredWrite(chunk, encoding, callback) {
+    if (!active) return originalWrite.call(this, chunk, encoding, callback);
+    const output = filterWelcomeChunk(chunk, encoding);
     return originalWrite.call(this, output, encoding, callback);
   }
 

@@ -190,8 +190,9 @@ const welcomeProbe = spawnSync(process.execPath, ['-e', `
   require(${JSON.stringify(preloadPath)});
   const wrappedBefore = process.stdout.write !== nativeWrite;
   const callbackOrder = [];
+  process.stdout.write(Buffer.from('\\x1b[?1049h\\x1b]0;✳ Claude Code\\x07prefix'));
   const cachedWrite = process.stdout.write;
-  const returned = cachedWrite.call(process.stdout, Buffer.from('\\x1b[?1049h\\x1b]0;✳ Claude Code\\x07prefix\\x1b[43GAPI\\x1b[47GUsage\\x1b[53GBilling\\r'), () => callbackOrder.push('welcome'));
+  const returned = cachedWrite.call(process.stdout, Buffer.from('\\x1b[43GAPI\\x1b[47GUsage\\x1b[53GBilling\\r'), () => callbackOrder.push('welcome'));
   cachedWrite.call(process.stdout, '\\x1b[43GAPI\\x1b[47GUsage\\x1b[53GBilling');
   process.stdout.write('native-followup', () => {
     callbackOrder.push('followup');

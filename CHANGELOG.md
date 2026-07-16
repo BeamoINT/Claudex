@@ -5,6 +5,14 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.4.5] - 2026-07-15
+
+### Fixed
+
+- Kept the one-shot welcome-plan filter active across Claude Code's separate
+  alternate-screen prelude and banner writes. The real embedded Bun renderer
+  now shows the detected ChatGPT plan before native stdout is restored.
+
 ## [1.4.4] - 2026-07-15
 
 ### Changed
@@ -220,7 +228,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first-party profile support.
 - Cross-platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.4.4...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.4.5...HEAD
+[1.4.5]: https://github.com/BeamoINT/Claudex/compare/v1.4.4...v1.4.5
 [1.4.4]: https://github.com/BeamoINT/Claudex/compare/v1.4.3...v1.4.4
 [1.4.3]: https://github.com/BeamoINT/Claudex/compare/v1.4.2...v1.4.3
 [1.4.2]: https://github.com/BeamoINT/Claudex/compare/v1.4.1...v1.4.2

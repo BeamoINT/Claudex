@@ -1,5 +1,10 @@
 # Package-manager installation
 
+Claudex is currently distributed through the BeamoINT Homebrew tap and Scoop
+bucket. Its WinGet community submission is pending Microsoft review. The
+checksum-verified source installer remains available on every supported
+platform; Claudex is not currently published as an npm CLI package.
+
 Package-manager installs expose the same `claudex` command as the source
 installer. On first launch, a small cross-platform bootstrap installs the
 managed files into `~/.config/claudex`, downloads the checksum-verified local

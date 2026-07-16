@@ -47,8 +47,8 @@ scoop install beamoint/claudex
 
 Then run `claudex --login`. Package installs bootstrap their private managed
 configuration automatically on first use. See the
-[package-manager guide](docs/package-managers.md) for upgrades, one-shot `npx`
-usage, and WinGet submission status.
+[package-manager guide](docs/package-managers.md) for upgrades and WinGet
+submission status.
 
 ### macOS, Linux, or WSL
 
