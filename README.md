@@ -13,6 +13,25 @@ Claudex is an open-source compatibility layer for using Codex GPT models through
 
 Install Claudex, then complete the official Codex browser sign-in when prompted.
 
+### One-command source installer
+
+macOS, Linux, or WSL:
+
+```bash
+curl -fsSL --proto '=https' --tlsv1.2 https://claudex.work/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://claudex.work/install.ps1 | iex
+```
+
+These small website bootstraps resolve the latest stable GitHub release,
+validate its published SHA-256 digest and archive paths, and only then run the
+native Claudex installer. The longer download-first commands below are useful
+when you want to inspect the bootstrap before running it.
+
 ### Package managers
 
 ```bash

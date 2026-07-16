@@ -22,7 +22,22 @@ Chocolatey, or Scoop. Codex CLI is installed from OpenAI's official
 
 ## Download
 
-The shortest installation path is a supported package manager. See
+The shortest verified source installation is hosted on the Claudex website.
+
+macOS, Linux, or WSL:
+
+```bash
+curl -fsSL --proto '=https' --tlsv1.2 https://claudex.work/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://claudex.work/install.ps1 | iex
+```
+
+The website bootstrap verifies the latest stable GitHub release before running
+its native installer. For package-managed installation, see
 [package-managers.md](package-managers.md) for Homebrew, npm, Scoop, and WinGet
 commands. Package installs configure themselves on first use and refresh the
 managed launcher after upgrades.
