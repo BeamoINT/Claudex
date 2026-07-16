@@ -30,7 +30,10 @@ clear_account_scoped_state() {
   generation_tmp=$(mktemp "$config_dir/.usage-generation.tmp.XXXXXX") || return 1
   (umask 077; printf '%s-%s-%s\n' "$(date +%s)" "$$" "${RANDOM:-0}" > "$generation_tmp")
   chmod 600 "$generation_tmp" 2>/dev/null || true
-  mv -f "$generation_tmp" "$usage_generation_file"
+  if ! mv -f "$generation_tmp" "$usage_generation_file"; then
+    rm -f "$generation_tmp"
+    return 1
+  fi
 }
 
 codex_is_logged_in() {
@@ -101,7 +104,7 @@ sync_session() {
     local temporary
     umask 077
     temporary=$(mktemp "$bridge_auth_dir/.codex-session.tmp.XXXXXX")
-    jq '{
+    if ! jq '{
       type: "codex",
       access_token: .tokens.access_token,
       refresh_token: .tokens.refresh_token,
@@ -110,12 +113,21 @@ sync_session() {
       last_refresh: (.last_refresh // ""),
       disabled: false,
       expired: false
-    }' "$codex_auth_file" > "$temporary"
+    }' "$codex_auth_file" > "$temporary"; then
+      rm -f "$temporary"
+      return 1
+    fi
     chmod 600 "$temporary"
     if [[ -z "$previous_account" || "$previous_account" != "$source_account" ]]; then
-      clear_account_scoped_state
+      if ! clear_account_scoped_state; then
+        rm -f "$temporary"
+        return 1
+      fi
     fi
-    mv -f "$temporary" "$bridge_auth_file"
+    if ! mv -f "$temporary" "$bridge_auth_file"; then
+      rm -f "$temporary"
+      return 1
+    fi
   fi
 }
 

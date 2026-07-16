@@ -13,6 +13,8 @@ const splitPositionedBilling = new RegExp(`· API Usage Bil${csi}ing`, 'g');
 const welcomeBillingColumns = /\x1b\[(\d+)GAPI\x1b\[(\d+)GUsage\x1b\[(\d+)GBilling/;
 const billingFieldWidth = 'API Usage Billing'.length;
 const welcomeFrameMarker = '\x1b[?1049h';
+const welcomeTitleMarker = 'Claude Code';
+const welcomeDetectionTailLength = 128;
 
 function chatGptPlanLabel(value = process.env.CLAUDEX_CHATGPT_PLAN_LABEL) {
   const label = typeof value === 'string' ? value.trim() : '';
@@ -23,26 +25,100 @@ function chatGptPlanLabel(value = process.env.CLAUDEX_CHATGPT_PLAN_LABEL) {
 
 function replaceWelcomeBillingColumns(text, label = chatGptPlanLabel(), options = {}) {
   if (options.requireWelcomeFrame
-      && (!text.includes(welcomeFrameMarker) || !text.includes('Claude Code'))) {
+      && (!text.includes(welcomeFrameMarker) || !text.includes(welcomeTitleMarker))) {
     return { output: text, replaced: false };
   }
   let replaced = false;
   const output = text.replace(welcomeBillingColumns, (match, apiColumnText, usageColumnText, billingColumnText) => {
-    const apiColumn = Number.parseInt(apiColumnText, 10);
-    const usageColumn = Number.parseInt(usageColumnText, 10);
-    const billingColumn = Number.parseInt(billingColumnText, 10);
-    if (usageColumn !== apiColumn + 4 || billingColumn !== apiColumn + 10) return match;
-
-    // Consumer labels fit the native 17-cell field. The two 18-character
-    // workspace labels use the blank cell immediately before the field so the
-    // exact plan remains visible without moving the native end cursor.
-    const overflow = Math.max(0, label.length - billingFieldWidth);
-    if (overflow > 1 || apiColumn <= overflow) return match;
-    const replacement = overflow === 0 ? label.padEnd(billingFieldWidth, ' ') : label;
+    const replacement = positionedBillingReplacement(
+      [match, apiColumnText, usageColumnText, billingColumnText],
+      label,
+    );
+    if (!replacement) return match;
     replaced = true;
-    return `\x1b[${apiColumn - overflow}G${replacement}`;
+    return replacement;
   });
   return { output, replaced };
+}
+
+function positionedBillingReplacement(match, label) {
+  const apiColumn = Number.parseInt(match[1], 10);
+  const usageColumn = Number.parseInt(match[2], 10);
+  const billingColumn = Number.parseInt(match[3], 10);
+  if (usageColumn !== apiColumn + 4 || billingColumn !== apiColumn + 10) return null;
+
+  // Consumer labels fit the native 17-cell field. The two 18-character
+  // workspace labels use the blank cell immediately before the field so the
+  // exact plan remains visible without moving the native end cursor.
+  const overflow = Math.max(0, label.length - billingFieldWidth);
+  if (overflow > 1 || apiColumn <= overflow) return null;
+  const replacement = overflow === 0 ? label.padEnd(billingFieldWidth, ' ') : label;
+  return `\x1b[${apiColumn - overflow}G${replacement}`;
+}
+
+function findPositionedBilling(text, minimumEnd = 0, label = chatGptPlanLabel()) {
+  const pattern = new RegExp(welcomeBillingColumns.source, 'g');
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index + match[0].length <= minimumEnd) continue;
+    const replacement = positionedBillingReplacement(match, label);
+    if (replacement) return { match, replacement };
+  }
+  return null;
+}
+
+function appendChunk(chunk, suffix) {
+  if (typeof chunk === 'string') return chunk + suffix;
+  const source = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  return Buffer.concat([source, Buffer.from(suffix, 'latin1')]);
+}
+
+function createWelcomePlanStreamFilter(label = chatGptPlanLabel()) {
+  let tail = '';
+  let sawAlternateScreen = false;
+  let sawClaudeCode = false;
+
+  return function filterWelcomeChunk(chunk, encoding) {
+    if (typeof chunk !== 'string' && !Buffer.isBuffer(chunk) && !(chunk instanceof Uint8Array)) {
+      return { output: chunk, replaced: false };
+    }
+
+    const sourceText = typeof chunk === 'string'
+      ? chunk
+      : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength).toString('latin1');
+    const priorTailLength = tail.length;
+    const combined = tail + sourceText;
+    sawAlternateScreen ||= combined.includes(welcomeFrameMarker);
+    sawClaudeCode ||= combined.includes(welcomeTitleMarker);
+
+    let output = chunk;
+    let replaced = false;
+    if (sawAlternateScreen && sawClaudeCode) {
+      const found = findPositionedBilling(combined, priorTailLength, label);
+      if (found) {
+        const matchStartsInCurrentChunk = found.match.index >= priorTailLength;
+        if (matchStartsInCurrentChunk) {
+          const localStart = found.match.index - priorTailLength;
+          const rewritten = sourceText.slice(0, localStart)
+            + found.replacement
+            + sourceText.slice(localStart + found.match[0].length);
+          output = typeof chunk === 'string' ? rewritten : Buffer.from(rewritten, 'latin1');
+          replaced = true;
+        } else {
+          // stdout.write boundaries are observable: do not buffer a candidate
+          // prefix or defer its callback. Once a split field is complete, use
+          // the field's native absolute cursor anchor to overwrite it in place.
+          // All original bytes remain in their original order and the cursor
+          // ends at the same column as Claude Code's native field.
+          output = appendChunk(chunk, found.replacement);
+          replaced = true;
+        }
+      }
+    }
+
+    tail = combined.slice(-welcomeDetectionTailLength);
+    return { output, replaced };
+  };
 }
 
 function terminalPhrasePattern(phrase) {
@@ -138,42 +214,24 @@ function installWelcomePlanFilter() {
   const originalWrite = process.stdout.write;
   let inspectedBytes = 0;
   let active = true;
-  let sawAlternateScreen = false;
-  let sawClaudeCode = false;
+  const streamFilter = createWelcomePlanStreamFilter();
   const restore = () => {
     if (!active) return;
     active = false;
     if (process.stdout.write === filteredWrite) process.stdout.write = originalWrite;
   };
   function filterWelcomeChunk(chunk, encoding) {
-    let output = chunk;
-    let replaced = false;
+    let byteLength = 0;
     if (typeof chunk === 'string') {
-      sawAlternateScreen ||= chunk.includes(welcomeFrameMarker);
-      sawClaudeCode ||= chunk.includes('Claude Code');
-      const result = sawAlternateScreen && sawClaudeCode
-        ? replaceWelcomeBillingColumns(chunk)
-        : { output: chunk, replaced: false };
-      output = result.output;
-      replaced = result.replaced;
-      inspectedBytes += Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : 'utf8');
+      byteLength = Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : 'utf8');
     } else if (Buffer.isBuffer(chunk) || chunk instanceof Uint8Array) {
       const source = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-      const sourceText = source.toString('latin1');
-      sawAlternateScreen ||= sourceText.includes(welcomeFrameMarker);
-      sawClaudeCode ||= sourceText.includes('Claude Code');
-      const result = sawAlternateScreen && sawClaudeCode
-        ? replaceWelcomeBillingColumns(sourceText)
-        : { output: sourceText, replaced: false };
-      if (result.replaced) output = Buffer.from(result.output, 'latin1');
-      replaced = result.replaced;
-      inspectedBytes += source.length;
+      byteLength = source.length;
     }
-    // Claude Code writes the alternate-screen/title prelude separately from
-    // the positioned banner. Carry only those two booleans across writes; do
-    // not buffer, decode, or reorder any terminal bytes.
-    if (replaced || inspectedBytes >= 1024 * 1024) restore();
-    return output;
+    inspectedBytes += byteLength;
+    const result = streamFilter(chunk, encoding);
+    if (result.replaced || inspectedBytes >= 1024 * 1024) restore();
+    return result.output;
   }
   function filteredWrite(chunk, encoding, callback) {
     if (!active) return originalWrite.call(this, chunk, encoding, callback);
@@ -486,6 +544,7 @@ installWelcomePlanFilter();
 module.exports = {
   chatGptPlanLabel,
   createInputRewriter,
+  createWelcomePlanStreamFilter,
   filterClaudexOutput,
   replaceWelcomeBillingColumns,
   rewriteSolplanInput,

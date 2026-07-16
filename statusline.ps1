@@ -19,6 +19,42 @@ $sessionId = ''
 $totalInputTokens = 0
 $contextWindowSize = 0
 $inputColumns = 0
+
+function Remove-StaleStatuslineCache([string] $CacheDirectory, [string] $ProtectedFile) {
+    if (-not (Test-Path -LiteralPath $CacheDirectory -PathType Container)) { return }
+    $cutoff = [DateTime]::UtcNow.AddDays(-7)
+    $files = @(Get-ChildItem -LiteralPath $CacheDirectory -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^[A-Za-z0-9._-]+$' -and $_.Name -notlike '.context.tmp.*' })
+    foreach ($file in @($files | Where-Object { $_.LastWriteTimeUtc -lt $cutoff -and $_.FullName -ne $ProtectedFile })) {
+        Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+    }
+    $survivors = @(Get-ChildItem -LiteralPath $CacheDirectory -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^[A-Za-z0-9._-]+$' -and $_.Name -notlike '.context.tmp.*' } |
+        Sort-Object LastWriteTimeUtc -Descending)
+    foreach ($file in @($survivors | Where-Object { $_.FullName -ne $ProtectedFile } | Select-Object -Skip 127)) {
+        Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Move-StatuslineRefreshLockToQuarantine([string] $CacheDirectory, [string] $LockPath, [string] $ExpectedRecord) {
+    $quarantine = Join-Path $CacheDirectory ('.refresh.lock.quarantine.' + $PID + '.' + [guid]::NewGuid().ToString('N'))
+    try { Move-Item -LiteralPath $LockPath -Destination $quarantine -ErrorAction Stop } catch { return $false }
+    $movedOwnerPath = Join-Path $quarantine 'owner-pid'
+    $movedRecord = ''
+    if (Test-Path -LiteralPath $movedOwnerPath -PathType Leaf) {
+        try { $movedRecord = [IO.File]::ReadAllText($movedOwnerPath).Trim() } catch { $movedRecord = '' }
+    }
+    if ($movedRecord -eq $ExpectedRecord) {
+        Remove-Item -LiteralPath $movedOwnerPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $quarantine -Force -ErrorAction SilentlyContinue
+        return $true
+    }
+    if (-not (Test-Path -LiteralPath $LockPath)) {
+        try { Move-Item -LiteralPath $quarantine -Destination $LockPath -ErrorAction Stop } catch { }
+    }
+    return $false
+}
+
 if ($data) {
     if ($null -ne $data.PSObject.Properties['model'] -and $data.model) {
         if ($null -ne $data.model.PSObject.Properties['id']) { $modelId = [string] $data.model.id }
@@ -53,12 +89,17 @@ if ($sessionId -match '^[A-Za-z0-9._-]+$') {
     $cacheDir = Join-Path $configDir 'statusline-cache'
     $cacheFile = Join-Path $cacheDir $sessionId
     if ($contextPercent) {
+        $temporaryCache = $null
         try {
             [IO.Directory]::CreateDirectory($cacheDir) | Out-Null
             $temporaryCache = Join-Path $cacheDir ('.context.tmp.' + [guid]::NewGuid().ToString('N'))
             [IO.File]::WriteAllText($temporaryCache, "$contextPercent`n", $utf8)
             Move-Item -LiteralPath $temporaryCache -Destination $cacheFile -Force
-        } catch { }
+            $temporaryCache = $null
+            Remove-StaleStatuslineCache $cacheDir $cacheFile
+        } catch { } finally {
+            if ($temporaryCache) { Remove-Item -LiteralPath $temporaryCache -Force -ErrorAction SilentlyContinue }
+        }
     } elseif (Test-Path -LiteralPath $cacheFile -PathType Leaf) {
         try {
             $cached = [IO.File]::ReadAllText($cacheFile).Trim()
@@ -110,20 +151,37 @@ if ($usageDisplay -ne 'off' -and (Test-Path -LiteralPath $usageHelper -PathType 
         if ($now - $lastAttempt -ge $refreshSeconds) {
             [IO.Directory]::CreateDirectory($usageCacheDir) | Out-Null
             $started = $false
+            $ownerTemporary = $null
             try {
                 New-Item -Path $refreshLock -ItemType Directory -ErrorAction Stop | Out-Null
+                $refreshToken = [guid]::NewGuid().ToString('N')
+                [IO.File]::WriteAllText($refreshOwnerPath, "$PID $refreshToken`n", $utf8)
                 [IO.File]::WriteAllText($lastAttemptPath, "$now`n", $utf8)
                 $powershell = (Get-Process -Id $PID).Path
-                $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $usageHelper + '"'), '-RefreshCache', '-LockHeld')
+                $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $usageHelper + '"'), '-RefreshCache', '-LockHeld', '-LockToken', $refreshToken)
                 $refreshProcess = Start-Process -FilePath $powershell -ArgumentList $arguments -WindowStyle Hidden -PassThru
-                [IO.File]::WriteAllText($refreshOwnerPath, "$($refreshProcess.Id)`n", $utf8)
+                $ownerTemporary = Join-Path $refreshLock ('.owner.' + [guid]::NewGuid().ToString('N'))
+                [IO.File]::WriteAllText($ownerTemporary, "$($refreshProcess.Id) $refreshToken`n", $utf8)
+                $currentRecord = [IO.File]::ReadAllText($refreshOwnerPath).Trim()
+                $currentParts = @($currentRecord -split ' ', 2)
+                if ($currentParts.Count -eq 2 -and $currentParts[1] -eq $refreshToken) {
+                    Move-Item -LiteralPath $ownerTemporary -Destination $refreshOwnerPath -Force
+                    $ownerTemporary = $null
+                } else {
+                    Remove-Item -LiteralPath $ownerTemporary -Force -ErrorAction SilentlyContinue
+                    $ownerTemporary = $null
+                }
                 $started = $true
             } catch {
+                if ($ownerTemporary) { Remove-Item -LiteralPath $ownerTemporary -Force -ErrorAction SilentlyContinue }
                 if (-not $started -and $now - $lastAttempt -ge ($refreshSeconds * 2) -and (Test-Path -LiteralPath $refreshLock -PathType Container)) {
-                    $refreshOwner = 0
+                    $observedRecord = ''
                     if (Test-Path -LiteralPath $refreshOwnerPath -PathType Leaf) {
-                        [int]::TryParse(([IO.File]::ReadAllText($refreshOwnerPath).Trim()), [ref] $refreshOwner) | Out-Null
+                        $observedRecord = [IO.File]::ReadAllText($refreshOwnerPath).Trim()
                     }
+                    $ownerParts = @($observedRecord -split ' ', 2)
+                    $refreshOwner = 0
+                    if ($ownerParts.Count -gt 0) { [int]::TryParse($ownerParts[0], [ref] $refreshOwner) | Out-Null }
                     $ownerIsDead = $refreshOwner -gt 0 -and -not (Get-Process -Id $refreshOwner -ErrorAction SilentlyContinue)
                     $ownerlessIsStale = $false
                     if ($refreshOwner -le 0) {
@@ -133,8 +191,13 @@ if ($usageDisplay -ne 'off' -and (Test-Path -LiteralPath $usageHelper -PathType 
                         } catch { $ownerlessIsStale = $false }
                     }
                     if ($ownerIsDead -or $ownerlessIsStale) {
-                        Remove-Item -LiteralPath $refreshOwnerPath -Force -ErrorAction SilentlyContinue
-                        Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
+                        $currentRecord = ''
+                        if (Test-Path -LiteralPath $refreshOwnerPath -PathType Leaf) {
+                            $currentRecord = [IO.File]::ReadAllText($refreshOwnerPath).Trim()
+                        }
+                        if ($currentRecord -eq $observedRecord) {
+                            [void] (Move-StatuslineRefreshLockToQuarantine $usageCacheDir $refreshLock $observedRecord)
+                        }
                     }
                 }
             }

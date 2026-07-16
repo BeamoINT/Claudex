@@ -45,6 +45,15 @@ public static class ClaudexTestCurl
 {
     public static int Main(string[] args)
     {
+        string callLog = Environment.GetEnvironmentVariable("FAKE_CURL_CALL_LOG");
+        if (!String.IsNullOrEmpty(callLog)) File.AppendAllText(callLog, String.Join(" ", args) + Environment.NewLine);
+        string forcedStatus = Environment.GetEnvironmentVariable("FAKE_PROXY_HTTP_STATUS");
+        if (!String.IsNullOrEmpty(forcedStatus))
+        {
+            Console.WriteLine("{}");
+            Console.WriteLine(forcedStatus);
+            return 0;
+        }
         bool usage = false;
         string headerFile = null;
         foreach (string argument in args)
@@ -112,6 +121,8 @@ public static class ClaudexTestCurl
             Write-Output "NO_FLICKER=$env:CLAUDE_CODE_NO_FLICKER"
             Write-Output "ACCESSIBILITY=$env:CLAUDE_CODE_ACCESSIBILITY"
             Write-Output "DISABLE_1M=$env:CLAUDE_CODE_DISABLE_1M_CONTEXT"
+            Write-Output "FABLE=$env:ANTHROPIC_DEFAULT_FABLE_MODEL"
+            Write-Output "FABLE_NAME=$env:ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"
             Write-Output "OPUS=$env:ANTHROPIC_DEFAULT_OPUS_MODEL"
             Write-Output "OPUS_NAME=$env:ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"
             Write-Output "POWERSHELL_TOOL=$env:CLAUDE_CODE_USE_POWERSHELL_TOOL"
@@ -140,6 +151,13 @@ public static class ClaudexTestProxy
         string ready = Environment.GetEnvironmentVariable("FAKE_PROXY_READY_FILE");
         if (!String.IsNullOrEmpty(ready))
         {
+            if (Environment.GetEnvironmentVariable("FAKE_PROXY_EXIT_BEFORE_READY") == "1")
+            {
+                string pidFile = Environment.GetEnvironmentVariable("FAKE_PROXY_PID_FILE");
+                if (!String.IsNullOrEmpty(pidFile)) File.WriteAllText(pidFile, System.Diagnostics.Process.GetCurrentProcess().Id.ToString());
+                System.Threading.Thread.Sleep(500);
+                return 12;
+            }
             File.WriteAllText(ready, String.Empty);
             string log = Environment.GetEnvironmentVariable("FAKE_PROXY_START_LOG");
             if (!String.IsNullOrEmpty(log)) File.AppendAllText(log, "started" + Environment.NewLine);
@@ -162,7 +180,10 @@ if "%FAKE_CODEX_LOGGED_OUT%"=="1" exit /b 1
 if "%1"=="login" if "%2"=="status" exit /b 0
 if "%1"=="logout" if not "%FAKE_CODEX_LOGOUT_EXIT%"=="" exit /b %FAKE_CODEX_LOGOUT_EXIT%
 if "%1"=="logout" exit /b 0
-if "%1"=="-c" exit /b 0
+if "%1"=="-c" (
+  if not "%FAKE_CODEX_LOGIN_LOG%"=="" echo login>>"%FAKE_CODEX_LOGIN_LOG%"
+  exit /b 0
+)
 exit /b 2
 '@, $utf8)
     } else {
@@ -217,7 +238,10 @@ printf 'ARGS='; printf ' %s' "$@"; printf '\n'
 if [ "${FAKE_CODEX_LOGGED_OUT:-0}" = 1 ]; then exit 1; fi
 if [ "${1:-}" = login ] && [ "${2:-}" = status ]; then exit 0; fi
 if [ "${1:-}" = logout ]; then exit "${FAKE_CODEX_LOGOUT_EXIT:-0}"; fi
-if [ "${1:-}" = -c ]; then exit 0; fi
+if [ "${1:-}" = -c ]; then
+  [ -z "${FAKE_CODEX_LOGIN_LOG:-}" ] || printf '%s\n' login >> "$FAKE_CODEX_LOGIN_LOG"
+  exit 0
+fi
 exit 2
 '@, $utf8)
         [IO.File]::WriteAllText((Join-Path $fakeBin 'cliproxyapi'), @'
@@ -344,6 +368,8 @@ switch ($Action) {
     Assert-True ($output.Contains('NO_FLICKER=1')) 'no-flicker rendering'
     Assert-True ($output.Contains('ACCESSIBILITY=1')) 'native terminal cursor'
     Assert-True ($output.Contains('DISABLE_1M=1')) 'proxied sessions hide the unsupported Anthropic 1M selector'
+    Assert-True ($output.Contains('FABLE=gpt-5.6-sol')) 'Fable selector routes to Sol'
+    Assert-True ($output.Contains('FABLE_NAME=GPT-5.6 Sol')) 'Fable selector exposes the Sol display name'
     Assert-True ($output.Contains('OPUS=gpt-5.6-sol')) 'single Sol alias'
     Assert-True ($output.Contains('OPUS_NAME=GPT-5.6 Sol')) 'friendly name'
     Assert-True ($output.Contains('BUN=--preload')) 'proxied session preload'
@@ -368,6 +394,19 @@ switch ($Action) {
     Assert-True (-not $output.Contains('"claudex-builder"')) 'legacy builder alias removed'
     Assert-True (-not $output.Contains('"claudex-fast"')) 'legacy fast alias removed'
     Assert-True (-not $output.Contains('"model":"gpt-5.6-sol"')) 'leader model is not delegated'
+    $warningBridge = Join-Path $temporary 'warning-skill-bridge.cjs'
+    [IO.File]::WriteAllText($warningBridge, @'
+process.stdout.write(JSON.stringify({
+  addDirs: [],
+  pluginDirs: [],
+  warnings: ['Skill refresh failed; using the last known good snapshot.\nReview the rejected skill.'],
+}) + '\n');
+'@, $utf8)
+    $env:CLAUDEX_SKILL_BRIDGE_HELPER = $warningBridge
+    try { $warningBridgeOutput = (& (Join-Path $root 'claudex.ps1') --terra warning-test 2>&1 | Out-String) }
+    finally { Remove-Item Env:CLAUDEX_SKILL_BRIDGE_HELPER -ErrorAction SilentlyContinue }
+    Assert-True ($warningBridgeOutput.Contains('claudex: skill bridge: Skill refresh failed; using the last known good snapshot. Review the rejected skill.')) 'ordinary Windows launch surfaces skill bridge warnings on one line'
+    Assert-True ($warningBridgeOutput.Contains('AUTO=gpt-5.6-terra')) 'skill bridge warning does not prevent launch'
     $env:CLAUDEX_MODEL = 'gpt-5.6-luna'
     try {
         $configuredModel = (& (Join-Path $root 'claudex.ps1') test-prompt | Out-String)
@@ -426,6 +465,45 @@ switch ($Action) {
     Assert-True (@($updatedSettings.autoMode.hard_deny | Where-Object { $_ -eq 'User custom hard deny rule' }).Count -eq 1) 'custom hard deny survives upstream replacement'
 
     if ($isWindowsPlatform) {
+        $remoteCurlLog = Join-Path $temporary 'remote-proxy-curl.log'
+        $savedProxyUrl = [Environment]::GetEnvironmentVariable('CLAUDEX_PROXY_URL', 'Process')
+        $savedRemoteOptIn = [Environment]::GetEnvironmentVariable('CLAUDEX_ALLOW_REMOTE_PROXY', 'Process')
+        $env:CLAUDEX_PROXY_URL = 'https://proxy.example.test'
+        Remove-Item Env:CLAUDEX_ALLOW_REMOTE_PROXY -ErrorAction SilentlyContinue
+        $env:FAKE_CURL_CALL_LOG = $remoteCurlLog
+        $shellPath = (Get-Process -Id $PID).Path
+        $savedErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $remoteRejectedOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --terra remote-rejection-test 2>&1
+            $remoteRejectedExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $savedErrorPreference
+            if ($null -eq $savedProxyUrl) { Remove-Item Env:CLAUDEX_PROXY_URL -ErrorAction SilentlyContinue } else { $env:CLAUDEX_PROXY_URL = $savedProxyUrl }
+            if ($null -eq $savedRemoteOptIn) { Remove-Item Env:CLAUDEX_ALLOW_REMOTE_PROXY -ErrorAction SilentlyContinue } else { $env:CLAUDEX_ALLOW_REMOTE_PROXY = $savedRemoteOptIn }
+            Remove-Item Env:FAKE_CURL_CALL_LOG -ErrorAction SilentlyContinue
+        }
+        Assert-True ($remoteRejectedExit -eq 2) 'Windows launcher rejects a remote proxy without explicit opt-in'
+        Assert-True (($remoteRejectedOutput | Out-String).Contains('CLAUDEX_ALLOW_REMOTE_PROXY=1')) 'remote proxy rejection explains the trusted HTTPS opt-in'
+        Assert-True (-not (Test-Path -LiteralPath $remoteCurlLog -PathType Leaf)) 'remote proxy rejection occurs before the credential-bearing curl request'
+
+        $unmanaged401StartLog = Join-Path $temporary 'unmanaged-401-proxy-start.log'
+        $env:FAKE_PROXY_HTTP_STATUS = '401'
+        $env:FAKE_PROXY_START_LOG = $unmanaged401StartLog
+        $savedErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $unmanaged401Output = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --terra unmanaged-401-test 2>&1
+            $unmanaged401Exit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $savedErrorPreference
+            Remove-Item Env:FAKE_PROXY_HTTP_STATUS -ErrorAction SilentlyContinue
+            Remove-Item Env:FAKE_PROXY_START_LOG -ErrorAction SilentlyContinue
+        }
+        Assert-True ($unmanaged401Exit -ne 0) 'Windows launcher rejects an unverified loopback process after HTTP 401'
+        Assert-True (($unmanaged401Output | Out-String).Contains('will not stop an unverified process')) 'unverified loopback 401 explains the managed-process safety boundary'
+        Assert-True (-not (Test-Path -LiteralPath $unmanaged401StartLog -PathType Leaf)) 'unverified loopback 401 never starts a replacement proxy'
+
         $proxyReady = Join-Path $temporary 'windows-proxy-ready'
         $proxyStartLog = Join-Path $temporary 'windows-proxy-start.log'
         $env:FAKE_PROXY_READY_FILE = $proxyReady
@@ -469,6 +547,28 @@ switch ($Action) {
             Remove-Item Env:CLAUDEX_TEST_PROXY_REACHABLE_FILE -ErrorAction SilentlyContinue
             Remove-Item Env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE -ErrorAction SilentlyContinue
         }
+
+        $neverReadyFile = Join-Path $temporary 'windows-proxy-never-ready'
+        $neverReadyPidFile = Join-Path $temporary 'windows-proxy-never-ready.pid'
+        $env:FAKE_PROXY_READY_FILE = $neverReadyFile
+        $env:FAKE_PROXY_EXIT_BEFORE_READY = '1'
+        $env:FAKE_PROXY_PID_FILE = $neverReadyPidFile
+        $savedErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --terra never-ready-test 2>&1 | Out-Null
+            $neverReadyExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $savedErrorPreference
+            Remove-Item Env:FAKE_PROXY_READY_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:FAKE_PROXY_EXIT_BEFORE_READY -ErrorAction SilentlyContinue
+            Remove-Item Env:FAKE_PROXY_PID_FILE -ErrorAction SilentlyContinue
+        }
+        Assert-True ($neverReadyExit -ne 0) 'Windows launcher reports a proxy process that exits before readiness'
+        Assert-True (Test-Path -LiteralPath $neverReadyPidFile -PathType Leaf) 'never-ready proxy test process started'
+        $neverReadyPid = [int]([IO.File]::ReadAllText($neverReadyPidFile).Trim())
+        Assert-True ($null -eq (Get-Process -Id $neverReadyPid -ErrorAction SilentlyContinue)) 'never-ready proxy process is no longer running'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $testConfig 'run\managed-proxy.json') -PathType Leaf)) 'never-ready proxy metadata is removed'
     }
 
     $env:BUN_OPTIONS = ''
@@ -525,6 +625,9 @@ switch ($Action) {
     Assert-True ($windowsLauncher.Contains('if ($null -eq $Value -or $Value.Length -eq 0) { return ''""'' }')) 'Windows native argv serializer preserves empty arguments'
     Assert-True ($windowsLauncher.Contains('if ($character -eq ''"'')')) 'Windows native argv serializer escapes embedded quotes'
     Assert-True ($windowsLauncher.Contains("`$earlyRuntimeBypass = `$true")) 'maintenance and direct Chrome recovery bypass is installed'
+    Assert-True ($windowsLauncher.Contains("CLAUDEX_ALLOW_REMOTE_PROXY=1")) 'Windows launcher documents the explicit trusted HTTPS proxy opt-in'
+    Assert-True ($windowsLauncher.Contains('Stop-RecordedManagedProxy')) 'Windows launcher limits authentication recovery to recorded managed proxies'
+    Assert-True ($windowsLauncher.Contains('Stop-NewlySpawnedProxy')) 'Windows launcher cleans up a proxy that never becomes ready'
 
     Remove-Item -LiteralPath $resumeCapture -Force
     $env:FAKE_CLAUDE_RESUME = '1'
@@ -771,13 +874,19 @@ switch ($Action) {
     Assert-True ($installScriptSource.Contains('--prefix $installPrefix')) 'Codex install passes a concrete local prefix to npm'
     Assert-True (-not $installScriptSource.Contains('--prefix $script:codexInstalledBinDir')) 'Codex install never exposes a scoped variable to npm.ps1 evaluation'
     Assert-True ($installScriptSource.Contains("`$claudeInstalledBinDir = Join-Path `$env:USERPROFILE '.local\bin'")) 'Claude installer discovers its first-run bin directory'
-    Assert-True ($installScriptSource.Contains('@($codexInstalledBinDir, $claudeInstalledBinDir,')) 'Claude installer persists its first-run bin directory'
+    Assert-True ($installScriptSource.Contains('$codexInstalledBinDir,') -and $installScriptSource.Contains('$claudeInstalledBinDir,')) 'CLI installers persist their first-run bin directories'
     Assert-True ($installScriptSource.Contains('function Get-NodeMajorVersion')) 'Windows installer parses the active Node major version'
     Assert-True ($installScriptSource.Contains('$nodeMajor -lt 18 -and $allowNodeMigration')) 'Windows installer upgrades Node below the supported minimum'
     Assert-True ($installScriptSource.Contains("`$env:CLAUDEX_ALLOW_NODE_INSTALL -eq '1'")) 'archive migration can authorize only the required Node installation'
+    Assert-True ($installScriptSource.Contains('function Receive-FileWithRetry')) 'Windows installer has bounded transient download retries'
+    Assert-True ($installScriptSource.Contains('function Start-InstallTransaction')) 'Windows direct reinstall stages a rollback generation'
+    Assert-True ($installScriptSource.Contains('function Install-ManagedNode')) 'Windows installer has a verified user-local Node fallback'
     $selfUpdateScriptSource = Get-Content -LiteralPath (Join-Path $root 'self-update.ps1') -Raw
     Assert-True ($selfUpdateScriptSource.Contains("CLAUDEX_ALLOW_NODE_INSTALL = '1'")) 'archive updater authorizes the Node dependency migration'
     Assert-True ($selfUpdateScriptSource.Contains("CLAUDEX_SKIP_DEPENDENCY_INSTALL = '1'")) 'archive updater still blocks unrelated dependency changes'
+    Assert-True ($selfUpdateScriptSource.Contains('function ConvertTo-CmdArgument')) 'Windows updater has a CMD-specific argument serializer'
+    Assert-True ($selfUpdateScriptSource.Contains(".Replace('%', '%%')")) 'Windows updater neutralizes CMD percent expansion'
+    Assert-True ($selfUpdateScriptSource.Contains("'/d /s /v:off /c `"'")) 'Windows updater disables delayed expansion for CMD shims'
 
     $installHome = Join-Path $temporary 'install home'
     [IO.Directory]::CreateDirectory((Join-Path $installHome '.codex')) | Out-Null
@@ -814,6 +923,77 @@ switch ($Action) {
     Assert-True ($installedProxyConfig.Contains('request-retry: 3')) 'proxy retries transient upstream failures before surfacing an API error'
     Assert-True ($installedProxyConfig.Contains('transient-error-cooldown-seconds: 1')) 'proxy transient cooldown stays bounded'
     Assert-True ($installedProxyConfig.Contains('bootstrap-retries: 2')) 'proxy retries pre-stream failures'
+
+    $specialInstallerToken = 'installer token = 100% ! & "quotes" \path'
+    $env:CLAUDEX_PROXY_TOKEN = $specialInstallerToken
+    & (Join-Path $root 'install.ps1') | Out-Null
+    $tokenLine = [IO.File]::ReadAllLines((Join-Path $env:CLAUDEX_CONFIG_DIR 'env')) | Where-Object { $_.StartsWith('CLAUDEX_PROXY_TOKEN=') } | Select-Object -First 1
+    Assert-True ($tokenLine.Substring('CLAUDEX_PROXY_TOKEN='.Length) -ceq $specialInstallerToken) 'Windows installer token round-trips exactly through env serialization'
+
+    $explicitLoginLog = Join-Path $temporary 'explicit-installer-login.log'
+    $env:FAKE_CODEX_LOGIN_LOG = $explicitLoginLog
+    & (Join-Path $root 'install.ps1') -Login | Out-Null
+    Remove-Item Env:FAKE_CODEX_LOGIN_LOG
+    Assert-True (@([IO.File]::ReadAllLines($explicitLoginLog)).Count -eq 1) 'explicit -Login runs even for an already-valid Codex session'
+
+    $rollbackEnvBefore = Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'env') -Raw
+    $rollbackProxyBefore = Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'cliproxyapi.yaml') -Raw
+    [IO.File]::WriteAllText((Join-Path $env:CLAUDEX_CONFIG_DIR 'statusline.ps1'), 'rollback-statusline-sentinel', $utf8)
+    $savedInstallMethod = $env:CLAUDEX_INSTALL_METHOD
+    $env:CLAUDEX_INSTALL_METHOD = 'invalid'
+    $env:CLAUDEX_PROXY_TOKEN = 'must-not-survive'
+    $shellPath = (Get-Process -Id $PID).Path
+    $savedErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $rollbackOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install.ps1') 2>&1
+        $rollbackExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedErrorPreference }
+    if ($null -eq $savedInstallMethod) { Remove-Item Env:CLAUDEX_INSTALL_METHOD -ErrorAction SilentlyContinue } else { $env:CLAUDEX_INSTALL_METHOD = $savedInstallMethod }
+    Assert-True ($rollbackExit -eq 1) 'late Windows installer failure is reported'
+    Assert-True (($rollbackOutput | Out-String).Contains('restored the previous managed installation')) 'late Windows installer failure reports rollback'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'env') -Raw) -ceq $rollbackEnvBefore) 'Windows rollback restores env exactly'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'cliproxyapi.yaml') -Raw) -ceq $rollbackProxyBefore) 'Windows rollback restores proxy config exactly'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'statusline.ps1') -Raw) -ceq 'rollback-statusline-sentinel') 'Windows rollback restores prior managed files'
+    Assert-True (@(Get-ChildItem -LiteralPath $env:CLAUDEX_CONFIG_DIR -Filter '.install-transaction-*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows rollback removes transaction scratch state'
+
+    $crashTransaction = Join-Path $env:CLAUDEX_CONFIG_DIR '.install-transaction-crash-test'
+    $crashBackup = Join-Path $crashTransaction 'backup'
+    [IO.Directory]::CreateDirectory($crashBackup) | Out-Null
+    $crashTargets = @(
+        (Join-Path $env:CLAUDEX_BIN_DIR 'claudex.ps1'),
+        (Join-Path $env:CLAUDEX_BIN_DIR 'claudex.cmd'),
+        (Join-Path $env:CLAUDEX_CONFIG_DIR 'env'),
+        (Join-Path $env:CLAUDEX_CONFIG_DIR 'cliproxyapi.yaml'),
+        (Join-Path $env:CLAUDEX_CONFIG_DIR 'bin\cliproxyapi-7.2.80.exe'),
+        (Join-Path $env:CLAUDEX_CONFIG_DIR 'settings.json'),
+        (Join-Path $env:CLAUDEX_CONFIG_DIR 'statusline.ps1'),
+        (Join-Path $env:CLAUDEX_CONFIG_DIR 'usage-limit.ps1'),
+        (Join-Path $env:CLAUDEX_CONFIG_DIR 'codex-session.ps1'),
+        (Join-Path $env:CLAUDEX_CONFIG_DIR 'preload.cjs'),
+        (Join-Path $env:CLAUDEX_CONFIG_DIR 'skill-bridge.cjs'),
+        (Join-Path $env:CLAUDEX_CONFIG_DIR 'self-update.ps1'),
+        (Join-Path $env:CLAUDEX_CONFIG_DIR 'skills\usage-limit\SKILL.md'),
+        (Join-Path $env:CLAUDEX_CONFIG_DIR 'install.json')
+    )
+    $crashEntries = @()
+    for ($crashIndex = 0; $crashIndex -lt $crashTargets.Count; $crashIndex++) {
+        $crashTarget = $crashTargets[$crashIndex]
+        $crashBackupPath = Join-Path $crashBackup ([string] $crashIndex)
+        $crashExisted = Test-Path -LiteralPath $crashTarget -PathType Leaf
+        if ($crashExisted) { Copy-Item -LiteralPath $crashTarget -Destination $crashBackupPath }
+        $crashEntries += [pscustomobject]@{ Path = $crashTarget; Backup = $crashBackupPath; Existed = $crashExisted }
+    }
+    [IO.File]::WriteAllText((Join-Path $crashTransaction 'manifest.json'), (($crashEntries | ConvertTo-Json -Depth 5) + "`n"), $utf8)
+    [IO.File]::WriteAllText((Join-Path $crashTransaction 'state'), "committing`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $env:CLAUDEX_CONFIG_DIR 'env'), "CLAUDEX_PROXY_TOKEN=corrupted-crash-token`n", $utf8)
+    Remove-Item Env:CLAUDEX_PROXY_TOKEN
+    $recoveryOutput = (& (Join-Path $root 'install.ps1') | Out-String)
+    Assert-True ($recoveryOutput.Contains('Recovered the previous interrupted Claudex installation')) 'Windows installer recovers a durable interrupted transaction'
+    $recoveredTokenLine = [IO.File]::ReadAllLines((Join-Path $env:CLAUDEX_CONFIG_DIR 'env')) | Where-Object { $_.StartsWith('CLAUDEX_PROXY_TOKEN=') } | Select-Object -First 1
+    Assert-True ($recoveredTokenLine.Substring('CLAUDEX_PROXY_TOKEN='.Length) -ceq $specialInstallerToken) 'Windows interrupted-transaction recovery restores env before reinstall'
+    Assert-True (-not (Test-Path -LiteralPath $crashTransaction)) 'Windows interrupted transaction is removed after recovery'
+    $env:CLAUDEX_PROXY_TOKEN = $specialInstallerToken
     $selfUpdateStatus = (& (Join-Path $root 'claudex.ps1') self-update --status | Out-String)
     Assert-True ($selfUpdateStatus.Contains("Installed version: $($packageManifest.version)")) 'self-update status dispatch'
     Assert-True ($selfUpdateStatus.Contains('Install method: archive')) 'self-update normalizes source installs to archive provenance'
@@ -894,6 +1074,46 @@ if ('$installerMode' -eq 'rollback') { exit 23 }
             Assert-True ($success.ExitCode -eq 0) "Windows archive updater applies a verified release: $($success.Output)"
             Assert-True ((Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'node-migration.txt') -Raw) -eq '1:1') 'Windows archive updater authorizes only the Node migration path'
             Assert-True ((Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'install.json') -Raw).Contains('9.9.9')) 'Windows archive updater validates the applied receipt'
+
+            $metacharBin = Join-Path $temporary 'manager&wrappers'
+            [IO.Directory]::CreateDirectory($metacharBin) | Out-Null
+            $scoopLog = Join-Path $temporary 'scoop-metachar.log'
+            [IO.File]::WriteAllText((Join-Path $metacharBin 'scoop.cmd'), @'
+@echo off
+echo %*>>"%FAKE_SCOOP_LOG%"
+if "%1"=="update" exit /b 0
+exit /b 9
+'@, $utf8)
+            [IO.File]::WriteAllText((Join-Path $metacharBin 'package-setup.ps1'), @'
+$receipt = [ordered]@{ schema = 1; version = '9.9.10'; method = 'scoop'; binDir = $env:CLAUDEX_BIN_DIR; repository = 'BeamoINT/Claudex' }
+[IO.File]::WriteAllText((Join-Path $env:CLAUDEX_CONFIG_DIR 'install.json'), (($receipt | ConvertTo-Json -Compress) + "`n"))
+'@, $utf8)
+            [IO.File]::WriteAllText((Join-Path $metacharBin 'claudex.cmd'), @'
+@echo off
+if "%1"=="--package-version" goto package_version
+if "%1"=="--package-setup" goto package_setup
+exit /b 9
+:package_version
+echo 9.9.10
+exit /b 0
+:package_setup
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0package-setup.ps1"
+exit /b %ERRORLEVEL%
+'@, $utf8)
+            New-ArchiveUpdateFixture $fixture '9.9.10' 'success'
+            $managerReceipt = [ordered]@{ schema = 1; version = '9.9.9'; method = 'scoop'; binDir = $env:CLAUDEX_BIN_DIR; repository = 'BeamoINT/Claudex' }
+            [IO.File]::WriteAllText((Join-Path $env:CLAUDEX_CONFIG_DIR 'install.json'), (($managerReceipt | ConvertTo-Json -Compress) + "`n"), $utf8)
+            $savedManagerPath = $env:PATH
+            $env:PATH = "$metacharBin$([IO.Path]::PathSeparator)$env:PATH"
+            $env:FAKE_SCOOP_LOG = $scoopLog
+            try { $metacharUpdate = Invoke-ArchiveUpdateFixture $fixture }
+            finally {
+                $env:PATH = $savedManagerPath
+                Remove-Item Env:FAKE_SCOOP_LOG -ErrorAction SilentlyContinue
+            }
+            Assert-True ($metacharUpdate.ExitCode -eq 0) "Windows updater safely invokes CMD shims beneath a metacharacter path: $($metacharUpdate.Output)"
+            Assert-True ((Get-Content -LiteralPath $scoopLog -Raw).Contains('update claudex')) 'Scoop updater received intact arguments beneath a metacharacter path'
+            Assert-True ((Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'install.json') -Raw).Contains('9.9.10')) 'metacharacter-path package setup activated the expected release'
         } finally {
             if ($null -eq $oldFixtureMode) { Remove-Item Env:CLAUDEX_TEST_MODE -ErrorAction SilentlyContinue } else { $env:CLAUDEX_TEST_MODE = $oldFixtureMode }
             if ($null -eq $oldFixtureDirectory) { Remove-Item Env:CLAUDEX_TEST_UPDATE_FIXTURE_DIR -ErrorAction SilentlyContinue } else { $env:CLAUDEX_TEST_UPDATE_FIXTURE_DIR = $oldFixtureDirectory }

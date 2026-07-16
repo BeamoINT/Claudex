@@ -13,6 +13,12 @@ const MAX_FILES = 4096;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_TREE_BYTES = 64 * 1024 * 1024;
 const MAX_DEPTH = 32;
+const MAX_GENERATIONS_PER_PROJECT = 8;
+const MAX_TOTAL_GENERATIONS = 256;
+const MAX_STAGE_DIRECTORIES = 8;
+const STALE_STAGE_MS = 24 * 60 * 60 * 1000;
+const STALE_GC_LOCK_MS = 10 * 60 * 1000;
+const FILE_FINGERPRINT_VERSION = 2;
 const isWindows = process.platform === 'win32';
 const home = path.resolve(isWindows
   ? (process.env.USERPROFILE || os.homedir())
@@ -52,7 +58,7 @@ const nextDigestCache = {};
 function cachedFileFingerprint(file, stat) {
   if (!digestCache) digestCache = readJson(path.join(configDir, 'skill-bridge', 'digest-cache.json'), {});
   const key = canonical(file);
-  const stamp = [stat.size, stat.mtimeMs, stat.ctimeMs, stat.ino || 0, stat.mode & 0o777].join(':');
+  const stamp = [FILE_FINGERPRINT_VERSION, stat.size, stat.mtimeMs, stat.ctimeMs, stat.ino || 0, stat.mode & 0o777].join(':');
   const cached = digestCache && digestCache[key];
   if (cached && cached.stamp === stamp && typeof cached.digest === 'string') {
     nextDigestCache[key] = cached;
@@ -412,6 +418,7 @@ function discoverNativeNamesAt(root, names) {
 function discoverNativeProjectNames(directories) {
   const names = new Set();
   discoverNativeNamesAt(configDir, names);
+  for (const directory of directories) discoverNativeNamesAt(path.join(directory, '.claude'), names);
   return names;
 }
 
@@ -691,8 +698,7 @@ function sensitivePath(relative) {
 }
 
 function sensitiveContent(buffer) {
-  const preview = buffer.subarray(0, Math.min(buffer.length, 1024 * 1024)).toString('utf8');
-  return /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/.test(preview);
+  return /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/.test(buffer.toString('utf8'));
 }
 
 function scanTree(sourceRoot, excludePluginRuntime = false) {
@@ -953,19 +959,44 @@ function materializeDollarReferencePlugin(stage, references) {
   return relative;
 }
 
-function generationResult(generation, manifest, extraWarnings = []) {
+function generationResult(generation, manifest, extraWarnings = [], currentWarnings = manifest.warnings || []) {
   const pluginDirs = (manifest.pluginRelativeDirs || []).map((relative) => path.join(generation, ...relative.split('/')));
   return {
     schema: BRIDGE_SCHEMA, enabled: true, overlay: generation, addDirs: [generation], pluginDirs,
     skills: manifest.skills || [], modelMappings: manifest.modelMappings || [],
-    warnings: [...(manifest.warnings || []), ...extraWarnings],
+    warnings: [...currentWarnings, ...extraWarnings],
   };
 }
 
-function validManifest(file) {
+function validManifest(file, expectedPolicyFingerprint = null) {
   const manifest = readJson(file, null);
-  return manifest && manifest.schema === BRIDGE_SCHEMA && manifest.format === BRIDGE_FORMAT && Array.isArray(manifest.skills)
-    ? manifest : null;
+  if (!manifest || manifest.schema !== BRIDGE_SCHEMA || manifest.format !== BRIDGE_FORMAT
+      || !Array.isArray(manifest.skills) || !Array.isArray(manifest.pluginRelativeDirs)) return null;
+  if (expectedPolicyFingerprint && manifest.policyFingerprint !== expectedPolicyFingerprint) return null;
+  const generation = path.dirname(file);
+  for (const relative of manifest.pluginRelativeDirs) {
+    if (typeof relative !== 'string' || !relative) return null;
+    const pluginDirectory = path.resolve(generation, ...relative.split('/'));
+    if (!isWithin(pluginDirectory, generation) || !existsDirectory(pluginDirectory)
+        || !existsFile(path.join(pluginDirectory, '.claude-plugin', 'plugin.json'))) return null;
+  }
+  for (const skill of manifest.skills) {
+    if (!skill || typeof skill.alias !== 'string' || !skill.alias) return null;
+    let skillFile;
+    if (skill.mode === 'snapshot') {
+      if (skill.alias !== skillAlias(skill.alias)) return null;
+      skillFile = path.join(generation, '.claude', 'skills', skill.alias, 'SKILL.md');
+    } else if (skill.mode === 'snapshot-plugin') {
+      const separator = skill.alias.indexOf(':');
+      if (separator < 1) return null;
+      const namespace = skill.alias.slice(0, separator);
+      const alias = skill.alias.slice(separator + 1);
+      if (namespace !== skillAlias(namespace, 'plugin') || alias !== skillAlias(alias)) return null;
+      skillFile = path.join(generation, 'plugins', namespace, 'skills', alias, 'SKILL.md');
+    } else return null;
+    if (!isWithin(skillFile, generation) || !existsFile(skillFile)) return null;
+  }
+  return manifest;
 }
 
 function latestPointerPath(generations, projectHash, policyFingerprint) {
@@ -986,35 +1017,94 @@ function latestGeneration(generations, projectHash, policyFingerprint) {
       && pointer.generation === path.basename(pointer.generation)
       && pointer.generation.startsWith(`${projectHash}-`)) {
     const pointed = path.join(generations, pointer.generation);
-    const pointedManifest = validManifest(path.join(pointed, 'manifest.json'));
-    if (pointedManifest && pointedManifest.policyFingerprint === policyFingerprint) return pointed;
+    const pointedManifest = validManifest(path.join(pointed, 'manifest.json'), policyFingerprint);
+    if (pointedManifest) return pointed;
   }
   let entries = [];
   try { entries = fs.readdirSync(generations, { withFileTypes: true }); } catch { return null; }
   const candidates = entries.filter((entry) => entry.isDirectory() && entry.name.startsWith(`${projectHash}-`))
     .map((entry) => {
       const directory = path.join(generations, entry.name);
-      const manifest = validManifest(path.join(directory, 'manifest.json'));
+      const manifest = validManifest(path.join(directory, 'manifest.json'), policyFingerprint);
       return { directory, manifest, publishedAt: Number(manifest && manifest.publishedAt) || fs.statSync(directory).mtimeMs };
     })
-    .filter((entry) => entry.manifest && entry.manifest.policyFingerprint === policyFingerprint)
+    .filter((entry) => entry.manifest)
     .sort((a, b) => b.publishedAt - a.publishedAt || b.directory.localeCompare(a.directory));
   return candidates[0] ? candidates[0].directory : null;
 }
 
 function garbageCollect(generations, projectHash, active) {
-  const lock = path.join(generations, `.gc-${projectHash}.lock`);
+  const lock = path.join(generations, '.gc.lock');
+  try {
+    if (existsDirectory(lock) && Date.now() - fs.statSync(lock).mtimeMs >= STALE_GC_LOCK_MS) {
+      fs.rmSync(lock, { recursive: true, force: true });
+    }
+  } catch { }
   try { fs.mkdirSync(lock); } catch { return; }
   try {
     const now = Date.now();
-    const entries = fs.readdirSync(generations, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && entry.name.startsWith(`${projectHash}-`))
+    const directoryEntries = fs.readdirSync(generations, { withFileTypes: true });
+    for (const entry of directoryEntries) {
+      if (!entry.isDirectory() || !/^\.gc-.+\.lock$/.test(entry.name)) continue;
+      const legacyLock = path.join(generations, entry.name);
+      if (now - fs.statSync(legacyLock).mtimeMs >= STALE_GC_LOCK_MS) {
+        fs.rmSync(legacyLock, { recursive: true, force: true });
+      }
+    }
+    const stages = directoryEntries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith('.stage-'))
       .map((entry) => path.join(generations, entry.name))
-      .filter((entry) => validManifest(path.join(entry, 'manifest.json')))
       .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-    for (const entry of entries.slice(8)) {
-      if (entry === active || now - fs.statSync(entry).mtimeMs < 30 * 24 * 60 * 60 * 1000) continue;
-      fs.rmSync(entry, { recursive: true, force: true });
+    for (const [index, stage] of stages.entries()) {
+      if (index >= MAX_STAGE_DIRECTORIES || now - fs.statSync(stage).mtimeMs >= STALE_STAGE_MS) {
+        fs.rmSync(stage, { recursive: true, force: true });
+      }
+    }
+
+    const valid = [];
+    for (const entry of directoryEntries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      const directory = path.join(generations, entry.name);
+      const manifest = validManifest(path.join(directory, 'manifest.json'));
+      if (!manifest) {
+        if (entry.name.startsWith(`${projectHash}-`) && directory !== active) {
+          fs.rmSync(directory, { recursive: true, force: true });
+        }
+        continue;
+      }
+      valid.push({ directory, mtimeMs: fs.statSync(directory).mtimeMs });
+    }
+    valid.sort((a, b) => b.mtimeMs - a.mtimeMs || b.directory.localeCompare(a.directory));
+
+    const projectEntries = valid.filter((entry) => path.basename(entry.directory).startsWith(`${projectHash}-`));
+    const projectKeep = new Set([active]);
+    for (const entry of projectEntries) {
+      if (projectKeep.size >= MAX_GENERATIONS_PER_PROJECT) break;
+      projectKeep.add(entry.directory);
+    }
+    for (const entry of projectEntries) {
+      if (!projectKeep.has(entry.directory)) fs.rmSync(entry.directory, { recursive: true, force: true });
+    }
+
+    const remaining = valid.filter((entry) => existsDirectory(entry.directory));
+    const globalKeep = new Set([active]);
+    for (const entry of remaining) {
+      if (globalKeep.size >= MAX_TOTAL_GENERATIONS) break;
+      globalKeep.add(entry.directory);
+    }
+    for (const entry of remaining) {
+      if (!globalKeep.has(entry.directory)) fs.rmSync(entry.directory, { recursive: true, force: true });
+    }
+
+    for (const entry of fs.readdirSync(generations, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.startsWith('.latest-')) continue;
+      const pointerPath = path.join(generations, entry.name);
+      const pointer = readJson(pointerPath, null);
+      if (!pointer || typeof pointer.generation !== 'string'
+          || pointer.generation !== path.basename(pointer.generation)
+          || !validManifest(path.join(generations, pointer.generation, 'manifest.json'))) {
+        fs.rmSync(pointerPath, { force: true });
+      }
     }
   } catch { }
   finally { try { fs.rmdirSync(lock); } catch { } }
@@ -1040,16 +1130,17 @@ function syncOnce(projectDir) {
   })).digest('hex');
   const fingerprint = crypto.createHash('sha256').update(JSON.stringify({
     schema: BRIDGE_SCHEMA, format: BRIDGE_FORMAT, platform: process.platform,
-    signatures, dollarReferencesEnabled,
+    signatures, dollarReferencesEnabled, policyFingerprint,
   })).digest('hex').slice(0, 20);
   const projectHash = crypto.createHash('sha256').update(canonical(projectDir)).digest('hex').slice(0, 12);
   const generations = path.join(configDir, 'skill-bridge', 'generations');
   const generation = path.join(generations, `${projectHash}-${fingerprint}`);
   const manifestPath = path.join(generation, 'manifest.json');
-  let manifest = validManifest(manifestPath);
+  let manifest = validManifest(manifestPath, policyFingerprint);
   if (manifest) {
     rememberLatestGeneration(generations, projectHash, policyFingerprint, generation);
-    return generationResult(generation, manifest);
+    garbageCollect(generations, projectHash, generation);
+    return generationResult(generation, manifest, [], discovered.warnings);
   }
 
   fs.mkdirSync(generations, { recursive: true, mode: 0o700 });
@@ -1126,7 +1217,7 @@ function syncOnce(projectDir) {
     }
     try { fs.renameSync(stage, generation); }
     catch (error) {
-      const concurrent = validManifest(manifestPath);
+      const concurrent = validManifest(manifestPath, policyFingerprint);
       if (!concurrent) throw error;
       fs.rmSync(stage, { recursive: true, force: true });
       manifest = concurrent;
@@ -1134,11 +1225,12 @@ function syncOnce(projectDir) {
   } catch (error) {
     fs.rmSync(stage, { recursive: true, force: true });
     error.policyFingerprint = policyFingerprint;
+    error.discoveryWarnings = discovered.warnings;
     throw error;
   }
   rememberLatestGeneration(generations, projectHash, policyFingerprint, generation);
   garbageCollect(generations, projectHash, generation);
-  return generationResult(generation, manifest);
+  return generationResult(generation, manifest, [], discovered.warnings);
 }
 
 function sync(projectDir) {
@@ -1161,9 +1253,14 @@ function sync(projectDir) {
     ? latestGeneration(generations, projectHash, lastError.policyFingerprint)
     : null;
   if (fallback) {
-    const manifest = validManifest(path.join(fallback, 'manifest.json'));
+    const manifest = validManifest(path.join(fallback, 'manifest.json'), lastError.policyFingerprint);
     saveDigestCache();
-    return generationResult(fallback, manifest, [`Skill refresh failed; using the last known good snapshot: ${lastError.message}`]);
+    return generationResult(
+      fallback,
+      manifest,
+      [`Skill refresh failed; using the last known good snapshot: ${lastError.message}`],
+      lastError.discoveryWarnings || manifest.warnings || [],
+    );
   }
   throw lastError;
 }

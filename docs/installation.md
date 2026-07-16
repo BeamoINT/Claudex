@@ -40,9 +40,9 @@ irm https://claudex.work/install.ps1 | iex
 
 The website bootstrap verifies the latest stable GitHub release before running
 its native installer. For package-managed installation, see
-[package-managers.md](package-managers.md) for Homebrew, Scoop, and WinGet
-commands. Package installs configure themselves on first use and refresh the
-managed launcher after upgrades.
+[package-managers.md](package-managers.md) for Homebrew and Scoop commands and
+the current WinGet submission status. Package installs configure themselves on
+first use and refresh the managed launcher after upgrades.
 
 For the simplest verified source installation on macOS, Linux, or WSL:
 
@@ -86,13 +86,17 @@ From the extracted or cloned repository:
 bash ./install.sh --login
 ```
 
-`--login` opens Codex's official ChatGPT sign-in and requests file-backed
-credential storage. It is optional when `codex login status` already succeeds
-and the standard Codex `auth.json` exists.
+`--login` always opens Codex's official ChatGPT sign-in and requests file-backed
+credential storage, including when an existing session is valid and you want to
+switch accounts. Omit it to reuse a valid standard Codex `auth.json`; an
+interactive install still opens login automatically when authentication is
+missing.
 
 The installer:
 
-1. checks required commands and installs `jq`, Node.js, and npm when needed;
+1. checks required commands and installs `jq`, Node.js, and npm when needed,
+   falling back to a checksum-verified private Node.js 22 runtime when the
+   platform package manager is unavailable, unprivileged, or unsuccessful;
 2. installs Codex CLI from OpenAI's official npm package and Claude Code from Anthropic's installer when missing;
 3. updates Claude Code on a best-effort basis;
 4. downloads the pinned CLIProxyAPI archive and verifies its SHA-256 digest;
@@ -101,6 +105,11 @@ The installer:
 7. installs `claudex` into `~/.local/bin`;
 8. opens the official Codex browser login when needed in an interactive terminal;
 9. synchronizes the Codex login and runs `claudex --doctor`.
+
+Transient Claude Code and compatibility-service downloads use bounded retries
+and timeouts. Reinstalls keep a private rollback generation until every managed
+file, environment value, authentication step, and health check succeeds; a
+later failure restores the complete prior managed installation.
 
 If `~/.local/bin` is not on `PATH`, add it to the shell profile:
 

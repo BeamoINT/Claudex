@@ -7,8 +7,8 @@ and maintainers.
 
 - [Installation](installation.md) — prerequisites, platform-specific setup,
   updates, and moving between machines.
-- [Package managers](package-managers.md) — Homebrew, Scoop, and WinGet
-  distribution channels.
+- [Package managers](package-managers.md) — Homebrew and Scoop distribution,
+  plus the current WinGet submission status.
 - [Command reference](usage.md) — launch modes, authentication, usage limits,
   Claude Code passthrough, and examples.
 - [Configuration](configuration.md) — supported environment variables,

@@ -1,9 +1,10 @@
 # Package-manager installation
 
 Claudex is currently distributed through the BeamoINT Homebrew tap and Scoop
-bucket. Its WinGet community submission is pending Microsoft review. The
+bucket. It is not currently available from WinGet: the initial community
+submission has not passed validation or been merged. The
 checksum-verified source installer remains available on every supported
-platform; Claudex is not currently published as an npm CLI package.
+platform; npm distribution is deliberately disabled.
 
 Package-manager installs expose the same `claudex` command as the source
 installer. On first launch, a small cross-platform bootstrap installs the
@@ -41,8 +42,9 @@ with `scoop update claudex`.
 ## WinGet
 
 The Windows Package Manager community repository requires external validation
-and review for every new listing. Once the `BeamoINT.Claudex` submission is
-accepted, install it with:
+and review for every new listing. The current portable-package submission is
+not installable because it has not passed that validation. Once a corrected
+`BeamoINT.Claudex` submission is accepted, install it with:
 
 ```powershell
 winget install --id BeamoINT.Claudex --exact
@@ -65,7 +67,8 @@ Package metadata contains no credentials or generated user state. The setup
 command creates those files locally with the same restrictive permissions as
 the source installer.
 
-The public `claudex` command remains owned by the package manager. Claudex keeps
+The public `claudex` command remains owned by Homebrew or Scoop, and will remain
+owned by WinGet if that channel is accepted. Claudex keeps
 its internal managed launcher under `~/.config/claudex/package-bin`, preventing
 it from shadowing npm, Homebrew, Scoop, or WinGet after a later upgrade. The
 installer records the manager in a private install receipt, and

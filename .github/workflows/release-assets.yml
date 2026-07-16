@@ -1,34 +1,138 @@
 name: Release assets
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated stable tag to publish or resume
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-assets-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
+  test:
+    name: Full cross-platform release gate
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
   package:
+    name: Publish verified release
+    needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.release.tag_name }}
-      - name: Build distribution archives
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Validate stable annotated tag
         run: |
-          test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
-          npm test
-          ./scripts/build-release.sh "${RELEASE_TAG#v}"
-          tar -tzf "dist/claudex-${RELEASE_TAG#v}.tar.gz" | grep -Fx "claudex-${RELEASE_TAG#v}/install.sh"
-          tar -tzf "dist/claudex-${RELEASE_TAG#v}.tar.gz" | grep -Fx "claudex-${RELEASE_TAG#v}/skill-bridge.cjs"
-          tar -tzf "dist/claudex-${RELEASE_TAG#v}.tar.gz" | grep -Fx "claudex-${RELEASE_TAG#v}/skills/usage-limit/SKILL.md"
-          unzip -Z1 "dist/claudex-${RELEASE_TAG#v}-windows.zip" | grep -Fx "claudex-${RELEASE_TAG#v}/install.ps1"
-          unzip -Z1 "dist/claudex-${RELEASE_TAG#v}-windows.zip" | grep -Fx "claudex-${RELEASE_TAG#v}/skill-bridge.cjs"
-          unzip -Z1 "dist/claudex-${RELEASE_TAG#v}-windows.zip" | grep -Fx "claudex-${RELEASE_TAG#v}/skills/usage-limit/SKILL.windows.md"
-      - name: Upload release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" dist/*.zip dist/*.tar.gz dist/SHA256SUMS --clobber
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          version=${RELEASE_TAG#v}
+          test "$version" = "$(node -p "require('./package.json').version")"
+          test "$(git cat-file -t "$RELEASE_TAG")" = tag
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+
+      - name: Build reproducible type-safe assets
+        run: ./scripts/check-release-artifacts.sh
+
+      - name: Create or resume private draft
+        run: |
+          existing=$(gh release view "$RELEASE_TAG" --json isDraft 2>/dev/null || true)
+          if [[ -n "$existing" ]]; then
+            test "$(jq -r '.isDraft' <<<"$existing")" = true || {
+              printf 'refusing to mutate existing public release %s\n' "$RELEASE_TAG" >&2
+              exit 1
+            }
+            printf 'Resuming existing draft release %s\n' "$RELEASE_TAG"
+            exit 0
+          fi
+
+          version=${RELEASE_TAG#v}
+          notes="$RUNNER_TEMP/release-notes.md"
+          awk -v version="$version" '
+            index($0, "## [" version "] - ") == 1 { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > "$notes"
+          test -s "$notes"
+          gh release create "$RELEASE_TAG" --verify-tag --draft --latest=false \
+            --title "Claudex $RELEASE_TAG" --notes-file "$notes"
+
+      - name: Attach immutable asset set
+        run: |
+          version=${RELEASE_TAG#v}
+          assets=(
+            "claudex-$version.tar.gz"
+            "claudex-$version-windows.zip"
+            SHA256SUMS
+          )
+          release=$(gh release view "$RELEASE_TAG" --json isDraft,assets)
+          test "$(jq -r '.isDraft' <<<"$release")" = true
+          unexpected=$(jq -r --arg a "${assets[0]}" --arg b "${assets[1]}" --arg c "${assets[2]}" \
+            '.assets[] | select(.name != $a and .name != $b and .name != $c) | .name' <<<"$release")
+          test -z "$unexpected" || {
+            printf 'draft contains unexpected assets:\n%s\n' "$unexpected" >&2
+            exit 1
+          }
+
+          for asset in "${assets[@]}"; do
+            path="dist/$asset"
+            local_digest="sha256:$(sha256sum "$path" | awk '{print $1}')"
+            remote_digest=$(jq -r --arg name "$asset" \
+              '[.assets[] | select(.name == $name)] | if length == 0 then "" elif length == 1 then (.[0].digest // "missing") else "duplicate" end' \
+              <<<"$release")
+            case "$remote_digest" in
+              '') gh release upload "$RELEASE_TAG" "$path" ;;
+              "$local_digest") printf 'Verified existing draft asset %s\n' "$asset" ;;
+              *)
+                printf 'draft asset %s differs from the verified local build (%s != %s)\n' \
+                  "$asset" "$remote_digest" "$local_digest" >&2
+                exit 1
+                ;;
+            esac
+            release=$(gh release view "$RELEASE_TAG" --json isDraft,assets)
+            test "$(jq -r '.isDraft' <<<"$release")" = true
+          done
+
+      - name: Verify attached bytes before publication
+        run: |
+          version=${RELEASE_TAG#v}
+          release=$(gh release view "$RELEASE_TAG" --json isDraft,assets)
+          test "$(jq -r '.isDraft' <<<"$release")" = true
+          test "$(jq '.assets | length' <<<"$release")" -eq 3
+          for asset in "claudex-$version.tar.gz" "claudex-$version-windows.zip" SHA256SUMS; do
+            local_digest="sha256:$(sha256sum "dist/$asset" | awk '{print $1}')"
+            test "$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .digest' <<<"$release")" = "$local_digest"
+          done
+
+          downloaded="$RUNNER_TEMP/release-download"
+          mkdir -p "$downloaded"
+          gh release download "$RELEASE_TAG" --dir "$downloaded"
+          cmp "dist/claudex-$version.tar.gz" "$downloaded/claudex-$version.tar.gz"
+          cmp "dist/claudex-$version-windows.zip" "$downloaded/claudex-$version-windows.zip"
+          cmp dist/SHA256SUMS "$downloaded/SHA256SUMS"
+          (cd "$downloaded" && sha256sum -c SHA256SUMS)
+
+      - name: Publish complete release atomically
+        run: |
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+          release=$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,assets)
+          test "$(jq -r '.isDraft' <<<"$release")" = false
+          test "$(jq -r '.isPrerelease' <<<"$release")" = false
+          test "$(jq '.assets | length' <<<"$release")" -eq 3

@@ -4,6 +4,7 @@ param(
     [switch] $Statusline,
     [switch] $RefreshCache,
     [switch] $LockHeld,
+    [string] $LockToken,
     [switch] $NoColor,
     [switch] $Accounts,
     [string] $Account
@@ -42,6 +43,34 @@ $alertPercent = Get-IntegerSetting 'CLAUDEX_USAGE_ALERT_PERCENT' 20 0 100
 $usageSource = if ($env:CLAUDEX_USAGE_SOURCE) { $env:CLAUDEX_USAGE_SOURCE } else { 'auto' }
 if ($usageSource -notin @('auto', 'web', 'app-server')) { throw 'CLAUDEX_USAGE_SOURCE must be auto, web, or app-server.' }
 $ownsRefreshLock = $false
+$ownedRefreshToken = ''
+$isWindowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+if ($LockHeld -and ($LockToken -notmatch '^[A-Za-z0-9._-]{8,128}$')) {
+    throw '-LockHeld requires a valid -LockToken generation.'
+}
+
+function Protect-PrivatePath([string] $Path, [bool] $Directory) {
+    if (-not $isWindowsPlatform) { return }
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $security = if ($Directory) { New-Object Security.AccessControl.DirectorySecurity } else { New-Object Security.AccessControl.FileSecurity }
+    $security.SetOwner($currentSid)
+    $security.SetAccessRuleProtection($true, $false)
+    $inheritance = if ($Directory) {
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else { [Security.AccessControl.InheritanceFlags]::None }
+    foreach ($sidValue in @($currentSid.Value, 'S-1-5-18', 'S-1-5-32-544')) {
+        $sid = New-Object Security.Principal.SecurityIdentifier($sidValue)
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void] $security.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $security
+}
 
 function Get-Property($Object, [string] $Name, $Default = $null) {
     if ($Object -is [Collections.IDictionary]) {
@@ -59,9 +88,16 @@ function Clear-UsageCache {
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     }
     [IO.Directory]::CreateDirectory($configDir) | Out-Null
+    Protect-PrivatePath $configDir $true
     $temporary = Join-Path $configDir ('.usage-generation-' + [guid]::NewGuid().ToString('N') + '.tmp')
-    [IO.File]::WriteAllText($temporary, ([guid]::NewGuid().ToString('N') + "`n"), $utf8)
-    Move-Item -LiteralPath $temporary -Destination $usageGenerationFile -Force
+    try {
+        [IO.File]::WriteAllText($temporary, ([guid]::NewGuid().ToString('N') + "`n"), $utf8)
+        Protect-PrivatePath $temporary $false
+        Move-Item -LiteralPath $temporary -Destination $usageGenerationFile -Force
+        Protect-PrivatePath $usageGenerationFile $false
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-UsageGeneration {
@@ -69,21 +105,42 @@ function Get-UsageGeneration {
     try { return [IO.File]::ReadAllText($usageGenerationFile).Trim() } catch { return 'missing' }
 }
 
+function Read-RefreshOwnerRecord([string] $OwnerDirectory = $refreshLock) {
+    $ownerPath = Join-Path $OwnerDirectory 'owner-pid'
+    if (-not (Test-Path -LiteralPath $ownerPath -PathType Leaf)) { return '' }
+    try { return [IO.File]::ReadAllText($ownerPath).Trim() } catch { return '' }
+}
+
+function Move-RefreshLockToQuarantine([string] $ExpectedRecord) {
+    $quarantine = Join-Path $cacheDir ('.refresh.lock.quarantine.' + $PID + '.' + [guid]::NewGuid().ToString('N'))
+    try { Move-Item -LiteralPath $refreshLock -Destination $quarantine -ErrorAction Stop } catch { return $false }
+    $movedRecord = Read-RefreshOwnerRecord $quarantine
+    if ($movedRecord -eq $ExpectedRecord) {
+        Remove-Item -LiteralPath (Join-Path $quarantine 'owner-pid') -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $quarantine -Force -ErrorAction SilentlyContinue
+        return $true
+    }
+    if (-not (Test-Path -LiteralPath $refreshLock)) {
+        try { Move-Item -LiteralPath $quarantine -Destination $refreshLock -ErrorAction Stop } catch { }
+    }
+    return $false
+}
+
 function Acquire-RefreshLock {
     if ($LockHeld) {
-        # The status line created this lock specifically for this child. The
-        # owner file is written immediately after Start-Process returns and is
-        # rechecked before cleanup so a transferred/replaced lock is preserved.
         $script:ownsRefreshLock = $true
+        $script:ownedRefreshToken = $LockToken
         return
     }
     [IO.Directory]::CreateDirectory($cacheDir) | Out-Null
+    Protect-PrivatePath $cacheDir $true
     $created = $false
     if (Test-Path -LiteralPath $refreshLock -PathType Container) {
+        $observedRecord = Read-RefreshOwnerRecord
+        $ownerParts = @($observedRecord -split ' ', 2)
         $owner = 0
-        if (Test-Path -LiteralPath $refreshOwnerFile -PathType Leaf) {
-            [int]::TryParse(([IO.File]::ReadAllText($refreshOwnerFile).Trim()), [ref] $owner) | Out-Null
-        }
+        if ($ownerParts.Count -gt 0) { [int]::TryParse($ownerParts[0], [ref] $owner) | Out-Null }
+        $ownerToken = if ($ownerParts.Count -eq 2) { $ownerParts[1] } else { $ownerParts[0] }
         $ownerIsDead = $owner -gt 0 -and -not (Get-Process -Id $owner -ErrorAction SilentlyContinue)
         $ownerlessIsStale = $false
         if ($owner -le 0) {
@@ -93,14 +150,17 @@ function Acquire-RefreshLock {
             } catch { $ownerlessIsStale = $false }
         }
         if ($ownerIsDead -or $ownerlessIsStale) {
-            Remove-Item -LiteralPath $refreshOwnerFile -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
+            if ((Read-RefreshOwnerRecord) -eq $observedRecord) {
+                [void] (Move-RefreshLockToQuarantine $observedRecord)
+            }
         }
     }
     try {
         New-Item -Path $refreshLock -ItemType Directory -ErrorAction Stop | Out-Null
         $created = $true
-        [IO.File]::WriteAllText($refreshOwnerFile, "$PID`n", $utf8)
+        $script:ownedRefreshToken = [guid]::NewGuid().ToString('N')
+        [IO.File]::WriteAllText($refreshOwnerFile, "$PID $ownedRefreshToken`n", $utf8)
+        Protect-PrivatePath $refreshOwnerFile $false
         $script:ownsRefreshLock = $true
     } catch {
         if ($created) {
@@ -331,11 +391,15 @@ function Get-CompactSummary($Snapshot) {
 }
 
 function Write-AtomicText([string] $Path, [string] $Content) {
-    [IO.Directory]::CreateDirectory((Split-Path $Path -Parent)) | Out-Null
-    $temporary = Join-Path (Split-Path $Path -Parent) ('.tmp.' + [guid]::NewGuid().ToString('N'))
+    $parent = Split-Path $Path -Parent
+    [IO.Directory]::CreateDirectory($parent) | Out-Null
+    Protect-PrivatePath $parent $true
+    $temporary = Join-Path $parent ('.tmp.' + [guid]::NewGuid().ToString('N'))
     try {
         [IO.File]::WriteAllText($temporary, $Content, $utf8)
+        Protect-PrivatePath $temporary $false
         Move-Item -LiteralPath $temporary -Destination $Path -Force
+        Protect-PrivatePath $Path $false
     } finally {
         if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
     }
@@ -358,6 +422,7 @@ function Get-WebUsageResponse {
         if ($account) { $configLines += "header = `"ChatGPT-Account-Id: $account`"" }
         $configLines += 'header = "Accept: application/json"'
         [IO.File]::WriteAllLines($curlConfig, $configLines, $utf8)
+        Protect-PrivatePath $curlConfig $false
         $output = @(& $curlCommand --silent --show-error --fail --connect-timeout 3 --max-time $timeoutSeconds --config $curlConfig $usageUrl 2>$null)
         if ($LASTEXITCODE -ne 0) { throw 'OpenAI usage refresh failed.' }
         $raw = $output -join "`n"
@@ -368,24 +433,63 @@ function Get-WebUsageResponse {
     try { return ($raw | ConvertFrom-Json) } catch { throw 'OpenAI returned an unrecognized usage response.' }
 }
 
-function Read-AppServerResponse($Process, [int] $Id) {
-    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
-    while ([DateTime]::UtcNow -lt $deadline) {
-        $remaining = [math]::Max(1, [int] ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
-        $readTask = $Process.StandardOutput.ReadLineAsync()
-        $delayTask = [Threading.Tasks.Task]::Delay($remaining)
-        $completed = [Threading.Tasks.Task]::WhenAny($readTask, $delayTask).GetAwaiter().GetResult()
-        if (-not [object]::ReferenceEquals($completed, $readTask)) { throw 'Codex app-server response timed out.' }
-        $line = $readTask.GetAwaiter().GetResult()
-        if ($null -eq $line) { throw 'Codex app-server closed before returning rate limits.' }
-        try { $message = $line | ConvertFrom-Json } catch { continue }
-        if ([int] (Get-Property $message 'id' -1) -eq $Id) {
-            $result = Get-Property $message 'result' $null
-            if ($null -eq $result) { throw "Codex app-server request $Id failed." }
-            return $result
+function Initialize-CappedStreamReader {
+    if ('Claudex.CappedTextReader' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+namespace Claudex {
+    public sealed class CappedLine {
+        public string Text { get; set; }
+        public bool Truncated { get; set; }
+        public bool EndOfStream { get; set; }
+    }
+    public static class CappedTextReader {
+        public static async Task<CappedLine> ReadLineAsync(TextReader reader, int maximum) {
+            var text = new StringBuilder(Math.Min(maximum, 4096));
+            var one = new char[1];
+            var truncated = false;
+            while (true) {
+                var read = await reader.ReadAsync(one, 0, 1).ConfigureAwait(false);
+                if (read == 0) return new CappedLine { Text = text.ToString(), Truncated = truncated, EndOfStream = true };
+                if (one[0] == '\n') return new CappedLine { Text = text.ToString(), Truncated = truncated, EndOfStream = false };
+                if (one[0] == '\r') continue;
+                if (text.Length < maximum) text.Append(one[0]); else truncated = true;
+            }
+        }
+        public static async Task<string> DrainAsync(TextReader reader, int maximum) {
+            var text = new StringBuilder(Math.Min(maximum, 4096));
+            var buffer = new char[4096];
+            int read;
+            while ((read = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false)) > 0) {
+                var remaining = maximum - text.Length;
+                if (remaining > 0) text.Append(buffer, 0, Math.Min(remaining, read));
+            }
+            return text.ToString();
         }
     }
-    throw 'Codex app-server response timed out.'
+}
+'@
+}
+
+function Stop-AppServerTree($Process) {
+    try { $Process.StandardInput.Close() } catch { }
+    if ($Process.HasExited) { try { $Process.WaitForExit() } catch { }; return }
+    if ($isWindowsPlatform) {
+        try { & taskkill.exe /PID ([string] $Process.Id) /T *> $null } catch { }
+    } else {
+        try { $Process.Kill() } catch { }
+    }
+    if (-not $Process.WaitForExit(500)) {
+        if ($isWindowsPlatform) {
+            try { & taskkill.exe /PID ([string] $Process.Id) /T /F *> $null } catch { }
+        } else {
+            try { $Process.Kill() } catch { }
+        }
+        [void] $Process.WaitForExit(1000)
+    }
 }
 
 function Get-AppServerUsageResponse {
@@ -415,18 +519,46 @@ function Get-AppServerUsageResponse {
     $startInfo.RedirectStandardError = $true
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $startInfo
+    $stderrTask = $null
+    $processStarted = $false
     try {
         if (-not $process.Start()) { throw 'could not start Codex app-server.' }
+        $processStarted = $true
+        Initialize-CappedStreamReader
+        # Drain stderr independently and retain at most 64 KiB. The drain keeps
+        # running after the cap so a noisy child cannot fill the OS pipe.
+        $stderrTask = [Claudex.CappedTextReader]::DrainAsync($process.StandardError, 65536)
+        $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+        $phase = 1
+        $lineTask = [Claudex.CappedTextReader]::ReadLineAsync($process.StandardOutput, 1048576)
         $process.StandardInput.WriteLine('{"id":1,"method":"initialize","params":{"clientInfo":{"name":"Claudex","title":"Claudex usage fallback","version":"1.0.0"}}}')
         $process.StandardInput.Flush()
-        Read-AppServerResponse $process 1 | Out-Null
-        $process.StandardInput.WriteLine('{"method":"initialized"}')
-        $process.StandardInput.WriteLine('{"id":2,"method":"account/rateLimits/read","params":null}')
-        $process.StandardInput.Flush()
-        return (Read-AppServerResponse $process 2)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            $remaining = [math]::Max(1, [int] ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+            $delayTask = [Threading.Tasks.Task]::Delay($remaining)
+            $completed = [Threading.Tasks.Task]::WhenAny($lineTask, $delayTask).GetAwaiter().GetResult()
+            if (-not [object]::ReferenceEquals($completed, $lineTask)) { throw 'Codex app-server response timed out.' }
+            $lineResult = $lineTask.GetAwaiter().GetResult()
+            if ($lineResult.Truncated) { throw 'Codex app-server returned an oversized response line.' }
+            if ($lineResult.EndOfStream -and -not $lineResult.Text) { throw 'Codex app-server closed before returning rate limits.' }
+            $lineTask = [Claudex.CappedTextReader]::ReadLineAsync($process.StandardOutput, 1048576)
+            try { $message = $lineResult.Text | ConvertFrom-Json } catch { continue }
+            if ([int] (Get-Property $message 'id' -1) -ne $phase) { continue }
+            $result = Get-Property $message 'result' $null
+            if ($null -eq $result) { throw "Codex app-server request $phase failed." }
+            if ($phase -eq 1) {
+                $phase = 2
+                $process.StandardInput.WriteLine('{"method":"initialized"}')
+                $process.StandardInput.WriteLine('{"id":2,"method":"account/rateLimits/read","params":null}')
+                $process.StandardInput.Flush()
+            } else {
+                return $result
+            }
+        }
+        throw 'Codex app-server response timed out.'
     } finally {
-        try { $process.StandardInput.Close() } catch { }
-        if (-not $process.HasExited) { try { $process.Kill() } catch { } }
+        if ($processStarted) { Stop-AppServerTree $process }
+        if ($stderrTask) { try { [void] $stderrTask.Wait(1000) } catch { } }
         $process.Dispose()
     }
 }
@@ -613,13 +745,11 @@ try {
     if ($RefreshCache) { [Console]::Error.WriteLine("usage-limit: $($_.Exception.Message)") }
 } finally {
     if ($ownsRefreshLock -and (Test-Path -LiteralPath $refreshLock -PathType Container)) {
-        $currentOwner = 0
-        if (Test-Path -LiteralPath $refreshOwnerFile -PathType Leaf) {
-            [int]::TryParse(([IO.File]::ReadAllText($refreshOwnerFile).Trim()), [ref] $currentOwner) | Out-Null
-        }
-        if ($currentOwner -le 0 -or $currentOwner -eq $PID) {
-            Remove-Item -LiteralPath $refreshOwnerFile -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
+        $currentRecord = Read-RefreshOwnerRecord
+        $currentParts = @($currentRecord -split ' ', 2)
+        $currentToken = if ($currentParts.Count -eq 2) { $currentParts[1] } else { '' }
+        if ($ownedRefreshToken -and $currentToken -eq $ownedRefreshToken) {
+            [void] (Move-RefreshLockToQuarantine $currentRecord)
         }
     }
 }

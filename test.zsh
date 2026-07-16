@@ -140,6 +140,8 @@ printf '%s\n' "ACCESSIBILITY=${CLAUDE_CODE_ACCESSIBILITY}"
 printf '%s\n' "DISABLE_1M=${CLAUDE_CODE_DISABLE_1M_CONTEXT:-}"
 printf '%s\n' "OPUS=${ANTHROPIC_DEFAULT_OPUS_MODEL}"
 printf '%s\n' "OPUS_NAME=${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME}"
+printf '%s\n' "FABLE=${ANTHROPIC_DEFAULT_FABLE_MODEL}"
+printf '%s\n' "FABLE_NAME=${ANTHROPIC_DEFAULT_FABLE_MODEL_NAME}"
 printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
 printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
@@ -153,7 +155,10 @@ cat > "$tmp/bin/codex" <<'EOF'
 if [[ "${FAKE_CODEX_LOGGED_OUT:-0}" == 1 ]]; then exit 1; fi
 if [[ "${1:-}" == login && "${2:-}" == status ]]; then exit 0; fi
 if [[ "${1:-}" == logout ]]; then exit "${FAKE_CODEX_LOGOUT_EXIT:-0}"; fi
-if [[ "${1:-}" == -c && "${3:-}" == login ]]; then exit 0; fi
+if [[ "${1:-}" == -c && "${3:-}" == login ]]; then
+  [[ -z "${FAKE_CODEX_LOGIN_LOG:-}" ]] || printf '%s\n' login >> "$FAKE_CODEX_LOGIN_LOG"
+  exit 0
+fi
 [[ "${1:-}" == app-server ]] || exit 2
 while IFS= read -r line; do
   case "$line" in
@@ -172,7 +177,8 @@ fi
 if [[ -n "${FAKE_PROXY_READY_FILE:-}" ]]; then
   : > "$FAKE_PROXY_READY_FILE"
   [[ -z "${FAKE_PROXY_START_LOG:-}" ]] || printf '%s\n' "$$" >> "$FAKE_PROXY_START_LOG"
-  exit 0
+  trap 'exit 0' TERM INT
+  while :; do sleep 1; done
 fi
 printf '%s\n' 'CLIProxyAPI test'
 printf '%s\n' 'extra version detail'
@@ -185,6 +191,13 @@ cat > "$tmp/bin/brew" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == --prefix ]]; then printf '%s\n' '/nonexistent/homebrew'; exit 0; fi
 exit 1
+EOF
+# The sandbox used by this regression suite can deny the real ps command.
+# Keep the process-identity fixture isolated to the test PATH so production
+# launchers always derive identity from the operating system.
+cat > "$tmp/bin/ps" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${CLAUDEX_TEST_PROCESS_IDENTITY:-test-process-identity}"
 EOF
 chmod +x "$tmp/bin/"*
 
@@ -240,6 +253,28 @@ if PATH="$old_node_bin:$PATH" run_wrapper skills >"$tmp/old-node.stdout" 2>"$tmp
   exit 1
 fi
 grep -F 'Node.js 18 or newer is required for skill compatibility' "$tmp/old-node.stderr" >/dev/null
+
+configured_node_bin="$tmp/configured-node-bin"
+mkdir -p "$configured_node_bin"
+ln -s "$(command -v node)" "$configured_node_bin/node"
+CLAUDEX_NODE_BIN="$configured_node_bin" PATH="$old_node_bin:$PATH" run_wrapper skills \
+  >"$tmp/configured-node.stdout" 2>"$tmp/configured-node.stderr"
+[[ "$(<"$tmp/configured-node.stderr")" == *'claudex skills:'* || ! -s "$tmp/configured-node.stderr" ]]
+if CLAUDEX_NODE_BIN=relative/node run_wrapper skills >"$tmp/relative-node.stdout" 2>"$tmp/relative-node.stderr"; then
+  printf '%s\n' 'expected a relative CLAUDEX_NODE_BIN to be rejected' >&2
+  exit 1
+fi
+grep -F 'CLAUDEX_NODE_BIN must be an absolute directory' "$tmp/relative-node.stderr" >/dev/null
+
+deleted_cwd=$(mktemp -d "$tmp/deleted-cwd.XXXXXX")
+deleted_cwd_output=$(
+  cd "$deleted_cwd"
+  rmdir "$deleted_cwd"
+  HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
+    "$root/claudex" --version 2>&1
+)
+[[ "$deleted_cwd_output" == *'the previous working directory no longer exists'* ]]
+[[ "$deleted_cwd_output" == *'2.1.210 (test)'* ]]
 
 auth_recovery_log="$tmp/auth-recovery.log"
 auth_recovery_marker="$tmp/auth-recovery.marker"
@@ -375,6 +410,8 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" == *'DISABLE_1M=1'* ]]
 [[ "$default_output" == *'OPUS=gpt-5.6-sol'* ]]
 [[ "$default_output" == *'OPUS_NAME=GPT-5.6 Sol'* ]]
+[[ "$default_output" == *'FABLE=gpt-5.6-sol'* ]]
+[[ "$default_output" == *'FABLE_NAME=GPT-5.6 Sol'* ]]
 [[ "$default_output" == *'BASE=http://127.0.0.1:8318'* ]]
 [[ "$default_output" == *"BUN=--preload $tmp/home/.config/claudex/preload.cjs"* ]]
 [[ "$default_output" == *$'INTERACTIVE=\n'* ]]
@@ -399,6 +436,22 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" != *'"claudex-fast"'* ]]
 [[ "$default_output" == *'Sol capacity is reserved for the leader'* ]]
 [[ "$default_output" != *'"model":"gpt-5.6-sol"'* ]]
+
+if CLAUDEX_PROXY_URL=https://proxy.example.test run_wrapper remote-proxy-test \
+    >"$tmp/remote-without-optin.stdout" 2>"$tmp/remote-without-optin.stderr"; then
+  printf '%s\n' 'expected a non-loopback proxy to require explicit opt-in' >&2
+  exit 1
+fi
+grep -F 'refusing to send the proxy credential to a non-loopback URL' "$tmp/remote-without-optin.stderr" >/dev/null
+remote_proxy_output=$(CLAUDEX_PROXY_URL=https://proxy.example.test CLAUDEX_ALLOW_REMOTE_PROXY=1 \
+  run_wrapper remote-proxy-test)
+[[ "$remote_proxy_output" == *'BASE=https://proxy.example.test'* ]]
+if CLAUDEX_PROXY_URL=http://proxy.example.test CLAUDEX_ALLOW_REMOTE_PROXY=1 run_wrapper remote-proxy-test \
+    >"$tmp/insecure-remote.stdout" 2>"$tmp/insecure-remote.stderr"; then
+  printf '%s\n' 'expected an opted-in remote proxy to require HTTPS' >&2
+  exit 1
+fi
+
 interactive_wrapper_output=$(CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper --terra interactive-render-test)
 [[ "$interactive_wrapper_output" == *'INTERACTIVE=1'* ]]
 [[ "$interactive_wrapper_output" == *'CHATGPT_PLAN=ChatGPT Pro'* ]]
@@ -406,6 +459,23 @@ printf '%s\n' '{malformed' > "$tmp/home/.config/claudex/usage-cache/limits.json"
 repaired_plan_output=$(CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper --terra repaired-plan-cache-test)
 [[ "$repaired_plan_output" == *'CHATGPT_PLAN=ChatGPT Pro'* ]]
 jq -e '.plan_type == "pro"' "$tmp/home/.config/claudex/usage-cache/limits.json" >/dev/null
+
+warning_bridge="$tmp/warning-skill-bridge.cjs"
+cat > "$warning_bridge" <<'EOF'
+#!/usr/bin/env node
+process.stdout.write(JSON.stringify({
+  addDirs: [], pluginDirs: [],
+  warnings: ['Unsafe skill ignored', 'Unsafe skill ignored', 'Plugin fallback\nusing last known good snapshot'],
+}));
+EOF
+rm -f "$tmp/home/.config/claudex/run/skill-warning-state"
+CLAUDEX_SKILL_BRIDGE_HELPER="$warning_bridge" run_wrapper warning-test \
+  >"$tmp/warning-first.stdout" 2>"$tmp/warning-first.stderr"
+[[ "$(grep -c 'Unsafe skill ignored' "$tmp/warning-first.stderr")" == 1 ]]
+grep -F 'Plugin fallback using last known good snapshot' "$tmp/warning-first.stderr" >/dev/null
+CLAUDEX_SKILL_BRIDGE_HELPER="$warning_bridge" run_wrapper warning-test \
+  >"$tmp/warning-second.stdout" 2>"$tmp/warning-second.stderr"
+[[ ! -s "$tmp/warning-second.stderr" ]]
 jq -e '
   (.autoMode.allow | index("Default allow rule") != null)
   and ([.autoMode.allow[] | select(. == "User custom allow rule")] | length == 1)
@@ -442,6 +512,7 @@ proxy_start_log="$tmp/proxy-start.log"
 : > "$proxy_ready_file"
 proxy_recovery_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
   CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=0 \
+  CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity \
   CLAUDEX_TEST_PROXY_REACHABLE_FILE="$proxy_ready_file" \
   FAKE_PROXY_READY_FILE="$proxy_ready_file" FAKE_PROXY_START_LOG="$proxy_start_log" \
   FAKE_PROXY_RECOVERY=1 "$root/claudex" recovery-test)
@@ -453,10 +524,116 @@ transient_proxy_start_log="$tmp/transient-proxy-start.log"
 : > "$proxy_ready_file"
 HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
   CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=0 \
+  CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity \
   CLAUDEX_TEST_PROXY_REACHABLE_FILE="$proxy_ready_file" \
   FAKE_PROXY_READY_FILE="$proxy_ready_file" FAKE_PROXY_START_LOG="$transient_proxy_start_log" \
   FAKE_PROXY_TRANSIENT_ONCE=1 "$root/claudex" transient-health-test >/dev/null
 [[ ! -s "$transient_proxy_start_log" ]]
+existing_managed_proxy_file="$tmp/home/.config/claudex/run/managed-proxy"
+if [[ -r "$existing_managed_proxy_file" ]]; then
+  existing_managed_proxy_pid=$(awk -F= '$1 == "pid" { print $2; exit }' "$existing_managed_proxy_file")
+  [[ -z "$existing_managed_proxy_pid" ]] || kill -TERM "$existing_managed_proxy_pid" 2>/dev/null || true
+  rm -f "$existing_managed_proxy_file"
+fi
+
+proxy_auth_curl="$tmp/bin/curl-proxy-auth"
+cat > "$proxy_auth_curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while (( $# > 0 )); do
+  case "$1" in --output) output="$2"; shift ;; esac
+  shift
+done
+[[ -n "$output" ]]
+state=$(<"$FAKE_PROXY_HEALTH_STATE")
+case "$state" in
+  healthy)
+    printf '%s\n' '{"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}' > "$output"
+    printf '%s' 200
+    ;;
+  unauthorized) printf '%s\n' '{}' > "$output"; printf '%s' 401 ;;
+  *) printf '%s\n' '{}' > "$output"; printf '%s' 503 ;;
+esac
+EOF
+auth_proxy_bin="$tmp/bin/cliproxyapi-auth-test"
+cat > "$auth_proxy_bin" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${FAKE_PROXY_START_STATE:-healthy}" > "$FAKE_PROXY_HEALTH_STATE"
+printf '%s\n' "$$" >> "$FAKE_PROXY_AUTH_START_LOG"
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+EOF
+chmod +x "$proxy_auth_curl" "$auth_proxy_bin"
+proxy_auth_state="$tmp/proxy-auth-state"
+proxy_auth_log="$tmp/proxy-auth-start.log"
+managed_proxy_file="$tmp/home/.config/claudex/run/managed-proxy"
+mkdir -p "$(dirname "$managed_proxy_file")"
+
+# A 401/403 is recoverable only when mode-restricted PID metadata proves that
+# Claudex owns the tracked process. The old process must be replaced exactly
+# once and the new managed process remains healthy for the session.
+printf '%s\n' unauthorized > "$proxy_auth_state"
+sleep 60 & tracked_proxy_pid=$!
+tracked_proxy_identity=test-process-identity
+printf 'pid=%s\nidentity=%s\n' "$tracked_proxy_pid" "$tracked_proxy_identity" > "$managed_proxy_file"
+if ! managed_401_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$proxy_auth_curl" \
+  CLAUDEX_PROXY_BIN="$auth_proxy_bin" CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 \
+  CLAUDEX_SKIP_PROXY_WATCHER=1 FAKE_PROXY_HEALTH_STATE="$proxy_auth_state" \
+  FAKE_PROXY_AUTH_START_LOG="$proxy_auth_log" FAKE_PROXY_START_STATE=healthy \
+  CLAUDEX_TEST_PROCESS_IDENTITY="$tracked_proxy_identity" \
+  "$root/claudex" managed-401-test 2>"$tmp/managed-401.stderr"); then
+  cat "$tmp/managed-401.stderr" >&2
+  exit 1
+fi
+[[ "$managed_401_output" == *'ARGS='*'managed-401-test'* ]]
+if kill -0 "$tracked_proxy_pid" 2>/dev/null; then
+  printf '%s\n' 'expected the tracked unauthorized proxy to be replaced' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$proxy_auth_log" | tr -d ' ')" == 1 ]]
+replacement_proxy_pid=$(awk -F= '$1 == "pid" { print $2; exit }' "$managed_proxy_file")
+kill -TERM "$replacement_proxy_pid" 2>/dev/null || true
+for _ in {1..50}; do kill -0 "$replacement_proxy_pid" 2>/dev/null || break; sleep 0.02; done
+rm -f "$managed_proxy_file"
+
+# Without current managed ownership metadata, the same authentication failure
+# is fail-closed and must never start or terminate an arbitrary listener.
+printf '%s\n' unauthorized > "$proxy_auth_state"
+: > "$proxy_auth_log"
+if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$proxy_auth_curl" \
+    CLAUDEX_PROXY_BIN="$auth_proxy_bin" CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 \
+    CLAUDEX_SKIP_PROXY_WATCHER=1 FAKE_PROXY_HEALTH_STATE="$proxy_auth_state" \
+    FAKE_PROXY_AUTH_START_LOG="$proxy_auth_log" CLAUDEX_TEST_PROCESS_IDENTITY="$tracked_proxy_identity" \
+    "$root/claudex" unmanaged-401-test \
+    >"$tmp/unmanaged-401.stdout" 2>"$tmp/unmanaged-401.stderr"; then
+  printf '%s\n' 'expected an unmanaged 401 listener to fail closed' >&2
+  exit 1
+fi
+grep -F 'not proven Claudex-managed' "$tmp/unmanaged-401.stderr" >/dev/null
+[[ ! -s "$proxy_auth_log" && ! -e "$managed_proxy_file" ]]
+
+# A child that starts but never becomes authenticated must be terminated and
+# must not leave PID metadata that could authorize a later destructive retry.
+printf '%s\n' unavailable > "$proxy_auth_state"
+: > "$proxy_auth_log"
+if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$proxy_auth_curl" \
+    CLAUDEX_PROXY_BIN="$auth_proxy_bin" CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 \
+    CLAUDEX_SKIP_PROXY_WATCHER=1 FAKE_PROXY_HEALTH_STATE="$proxy_auth_state" \
+    FAKE_PROXY_AUTH_START_LOG="$proxy_auth_log" FAKE_PROXY_START_STATE=unauthorized \
+    CLAUDEX_TEST_PROCESS_IDENTITY="$tracked_proxy_identity" \
+    "$root/claudex" never-ready-proxy-test >"$tmp/never-ready.stdout" 2>"$tmp/never-ready.stderr"; then
+  printf '%s\n' 'expected a newly spawned unauthorized proxy to fail readiness' >&2
+  exit 1
+fi
+never_ready_pid=$(tail -1 "$proxy_auth_log")
+[[ "$never_ready_pid" =~ ^[0-9]+$ ]]
+[[ ! -e "$managed_proxy_file" ]]
+if kill -0 "$never_ready_pid" 2>/dev/null; then
+  printf '%s\n' 'newly spawned failed proxy was not terminated' >&2
+  exit 1
+fi
 
 auto_output=$(run_wrapper --auto --luna test-prompt)
 [[ "$auto_output" == *'--permission-mode auto'* ]]
@@ -684,7 +861,8 @@ if [[ "$(uname -s)" == Darwin ]]; then
 fi
 
 status_output=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt-5.6-sol"},"effort":{"level":"xhigh"},"context_window":{"used_percentage":42.9,"total_input_tokens":171600,"context_window_size":400000}}' | \
-  CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+  CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline" 2>"$tmp/statusline.stderr")
+[[ ! -s "$tmp/statusline.stderr" ]]
 [[ "$status_output" == *'GPT-5.6 Sol'* ]]
 [[ "$status_output" == *'xhigh effort'* ]]
 [[ "$status_output" == *'42% context'* ]]
@@ -795,6 +973,72 @@ installed_env=$(<"$install_home/.config/claudex/env")
 jq -e --arg version "$(node -p "require('$root/package.json').version")" \
   '.schema == 1 and .version == $version and .method == "git" and .repository == "BeamoINT/Claudex"' \
   "$install_home/.config/claudex/install.json" >/dev/null
+
+# An explicit installer login always opens Codex login, even when the existing
+# file-backed session is already valid.
+explicit_login_log="$tmp/explicit-installer-login.log"
+HOME="$install_home" PATH="$tmp/bin:$PATH" FAKE_CODEX_LOGIN_LOG="$explicit_login_log" \
+  CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 CLAUDEX_SKIP_SERVICE_START=1 \
+  "$root/install.sh" --login >/dev/null
+[[ "$(wc -l < "$explicit_login_log" | tr -d ' ')" == 1 ]]
+
+# A failure after env, proxy config, and managed-file activation restores the
+# complete prior generation instead of leaving a mixed direct installation.
+rollback_env_before=$(<"$install_home/.config/claudex/env")
+rollback_proxy_before=$(<"$install_home/.config/claudex/cliproxyapi.yaml")
+printf '%s\n' rollback-statusline-sentinel > "$install_home/.config/claudex/statusline"
+if HOME="$install_home" PATH="$tmp/bin:$PATH" CLAUDEX_PROXY_TOKEN='must-not-survive' \
+  CLAUDEX_INSTALL_METHOD=invalid CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 CLAUDEX_SKIP_SERVICE_START=1 \
+  "$root/install.sh" >"$tmp/installer-rollback.stdout" 2>"$tmp/installer-rollback.stderr"; then
+  printf '%s\n' 'expected injected late installer failure' >&2
+  exit 1
+fi
+grep -F 'restored the previous managed installation' "$tmp/installer-rollback.stderr" >/dev/null
+[[ "$(<"$install_home/.config/claudex/env")" == "$rollback_env_before" ]]
+[[ "$(<"$install_home/.config/claudex/cliproxyapi.yaml")" == "$rollback_proxy_before" ]]
+[[ "$(<"$install_home/.config/claudex/statusline")" == rollback-statusline-sentinel ]]
+[[ -z "$(find "$install_home/.config/claudex" -maxdepth 1 -name '.install-transaction.*' -print -quit)" ]]
+
+# A durable transaction journal is recovered after an ungraceful process loss
+# before a new installer generation is snapshotted.
+crash_transaction="$install_home/.config/claudex/.install-transaction.crash-test"
+mkdir -p "$crash_transaction/backup"
+crash_targets=(
+  "$install_home/.local/bin/claudex"
+  "$install_home/.config/claudex/env"
+  "$install_home/.config/claudex/cliproxyapi.yaml"
+  "$install_home/.config/claudex/bin/cliproxyapi"
+  "$install_home/.config/claudex/settings.json"
+  "$install_home/.config/claudex/statusline"
+  "$install_home/.config/claudex/usage-limit"
+  "$install_home/.config/claudex/codex-session"
+  "$install_home/.config/claudex/preload.cjs"
+  "$install_home/.config/claudex/skill-bridge.cjs"
+  "$install_home/.config/claudex/self-update"
+  "$install_home/.config/claudex/skills/usage-limit/SKILL.md"
+  "$install_home/.config/claudex/install.json"
+)
+: > "$crash_transaction/manifest"
+for crash_index in "${!crash_targets[@]}"; do
+  crash_target=${crash_targets[$crash_index]}
+  if [[ -f "$crash_target" ]]; then
+    cp -p "$crash_target" "$crash_transaction/backup/$crash_index"
+    printf '1\t%s\n' "$crash_target" >> "$crash_transaction/manifest"
+  else
+    printf '0\t%s\n' "$crash_target" >> "$crash_transaction/manifest"
+  fi
+done
+printf '%s\n' committing > "$crash_transaction/state"
+printf '%s\n' 'CLAUDEX_PROXY_TOKEN=corrupted-crash-token' > "$install_home/.config/claudex/env"
+recovery_output=$(HOME="$install_home" PATH="$tmp/bin:$PATH" \
+  CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 CLAUDEX_SKIP_SERVICE_START=1 "$root/install.sh")
+[[ "$recovery_output" == *'Recovered the previous interrupted Claudex installation'* ]]
+[[ "$(<"$install_home/.config/claudex/env")" == *'CLAUDEX_PROXY_TOKEN=installer-test-token'* ]]
+[[ ! -e "$crash_transaction" ]]
+
+grep -F -- '--retry-connrefused' "$root/install.sh" >/dev/null
+grep -F 'download_with_retry "$claude_installer"' "$root/install.sh" >/dev/null
+grep -F 'download_with_retry "$archive" "$url"' "$root/install.sh" >/dev/null
 
 custom_proxy_config="$tmp/custom-claudex-proxy.yaml"
 custom_proxy_bin="$tmp/custom-claudex-proxy"
@@ -1104,6 +1348,7 @@ HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUD
 
 "$root/tests/auth-usage-regressions.sh"
 "$root/tests/self-update-regressions.sh"
+bash "$root/tests/installer-regressions.sh"
 node "$root/scripts/check-docs.mjs"
 
 printf '%s\n' 'all Claudex tests passed'

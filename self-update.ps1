@@ -445,16 +445,25 @@ function ConvertTo-NativeArgument([string] $Value) {
     return $builder.ToString()
 }
 
+function ConvertTo-CmdArgument([string] $Value) {
+    if ($null -eq $Value) { $Value = '' }
+    # cmd.exe applies metacharacter and percent expansion after ordinary
+    # CreateProcess quoting. Keep every token quoted and escape percent signs;
+    # delayed expansion is explicitly disabled by the caller.
+    return '"' + $Value.Replace('%', '%%').Replace('"', '""') + '"'
+}
+
 function Invoke-BoundedProcess([string] $Executable, [string[]] $Arguments, [int] $TimeoutSeconds, [switch] $CaptureOutput) {
     $nativeArguments = @($Arguments | ForEach-Object { ConvertTo-NativeArgument ([string] $_) })
     $argumentLine = $nativeArguments -join ' '
     $fileName = $Executable
     if ([IO.Path]::GetExtension($Executable) -in @('.cmd', '.bat')) {
         $fileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
-        $inner = (ConvertTo-NativeArgument $Executable) + $(if ($argumentLine) { " $argumentLine" } else { '' })
+        $cmdArguments = @($Arguments | ForEach-Object { ConvertTo-CmdArgument ([string] $_) }) -join ' '
+        $inner = (ConvertTo-CmdArgument $Executable) + $(if ($cmdArguments) { " $cmdArguments" } else { '' })
         # cmd /S requires one additional pair of quotes around a command whose
         # executable path is itself quoted.
-        $argumentLine = '/d /s /c "' + $inner + '"'
+        $argumentLine = '/d /s /v:off /c "' + $inner + '"'
     }
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $fileName

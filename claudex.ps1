@@ -15,10 +15,10 @@ $previousModelMode = [Environment]::GetEnvironmentVariable('CLAUDEX_MODEL_MODE',
 $previousInteractiveTui = [Environment]::GetEnvironmentVariable('CLAUDEX_INTERACTIVE_TUI', 'Process')
 $sessionEnvironmentNames = @(
     'BUN_OPTIONS', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN',
-    'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-    'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME', 'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
-    'ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION', 'ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION',
-    'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES', 'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
+    'ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    'ANTHROPIC_DEFAULT_FABLE_MODEL_NAME', 'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME', 'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
+    'ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION', 'ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION', 'ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION',
+    'ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES', 'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES', 'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
     'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES', 'CLAUDE_CODE_AUTO_MODE_MODEL',
     'CLAUDE_CODE_BG_CLASSIFIER_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_ALWAYS_ENABLE_EFFORT',
     'CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY', 'CLAUDE_CODE_MAX_RETRIES', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
@@ -143,6 +143,31 @@ foreach ($earlyArgument in $ClaudeArguments) {
 }
 
 $managedCodexModelIds = @('gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna')
+function Get-ProxyEndpointPolicy {
+    $uri = $null
+    if (-not [Uri]::TryCreate($proxyUrl, [UriKind]::Absolute, [ref] $uri) -or
+        $uri.Scheme -notin @('http', 'https') -or -not $uri.Host -or
+        $uri.UserInfo -or $uri.Query -or $uri.Fragment -or
+        $uri.AbsolutePath -notin @('', '/') -or $uri.Port -lt 1) {
+        throw 'CLAUDEX_PROXY_URL must be an HTTP(S) origin without credentials, a path, a query, or a fragment.'
+    }
+    $isLoopback = $uri.Host.Equals('localhost', [StringComparison]::OrdinalIgnoreCase)
+    $address = $null
+    $addressHost = $uri.Host.Trim([char[]]'[]')
+    if (-not $isLoopback -and [Net.IPAddress]::TryParse($addressHost, [ref] $address)) {
+        $isLoopback = [Net.IPAddress]::IsLoopback($address)
+    }
+    if (-not $isLoopback) {
+        if ($uri.Scheme -ne 'https') {
+            throw 'Claudex refuses to send its proxy credential to a non-loopback HTTP endpoint; remote proxies must use HTTPS.'
+        }
+        if ((Env-OrDefault 'CLAUDEX_ALLOW_REMOTE_PROXY' '0') -ne '1') {
+            throw 'Claudex refuses non-loopback proxy URLs by default. Set CLAUDEX_ALLOW_REMOTE_PROXY=1 only for an explicitly trusted HTTPS proxy.'
+        }
+    }
+    return [pscustomobject]@{ Uri = $uri; IsLoopback = $isLoopback }
+}
+
 function Assert-ProxyConfiguration {
     if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) {
         Fail "missing $configFile; reinstall or restore the Claudex configuration."
@@ -152,6 +177,7 @@ function Assert-ProxyConfiguration {
     }
     if (-not $proxyToken) { Fail 'CLAUDEX_PROXY_TOKEN is not configured' }
     if ($proxyToken.Contains("`r") -or $proxyToken.Contains("`n")) { Fail 'CLAUDEX_PROXY_TOKEN contains an unsupported newline.' 2 }
+    try { [void](Get-ProxyEndpointPolicy) } catch { Fail $_.Exception.Message 2 }
     if ($model -notin $managedCodexModelIds) {
         Fail "invalid CLAUDEX_MODEL '$model'; expected gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna." 2
     }
@@ -373,6 +399,9 @@ function Invoke-CurlWithDeadline([string[]] $Arguments, [string] $StandardInput,
 }
 
 function Fetch-Models([int] $TimeoutMilliseconds = 5000) {
+    # Validate the destination before creating the bearer header. Internal
+    # watcher paths call this function without passing through normal startup.
+    [void](Get-ProxyEndpointPolicy)
     $timeoutMilliseconds = [math]::Max(250, [math]::Min(5000, $TimeoutMilliseconds))
     $curlSeconds = [math]::Max(1, [int] [math]::Ceiling($timeoutMilliseconds / 1000.0))
     $healthRunDir = Join-Path $configDir 'run'
@@ -467,6 +496,129 @@ function Write-ProxyRecoveryDiagnostic([string] $Message) {
     } catch { }
 }
 
+$script:ManagedProxyMetadataPath = Join-Path (Join-Path $configDir 'run') 'managed-proxy.json'
+
+function Get-ManagedProxyMetadata {
+    if (-not (Test-Path -LiteralPath $script:ManagedProxyMetadataPath -PathType Leaf)) { return $null }
+    try {
+        $record = Get-Content -LiteralPath $script:ManagedProxyMetadataPath -Raw | ConvertFrom-Json
+        foreach ($name in @('pid', 'startedUtcTicks', 'executable')) {
+            if ($null -eq $record.PSObject.Properties[$name]) { throw "missing $name" }
+        }
+        if ([int]$record.pid -le 0 -or [long]$record.startedUtcTicks -le 0 -or
+            [string]::IsNullOrWhiteSpace([string]$record.executable)) { throw 'invalid managed proxy metadata' }
+        return $record
+    } catch {
+        Remove-Item -LiteralPath $script:ManagedProxyMetadataPath -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+}
+
+function Test-ManagedProxyIdentity($Record, [Diagnostics.Process] $Process) {
+    if ($null -eq $Record -or $null -eq $Process -or $Process.Id -ne [int]$Record.pid) { return $false }
+    try {
+        $startedUtcTicks = $Process.StartTime.ToUniversalTime().Ticks
+        $processPath = [IO.Path]::GetFullPath($Process.MainModule.FileName)
+        $recordPath = [IO.Path]::GetFullPath([string]$Record.executable)
+        return $startedUtcTicks -eq [long]$Record.startedUtcTicks -and
+            $processPath.Equals($recordPath, [StringComparison]::OrdinalIgnoreCase)
+    } catch { return $false }
+}
+
+function Remove-ManagedProxyMetadata($ExpectedRecord) {
+    if ($null -eq $ExpectedRecord) { return }
+    try {
+        $current = Get-ManagedProxyMetadata
+        if ($null -ne $current -and [int]$current.pid -eq [int]$ExpectedRecord.pid -and
+            [long]$current.startedUtcTicks -eq [long]$ExpectedRecord.startedUtcTicks) {
+            Remove-Item -LiteralPath $script:ManagedProxyMetadataPath -Force -ErrorAction SilentlyContinue
+        }
+    } catch { }
+}
+
+function Write-ManagedProxyMetadata([Diagnostics.Process] $Process, [string] $Executable) {
+    $processPath = [IO.Path]::GetFullPath($Process.MainModule.FileName)
+    $record = [ordered]@{
+        schema = 1
+        pid = $Process.Id
+        startedUtcTicks = $Process.StartTime.ToUniversalTime().Ticks
+        executable = $processPath
+        launcher = [IO.Path]::GetFullPath($Executable)
+        recordedAt = [DateTimeOffset]::UtcNow.ToString('o')
+    }
+    $parent = Split-Path $script:ManagedProxyMetadataPath -Parent
+    [IO.Directory]::CreateDirectory($parent) | Out-Null
+    $temporary = "$($script:ManagedProxyMetadataPath).tmp.$PID.$([guid]::NewGuid().ToString('N'))"
+    try {
+        [IO.File]::WriteAllText($temporary, (($record | ConvertTo-Json -Compress) + "`n"), $utf8)
+        Move-Item -LiteralPath $temporary -Destination $script:ManagedProxyMetadataPath -Force
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+    return [pscustomobject]$record
+}
+
+function Test-RecordedManagedProxy {
+    $record = Get-ManagedProxyMetadata
+    if ($null -eq $record) { return $false }
+    $process = Get-Process -Id ([int]$record.pid) -ErrorAction SilentlyContinue
+    try {
+        if ($null -ne $process -and (Test-ManagedProxyIdentity $record $process)) { return $true }
+        Remove-ManagedProxyMetadata $record
+        return $false
+    } finally {
+        if ($null -ne $process) { try { $process.Dispose() } catch { } }
+    }
+}
+
+function Stop-RecordedManagedProxy([string] $Reason) {
+    $record = Get-ManagedProxyMetadata
+    if ($null -eq $record) { return $false }
+    $process = Get-Process -Id ([int]$record.pid) -ErrorAction SilentlyContinue
+    try {
+        if ($null -eq $process -or -not (Test-ManagedProxyIdentity $record $process)) {
+            Remove-ManagedProxyMetadata $record
+            Write-ProxyRecoveryDiagnostic "ignored stale managed proxy metadata while handling $Reason"
+            return $false
+        }
+        $stopped = $false
+        if (-not $process.HasExited) { $process.Kill() }
+        [void]$process.WaitForExit(5000)
+        $process.Refresh()
+        $stopped = $process.HasExited
+        if (-not $stopped) {
+            Write-ProxyRecoveryDiagnostic "could not stop verified Claudex-managed proxy pid=$($record.pid) after $Reason"
+            return $false
+        }
+        Remove-ManagedProxyMetadata $record
+        Write-ProxyRecoveryDiagnostic "stopped Claudex-managed proxy pid=$($record.pid) after $Reason"
+        return $true
+    } catch {
+        Write-ProxyRecoveryDiagnostic "could not stop verified Claudex-managed proxy pid=$($record.pid) after $Reason"
+        return $false
+    } finally {
+        if ($null -ne $process) { try { $process.Dispose() } catch { } }
+    }
+}
+
+function Stop-NewlySpawnedProxy([Diagnostics.Process] $Process, $Record, [string] $Reason) {
+    if ($null -eq $Process) { return }
+    $stopped = $false
+    try {
+        $Process.Refresh()
+        if (-not $Process.HasExited) { $Process.Kill() }
+        [void]$Process.WaitForExit(5000)
+        $Process.Refresh()
+        $stopped = $Process.HasExited
+    } catch { }
+    if ($stopped) {
+        Remove-ManagedProxyMetadata $Record
+        Write-ProxyRecoveryDiagnostic "cleaned up newly spawned proxy pid=$($Process.Id) after $Reason"
+    } else {
+        Write-ProxyRecoveryDiagnostic "newly spawned proxy pid=$($Process.Id) remained alive after cleanup for $Reason"
+    }
+}
+
 function Get-ProxyStartupMutexName {
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
@@ -496,6 +648,7 @@ $script:interactiveLoginAttempted = $false
 function Ensure-Proxy([string] $RequiredModel = $model) {
     $script:lastProxyFailureWasAuthSync = $false
     $script:lastProxyAuthSyncExitCode = 0
+    $endpointPolicy = Get-ProxyEndpointPolicy
     Write-ProxyWatcherTestTrace 'recovery: begin'
     if (-not (Test-Path -LiteralPath $codexSessionHelper -PathType Leaf)) {
         throw "authentication helper is missing: $codexSessionHelper; reinstall Claudex."
@@ -511,8 +664,20 @@ function Ensure-Proxy([string] $RequiredModel = $model) {
     $initialHealth = Get-ProxyHealth 3000
     if ($initialHealth -eq 'healthy') { Assert-ProxyModelAvailable $RequiredModel; return }
     if ($initialHealth -eq 'authentication-failed') {
-        Write-ProxyRecoveryDiagnostic 'proxy authentication failed; startup was not attempted'
-        throw 'the running local proxy rejected the configured authentication token; reinstall Claudex or restore its managed env and proxy config.'
+        if (-not $endpointPolicy.IsLoopback) {
+            Write-ProxyRecoveryDiagnostic 'trusted remote proxy rejected the configured authentication token'
+            throw 'the trusted remote proxy rejected the configured authentication token; verify its Claudex credential without starting or stopping a local service.'
+        }
+        if (-not (Test-RecordedManagedProxy)) {
+            Write-ProxyRecoveryDiagnostic 'proxy authentication failed but no matching Claudex-managed process could be proven'
+            throw 'the loopback proxy rejected the configured authentication token, but Claudex will not stop an unverified process. Stop the conflicting service or rerun the installer.'
+        }
+        # Do not stop it until the startup lock is held: another Claudex tab may
+        # already be replacing the same managed process.
+        Write-ProxyRecoveryDiagnostic 'verified Claudex-managed proxy authentication rejection; entering serialized recovery'
+    }
+    if (-not $endpointPolicy.IsLoopback) {
+        throw 'the trusted remote proxy is unavailable; Claudex will not start a local service for a remote endpoint.'
     }
     Write-ProxyWatcherTestTrace 'recovery: readiness check failed'
     Write-ProxyRecoveryDiagnostic 'authenticated proxy readiness failed; entering recovery'
@@ -596,8 +761,21 @@ function Ensure-Proxy([string] $RequiredModel = $model) {
     Write-ProxyRecoveryDiagnostic 'proxy startup lock acquired'
 
     $becameReady = $false
+    $spawnedProxy = $null
+    $spawnedProxyRecord = $null
     try {
-        if (Test-ProxyReady 2000) { Assert-ProxyModelAvailable $RequiredModel; $becameReady = $true; return }
+        $lockedHealth = Get-ProxyHealth 2000
+        if ($lockedHealth -eq 'healthy') { Assert-ProxyModelAvailable $RequiredModel; $becameReady = $true; return }
+        if ($lockedHealth -eq 'authentication-failed') {
+            if (-not (Stop-RecordedManagedProxy 'an authenticated 401/403 response after acquiring the startup lock')) {
+                throw 'the loopback proxy rejected the configured authentication token, but Claudex will not stop an unverified process. Stop the conflicting service or rerun the installer.'
+            }
+        } else {
+            # A tracked process can also remain alive while failing readiness.
+            # Stop only a strongly identified Claudex record; no record
+            # simply means there is no process Claudex is authorized to kill.
+            [void](Stop-RecordedManagedProxy 'authenticated readiness failure after acquiring the startup lock')
+        }
         $proxyBinary = Find-ProxyExecutable
         if (-not $proxyBinary) { throw 'CLIProxyAPI is not reachable and no proxy executable was found.' }
         [Console]::Error.WriteLine('claudex: starting the local CLIProxyAPI service...')
@@ -613,26 +791,48 @@ function Ensure-Proxy([string] $RequiredModel = $model) {
             WorkingDirectory = $configDir
             RedirectStandardOutput = (Join-Path $logDir 'cliproxyapi.stdout.log')
             RedirectStandardError = (Join-Path $logDir 'cliproxyapi.stderr.log')
+            PassThru = $true
         }
         if ($arguments.Count -gt 0) { $startParameters.ArgumentList = $arguments }
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $startParameters.WindowStyle = 'Hidden' }
         Write-ProxyWatcherTestTrace "recovery: starting $proxyBinary"
         Write-ProxyRecoveryDiagnostic "starting compatibility service: $proxyBinary"
-        Start-Process @startParameters | Out-Null
+        $spawnedProxy = Start-Process @startParameters
+        try {
+            $spawnedProxyRecord = Write-ManagedProxyMetadata $spawnedProxy $proxyBinary
+        } catch {
+            Stop-NewlySpawnedProxy $spawnedProxy $null 'managed process metadata could not be recorded'
+            throw 'the local proxy started, but Claudex could not record safe process metadata; the process was stopped.'
+        }
         Write-ProxyWatcherTestTrace 'recovery: process launched'
         $readinessDeadline = [DateTime]::UtcNow.AddSeconds(15)
         while ([DateTime]::UtcNow -lt $readinessDeadline) {
             $remaining = [int] [math]::Max(250, ($readinessDeadline - [DateTime]::UtcNow).TotalMilliseconds)
-            if (Test-ProxyReady ([math]::Min(2000, $remaining))) {
+            $startupHealth = Get-ProxyHealth ([math]::Min(2000, $remaining))
+            if ($startupHealth -eq 'healthy') {
                 Assert-ProxyModelAvailable $RequiredModel
                 $becameReady = $true
+                try {
+                    $spawnedProxy.Refresh()
+                    if ($spawnedProxy.HasExited) { Remove-ManagedProxyMetadata $spawnedProxyRecord }
+                } catch { }
                 break
             }
+            if ($startupHealth -eq 'authentication-failed') {
+                throw 'the newly started local proxy rejected its configured authentication token; rerun the installer to repair matching credentials.'
+            }
+            try { $spawnedProxy.Refresh(); if ($spawnedProxy.HasExited) { break } } catch { }
             Start-Sleep -Milliseconds 100
         }
         Write-ProxyWatcherTestTrace "recovery: readiness loop completed; ready=$becameReady"
         Write-ProxyRecoveryDiagnostic "proxy readiness loop completed; ready=$becameReady"
     } finally {
+        if ($spawnedProxy) {
+            if (-not $becameReady) {
+                Stop-NewlySpawnedProxy $spawnedProxy $spawnedProxyRecord 'it never became semantically healthy'
+            }
+            try { $spawnedProxy.Dispose() } catch { }
+        }
         if ($useNamedMutex) {
             if ($legacyLockOwned) {
                 Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
@@ -1268,6 +1468,13 @@ if ($injectSkills -and $skillBridgeMode -eq 'on') {
         $skillBridgeResult = $skillBridgeOutput | ConvertFrom-Json
         $skillBridgeAddDirs = @($skillBridgeResult.addDirs | Where-Object { $_ })
         $skillBridgePluginDirs = @($skillBridgeResult.pluginDirs | Where-Object { $_ })
+        if ($null -ne $skillBridgeResult.PSObject.Properties['warnings']) {
+            foreach ($warning in @($skillBridgeResult.warnings)) {
+                $safeWarning = ([string]$warning).Replace("`r", ' ').Replace("`n", ' ').Trim()
+                if ($safeWarning.Length -gt 500) { $safeWarning = $safeWarning.Substring(0, 499) + [char]0x2026 }
+                if ($safeWarning) { [Console]::Error.WriteLine("claudex: skill bridge: $safeWarning") }
+            }
+        }
     } catch { Fail 'skill discovery failed; run `claudex skills` for details.' }
     if ($skillBridgeAddDirs.Count -gt 0 -and -not (Test-ClaudeOption '--add-dir')) {
         Fail 'this Claude Code build lacks --add-dir, which is required for installed Codex skills; run `claude update`.'
@@ -1289,16 +1496,20 @@ if ($useProxy) {
 
     $env:ANTHROPIC_BASE_URL = $proxyUrl
     $env:ANTHROPIC_AUTH_TOKEN = $proxyToken
+    $env:ANTHROPIC_DEFAULT_FABLE_MODEL = 'gpt-5.6-sol'
     $env:ANTHROPIC_DEFAULT_OPUS_MODEL = 'gpt-5.6-sol'
     $env:ANTHROPIC_DEFAULT_SONNET_MODEL = 'gpt-5.6-terra'
     $env:ANTHROPIC_DEFAULT_HAIKU_MODEL = 'gpt-5.6-luna'
+    $env:ANTHROPIC_DEFAULT_FABLE_MODEL_NAME = 'GPT-5.6 Sol'
     $env:ANTHROPIC_DEFAULT_OPUS_MODEL_NAME = 'GPT-5.6 Sol'
     $env:ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = 'GPT-5.6 Terra'
     $env:ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME = 'GPT-5.6 Luna'
+    $env:ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION = 'Frontier capability for planning and the hardest engineering work'
     $env:ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION = 'Frontier capability for planning and the hardest engineering work'
     $env:ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION = 'Balanced intelligence, speed, and cost for everyday coding'
     $env:ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION = 'Fast, efficient model for search, triage, and mechanical tasks'
     $capabilities = 'effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking'
+    $env:ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES = $capabilities
     $env:ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES = $capabilities
     $env:ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = $capabilities
     $env:ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES = $capabilities

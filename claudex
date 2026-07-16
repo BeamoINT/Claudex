@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Node- and Bun-based CLIs abort during bootstrap when the directory inherited
+# from the calling shell has been removed. Recover before invoking either
+# runtime so a moved/deleted project directory does not make even maintenance
+# commands unusable.
+if ! pwd -P >/dev/null 2>&1; then
+  claudex_recovery_dir="${HOME:-/}"
+  [[ -d "$claudex_recovery_dir" ]] || claudex_recovery_dir=/
+  cd -P -- "$claudex_recovery_dir"
+  printf 'claudex: the previous working directory no longer exists; continuing from %s.\n' "$PWD" >&2
+fi
+
 readonly claudex_config_dir="${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}"
 readonly config_file="$claudex_config_dir/env"
 readonly curl_bin="${CLAUDEX_CURL_BIN:-curl}"
@@ -27,6 +38,22 @@ if [[ ! -r "$config_file" ]] && (( ! early_runtime_bypass )); then
 fi
 
 if [[ -r "$config_file" ]]; then source "$config_file"; fi
+if [[ -n "${CLAUDEX_NODE_BIN:-}" ]]; then
+  case "$CLAUDEX_NODE_BIN" in
+    /*) ;;
+    *) printf '%s\n' 'claudex: CLAUDEX_NODE_BIN must be an absolute directory containing Node.js 18 or newer.' >&2; exit 2 ;;
+  esac
+  [[ -x "$CLAUDEX_NODE_BIN/node" ]] || {
+    printf 'claudex: CLAUDEX_NODE_BIN does not contain an executable node: %s/node\n' "$CLAUDEX_NODE_BIN" >&2
+    exit 2
+  }
+  if ! "$CLAUDEX_NODE_BIN/node" -e 'const major = Number(process.versions.node.split(".")[0]); process.exit(Number.isInteger(major) && major >= 18 ? 0 : 1)' \
+      >/dev/null 2>&1; then
+    printf '%s\n' 'claudex: CLAUDEX_NODE_BIN must provide Node.js 18 or newer.' >&2
+    exit 2
+  fi
+  export PATH="$CLAUDEX_NODE_BIN:$PATH"
+fi
 readonly settings_file="${CLAUDEX_SETTINGS_FILE:-$claudex_config_dir/settings.json}"
 readonly codex_session_helper="${CLAUDEX_CODEX_SESSION_HELPER:-$claudex_config_dir/codex-session}"
 readonly self_update_helper="${CLAUDEX_SELF_UPDATE_HELPER:-$claudex_config_dir/self-update}"
@@ -67,6 +94,7 @@ fi
 
 : "${CLAUDEX_PROXY_TOKEN:=}"
 : "${CLAUDEX_PROXY_URL:=http://127.0.0.1:8318}"
+: "${CLAUDEX_ALLOW_REMOTE_PROXY:=0}"
 : "${CLAUDEX_MODEL:=gpt-5.6-sol}"
 : "${CLAUDEX_PERMISSION_MODE:=auto}"
 : "${CLAUDEX_AUTO_MODE_MODEL:=gpt-5.6-terra}"
@@ -92,6 +120,43 @@ fi
 : "${CLAUDEX_SKILL_BRIDGE:=on}"
 : "${CLAUDEX_SKILL_PLUGINS:=on}"
 : "${CLAUDEX_SKILL_DOLLAR_REFERENCES:=on}"
+
+proxy_url_is_loopback() {
+  local normalized="${1%/}" port=""
+  normalized=$(printf '%s' "$normalized" | tr '[:upper:]' '[:lower:]')
+  if [[ "$normalized" =~ ^https?://(localhost|127\.0\.0\.1|\[::1\])(:([0-9]{1,5}))?$ ]]; then
+    port="${BASH_REMATCH[3]:-}"
+    [[ -z "$port" ]] || (( 10#$port >= 1 && 10#$port <= 65535 ))
+    return
+  fi
+  return 1
+}
+
+proxy_url_is_secure_remote() {
+  local authority="${1#https://}"
+  [[ "$1" == https://* ]] || return 1
+  authority="${authority%/}"
+  [[ -n "$authority" ]] || return 1
+  case "$authority" in
+    *[/?#@[:space:]]*) return 1 ;;
+  esac
+}
+
+claudex_remote_proxy=0
+if (( ! early_runtime_bypass )); then
+  case "$CLAUDEX_ALLOW_REMOTE_PROXY" in 0|1) ;;
+    *) printf '%s\n' 'claudex: CLAUDEX_ALLOW_REMOTE_PROXY must be 0 or 1.' >&2; exit 2 ;;
+  esac
+  if proxy_url_is_loopback "$CLAUDEX_PROXY_URL"; then
+    :
+  elif [[ "$CLAUDEX_ALLOW_REMOTE_PROXY" == 1 ]] && proxy_url_is_secure_remote "$CLAUDEX_PROXY_URL"; then
+    claudex_remote_proxy=1
+  else
+    printf '%s\n' 'claudex: refusing to send the proxy credential to a non-loopback URL.' >&2
+    printf '%s\n' 'claudex: use a loopback HTTP(S) URL, or set CLAUDEX_ALLOW_REMOTE_PROXY=1 with an HTTPS URL after reviewing the remote endpoint.' >&2
+    exit 2
+  fi
+fi
 
 if (( ! early_runtime_bypass )) && [[ -z "$CLAUDEX_PROXY_TOKEN" ]]; then
   printf '%s\n' 'claudex: CLAUDEX_PROXY_TOKEN is not configured' >&2
@@ -340,7 +405,7 @@ fetch_models() {
     --connect-timeout 0.5 --max-time "$timeout_seconds" \
     --header @<(printf 'Authorization: Bearer %s\n' "$CLAUDEX_PROXY_TOKEN") \
     --output "$response_file" --write-out '%{http_code}' \
-    "${CLAUDEX_PROXY_URL}/v1/models" > "$status_file" &
+    "${CLAUDEX_PROXY_URL%/}/v1/models" > "$status_file" &
   request_pid=$!
   (
     sleep "$timeout_seconds"
@@ -535,9 +600,16 @@ reclaim_proxy_lock() {
 }
 
 write_managed_proxy_pid() {
-  local pid="$1" run_dir="$CLAUDE_CONFIG_DIR/run" pid_file temporary identity
+  local pid="$1" run_dir="$CLAUDE_CONFIG_DIR/run" pid_file temporary identity attempt
   pid_file="$run_dir/managed-proxy"
-  identity=$(process_identity "$pid")
+  identity=""
+  for attempt in {1..10}; do
+    identity=$(process_identity "$pid")
+    [[ -z "$identity" ]] || break
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.02
+  done
+  [[ -n "$identity" ]] || return 1
   temporary=$(mktemp "$run_dir/.managed-proxy.XXXXXX")
   {
     printf 'pid=%s\n' "$pid"
@@ -545,6 +617,17 @@ write_managed_proxy_pid() {
   } > "$temporary"
   chmod 600 "$temporary" 2>/dev/null || true
   mv -f "$temporary" "$pid_file"
+}
+
+managed_proxy_is_current() {
+  local pid_file="$CLAUDE_CONFIG_DIR/run/managed-proxy" pid identity current
+  [[ -r "$pid_file" ]] || return 1
+  pid=$(read_lock_field "$pid_file" pid)
+  identity=$(read_lock_field "$pid_file" identity)
+  [[ "$pid" =~ ^[0-9]+$ && -n "$identity" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  current=$(process_identity "$pid")
+  [[ -n "$current" && "$current" == "$identity" ]]
 }
 
 stop_unhealthy_managed_proxy() {
@@ -602,17 +685,26 @@ ensure_proxy() {
   else
     health_status=$?
     if (( health_status == 41 )); then
-      record_proxy_recovery "proxy rejected the configured authentication token"
-      printf '%s\n' 'claudex: the local proxy rejected its configured authentication token; rerun the installer to repair matching credentials.' >&2
-      return 1
+      if (( claudex_remote_proxy )) || ! managed_proxy_is_current; then
+        record_proxy_recovery "unmanaged proxy rejected the configured authentication token"
+        printf '%s\n' 'claudex: the proxy rejected its configured authentication token; refusing to restart a listener that is not proven Claudex-managed.' >&2
+        return 1
+      fi
+      record_proxy_recovery "tracked managed proxy rejected its configured authentication token; restarting it"
     fi
+  fi
+
+  if (( claudex_remote_proxy )); then
+    record_proxy_recovery "remote proxy is unavailable; local recovery is disabled"
+    printf '%s\n' 'claudex: the configured remote proxy is unavailable; local proxy recovery is disabled for remote endpoints.' >&2
+    return 1
   fi
 
   # Concurrent Claudex tabs can notice a stopped bridge at the same time.
   # Serialize startup so only one process can bind the loopback port.
   local run_dir="$CLAUDE_CONFIG_DIR/run" lock_dir owner_file attempt owner_tmp orphan_nonce orphan_tmp owner_pid_file
   local lock_acquired=0 owner_pid owner_identity owner_nonce observed_nonce lock_age
-  local lock_deadline startup_deadline proxy_pid
+  local lock_deadline startup_deadline proxy_pid startup_auth_failures=0
   lock_dir="$run_dir/proxy-start.lock"
   owner_file="$lock_dir/owner"
   mkdir -p "$run_dir"
@@ -641,8 +733,8 @@ ensure_proxy() {
       break
     fi
     if proxy_ready; then return 0
-    elif (( $? == 41 )); then
-      record_proxy_recovery "proxy authentication failed while waiting for startup lock"
+    elif (( $? == 41 )) && ! managed_proxy_is_current; then
+      record_proxy_recovery "unmanaged proxy authentication failed while waiting for startup lock"
       return 1
     fi
     lock_age=$(lock_age_seconds "$lock_dir")
@@ -673,8 +765,8 @@ ensure_proxy() {
     release_proxy_lock "$lock_dir" "$owner_nonce"
     trap - EXIT
     return 0
-  elif (( $? == 41 )); then
-    record_proxy_recovery "proxy authentication failed after startup lock acquisition"
+  elif (( $? == 41 )) && ! managed_proxy_is_current; then
+    record_proxy_recovery "unmanaged proxy authentication failed after startup lock acquisition"
     release_proxy_lock "$lock_dir" "$owner_nonce"
     trap - EXIT
     return 1
@@ -713,7 +805,16 @@ ensure_proxy() {
       nohup "$proxy_bin" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
     fi
     proxy_pid=$!
-    write_managed_proxy_pid "$proxy_pid"
+    if ! write_managed_proxy_pid "$proxy_pid"; then
+      kill -TERM "$proxy_pid" 2>/dev/null || true
+      sleep 0.1
+      kill -KILL "$proxy_pid" 2>/dev/null || true
+      wait "$proxy_pid" 2>/dev/null || true
+      record_proxy_recovery "new proxy exited before managed PID metadata was established"
+      release_proxy_lock "$lock_dir" "$owner_nonce"
+      trap - EXIT
+      return 1
+    fi
   fi
 
   startup_deadline=$(( SECONDS + 10 ))
@@ -723,14 +824,21 @@ ensure_proxy() {
       trap - EXIT
       return 0
     elif (( $? == 41 )); then
-      record_proxy_recovery "new proxy rejected the configured authentication token"
-      release_proxy_lock "$lock_dir" "$owner_nonce"
-      trap - EXIT
-      return 1
+      startup_auth_failures=$(( startup_auth_failures + 1 ))
+      if (( startup_auth_failures >= 5 )); then
+        record_proxy_recovery "new proxy repeatedly rejected the configured authentication token"
+        [[ -z "${proxy_pid:-}" ]] || stop_unhealthy_managed_proxy
+        release_proxy_lock "$lock_dir" "$owner_nonce"
+        trap - EXIT
+        return 1
+      fi
+    else
+      startup_auth_failures=0
     fi
     sleep 0.1
   done
   record_proxy_recovery "proxy did not become semantically healthy within 10s"
+  [[ -z "${proxy_pid:-}" ]] || stop_unhealthy_managed_proxy
   release_proxy_lock "$lock_dir" "$owner_nonce"
   trap - EXIT
 
@@ -1262,6 +1370,45 @@ fi
 
 load_claude_capabilities
 
+emit_skill_bridge_warnings() {
+  local bridge_json="$1" warning_lines warning_count warning_digest
+  local run_dir="$claudex_config_dir/run" state_file
+  local now last_time=0 last_digest="" temporary=""
+  state_file="$run_dir/skill-warning-state"
+  warning_lines=$(printf '%s\n' "$bridge_json" | jq -r '
+    [.warnings[]?
+      | select(type == "string" and length > 0)
+      | gsub("[[:cntrl:]]+"; " ")
+      | gsub("  +"; " ")
+      | gsub("^ +| +$"; "")
+      | select(length > 0)]
+    | unique[]
+  ')
+  [[ -n "$warning_lines" ]] || return 0
+  warning_count=$(printf '%s\n' "$warning_lines" | awk 'END { print NR }')
+  warning_digest=$(printf '%s\n' "$warning_lines" | cksum | awk '{print $1 ":" $2}')
+  now=$(date +%s)
+  if [[ -r "$state_file" ]]; then
+    read -r last_time last_digest < "$state_file" || { last_time=0; last_digest=""; }
+  fi
+  if [[ "$last_time" =~ ^[0-9]+$ ]] && (( last_time <= now && now - last_time < 300 )) \
+      && [[ "$last_digest" == "$warning_digest" ]]; then
+    return 0
+  fi
+  printf '%s\n' "$warning_lines" | sed -n '1,5{s/^/claudex: skill bridge warning: /;p;}' >&2
+  if (( warning_count > 5 )); then
+    printf 'claudex: skill bridge warning: %s additional unique warnings omitted.\n' "$(( warning_count - 5 ))" >&2
+  fi
+  if mkdir -p "$run_dir" 2>/dev/null; then
+    temporary=$(mktemp "$run_dir/.skill-warning-state.XXXXXX" 2>/dev/null || true)
+    if [[ -n "$temporary" ]]; then
+      (umask 077; printf '%s %s\n' "$now" "$warning_digest" > "$temporary")
+      chmod 600 "$temporary" 2>/dev/null || true
+      mv -f "$temporary" "$state_file" 2>/dev/null || rm -f "$temporary"
+    fi
+  fi
+}
+
 skill_bridge_add_dirs=()
 skill_bridge_plugin_dirs=()
 if (( inject_skills )) && [[ "$CLAUDEX_SKILL_BRIDGE" == on ]]; then
@@ -1271,6 +1418,16 @@ if (( inject_skills )) && [[ "$CLAUDEX_SKILL_BRIDGE" == on ]]; then
     printf '%s\n' 'claudex: skill discovery failed; run `claudex skills` for details.' >&2
     exit 1
   }
+  if ! printf '%s\n' "$skill_bridge_json" | jq -e '
+      type == "object"
+      and ((.addDirs // []) | type == "array")
+      and ((.pluginDirs // []) | type == "array")
+      and ((.warnings // []) | type == "array")
+    ' >/dev/null 2>&1; then
+    printf '%s\n' 'claudex: skill discovery returned an invalid response; run `claudex skills` for details.' >&2
+    exit 1
+  fi
+  emit_skill_bridge_warnings "$skill_bridge_json"
   while IFS= read -r skill_directory; do
     [[ -z "$skill_directory" ]] || skill_bridge_add_dirs+=("$skill_directory")
   done < <(printf '%s\n' "$skill_bridge_json" | jq -r '.addDirs[]?')
@@ -1326,17 +1483,21 @@ if (( use_proxy )); then
 # Map one Claude Code selector alias onto each GPT-5.6 model. Registering the
 # same model through Fable, Opus, and the custom slot creates duplicate rows.
   export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.6-sol"
+  export ANTHROPIC_DEFAULT_FABLE_MODEL="gpt-5.6-sol"
   export ANTHROPIC_DEFAULT_SONNET_MODEL="gpt-5.6-terra"
   export ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-5.6-luna"
   export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="GPT-5.6 Sol"
+  export ANTHROPIC_DEFAULT_FABLE_MODEL_NAME="GPT-5.6 Sol"
   export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="GPT-5.6 Terra"
   export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="GPT-5.6 Luna"
   export ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION="Frontier capability for planning and the hardest engineering work"
+  export ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION="Frontier capability for planning and the hardest engineering work"
   export ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION="Balanced intelligence, speed, and cost for everyday coding"
   export ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION="Fast, efficient model for search, triage, and mechanical tasks"
 
   readonly gpt56_capabilities="effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
   export ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
+  export ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
   export ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
   export ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
 

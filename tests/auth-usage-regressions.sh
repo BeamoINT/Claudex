@@ -16,6 +16,26 @@ cat > "$tmp/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == login && "${2:-}" == status ]]; then exit "${FAKE_CODEX_STATUS:-0}"; fi
 if [[ "${1:-}" == logout ]]; then exit "${FAKE_CODEX_LOGOUT:-0}"; fi
+if [[ "${1:-}" == app-server ]]; then
+  if [[ "${FAKE_APP_SERVER_MODE:-}" == deadline ]]; then
+    IFS= read -r _
+    sleep 0.7
+    printf '%s\n' '{"id":1,"result":{"ready":true}}'
+    IFS= read -r _
+    IFS= read -r _
+    sleep 0.7
+    printf '%s\n' '{"id":2,"result":{"rateLimits":{"planType":"pro","primary":{"usedPercent":10,"windowDurationMins":10080}},"rateLimitsByLimitId":{}}}'
+    exit
+  fi
+  sleep 30 & child=$!
+  [[ -z "${FAKE_APP_SERVER_CHILD_FILE:-}" ]] || printf '%s\n' "$child" > "$FAKE_APP_SERVER_CHILD_FILE"
+  if [[ "${FAKE_APP_SERVER_MODE:-}" == noisy ]]; then
+    while :; do printf '%065536d' 0 >&2; done &
+  fi
+  while IFS= read -r _; do :; done
+  wait
+  exit
+fi
 exit 2
 EOF
 chmod +x "$tmp/bin/codex"
@@ -58,6 +78,24 @@ jq -e '.account_id == "account-b"' "$CLAUDEX_CODEX_AUTH_DIR/codex-claudex-manage
 kill "$parent_pid" 2>/dev/null || true
 wait "$parent_pid" 2>/dev/null || true
 wait "$watcher_pid"
+
+# Failed publication must not strand a secret-bearing credential temporary.
+cat > "$tmp/bin/mv" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${FAKE_CREDENTIAL_MOVE_FAIL:-0}" == 1 && "$*" == *'.codex-session.tmp.'* ]]; then exit 1; fi
+exec /bin/mv "$@"
+EOF
+chmod +x "$tmp/bin/mv"
+write_source_auth account-b access-new
+if FAKE_CREDENTIAL_MOVE_FAIL=1 "$root/codex-session" sync >/dev/null 2>&1; then
+  printf '%s\n' 'failed credential publication unexpectedly succeeded' >&2
+  exit 1
+fi
+if find "$CLAUDEX_CODEX_AUTH_DIR" -maxdepth 1 -name '.codex-session.tmp.*' -print -quit | grep . >/dev/null; then
+  printf '%s\n' 'failed credential publication leaked a secret temporary' >&2
+  exit 1
+fi
+"$root/codex-session" sync
 
 cat > "$CLAUDEX_CODEX_AUTH_DIR/codex-a.json" <<'EOF'
 {"type":"codex","access_token":"token-a","account_id":"account-a","email":"a@example.com"}
@@ -127,15 +165,63 @@ summary=$(<"$CLAUDEX_CONFIG_DIR/usage-cache/summary")
 
 # A stale-looking lock with a live owner must not be deleted by the footer.
 mkdir -p "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock"
-printf '%s\n' "$$" > "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock/owner-pid"
+printf '%s\n' "$$ live-token-123" > "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock/owner-pid"
 printf '%s\n' "$(( $(date +%s) - 121 ))" > "$CLAUDEX_CONFIG_DIR/usage-cache/last-attempt"
 printf '%s\n' '{"session_id":"lock-test","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":1}}' | \
   CLAUDE_CONFIG_DIR="$CLAUDEX_CONFIG_DIR" CLAUDEX_USAGE_LIMIT_BIN="$root/usage-limit" "$root/statusline" >/dev/null
 [[ -d "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock" ]]
-printf '%s\n' 99999999 > "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock/owner-pid"
+printf '%s\n' '99999999 dead-token-123' > "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock/owner-pid"
 "$root/usage-limit" --refresh-cache
 [[ ! -d "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock" ]]
 
+# A helper carrying an obsolete generation must never release a fresh lock.
+mkdir -p "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock"
+printf '%s\n' "$$ fresh-token-123" > "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock/owner-pid"
+"$root/usage-limit" --refresh-cache --lock-held --lock-token stale-token-123
+[[ "$(<"$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock/owner-pid")" == "$$ fresh-token-123" ]]
+rm -rf "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock"
+
+# Initialization and rate-limit retrieval share one wall-clock budget, and a
+# timed-out app-server cannot leave its descendants alive.
+"$root/usage-limit" --account auto >/dev/null
+deadline_start=$(date +%s)
+if FAKE_APP_SERVER_MODE=deadline CLAUDEX_USAGE_SOURCE=app-server CLAUDEX_USAGE_TIMEOUT_SECONDS=1 \
+    "$root/usage-limit" --refresh-cache >/dev/null 2>"$tmp/deadline.err"; then
+  printf '%s\n' 'split app-server deadlines unexpectedly succeeded' >&2
+  exit 1
+fi
+deadline_elapsed=$(( $(date +%s) - deadline_start ))
+(( deadline_elapsed <= 2 ))
+
+child_file="$tmp/appserver-child"
+if FAKE_APP_SERVER_MODE=noisy FAKE_APP_SERVER_CHILD_FILE="$child_file" \
+    CLAUDEX_USAGE_SOURCE=app-server CLAUDEX_USAGE_TIMEOUT_SECONDS=1 \
+    "$root/usage-limit" --refresh-cache >/dev/null 2>"$tmp/noisy.err"; then
+  printf '%s\n' 'non-responsive app-server unexpectedly succeeded' >&2
+  exit 1
+fi
+[[ -s "$child_file" ]]
+child_pid=$(<"$child_file")
+for _ in {1..40}; do kill -0 "$child_pid" 2>/dev/null || break; sleep 0.05; done
+if kill -0 "$child_pid" 2>/dev/null; then
+  printf '%s\n' 'timed-out app-server leaked a descendant process' >&2
+  exit 1
+fi
+
+# Context caches are bounded by both age and count.
+status_cache="$CLAUDEX_CONFIG_DIR/statusline-cache"
+mkdir -p "$status_cache"
+for index in {1..140}; do printf '%s\n' 1 > "$status_cache/session-$index"; done
+printf '%s\n' 1 > "$status_cache/expired-session"
+touch -t 202001010000 "$status_cache/expired-session"
+printf '%s\n' '{"session_id":"current-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":2}}' | \
+  CLAUDEX_USAGE_DISPLAY=off CLAUDE_CONFIG_DIR="$CLAUDEX_CONFIG_DIR" "$root/statusline" >/dev/null
+status_count=$(find "$status_cache" -maxdepth 1 -type f ! -name '.context.tmp.*' | wc -l | tr -d ' ')
+(( status_count <= 128 ))
+[[ -f "$status_cache/current-session" ]]
+[[ ! -e "$status_cache/expired-session" ]]
+
+"$root/usage-limit" --refresh-cache
 old=$(( $(date +%s) - 120 ))
 printf '%s\n' "$old" > "$CLAUDEX_CONFIG_DIR/usage-cache/last-success"
 if FAKE_CURL_FAIL=1 "$root/usage-limit" >/dev/null 2>"$tmp/stale.err"; then
@@ -148,8 +234,11 @@ grep -F 'older than the configured maximum age' "$tmp/stale.err" >/dev/null
 # assertions for its lock ownership and just-created ownerless-lock grace.
 grep -F '$ownsRefreshLock = $false' "$root/usage-limit.ps1" >/dev/null
 grep -F '$script:ownsRefreshLock = $true' "$root/usage-limit.ps1" >/dev/null
-grep -F '$currentOwner -le 0 -or $currentOwner -eq $PID' "$root/usage-limit.ps1" >/dev/null
+grep -F 'Move-RefreshLockToQuarantine' "$root/usage-limit.ps1" >/dev/null
 grep -F '$ownerlessIsStale = $lockAge -ge 2' "$root/usage-limit.ps1" >/dev/null
 grep -F '$ownerlessIsStale = $lockAge -ge 2' "$root/statusline.ps1" >/dev/null
+grep -F '[Claudex.CappedTextReader]::DrainAsync' "$root/usage-limit.ps1" >/dev/null
+grep -F 'taskkill.exe /PID' "$root/usage-limit.ps1" >/dev/null
+grep -F 'Protect-PrivatePath $bridgeAuthFile $false' "$root/codex-session.ps1" >/dev/null
 
 printf '%s\n' 'auth/usage regressions passed'

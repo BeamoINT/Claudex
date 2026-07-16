@@ -117,10 +117,13 @@ function testSensitiveFilesAndPrivateKeys() {
   const fixture = setup('sensitive-files');
   const envSkill = path.join(fixture.home, '.agents', 'skills', 'contains-env');
   const keySkill = path.join(fixture.home, '.agents', 'skills', 'contains-key');
+  const lateKeySkill = path.join(fixture.home, '.agents', 'skills', 'contains-late-key');
   createSkill(envSkill, 'contains-env');
   write(path.join(envSkill, '.env'), 'SECRET_VALUE=do-not-copy\n');
   createSkill(keySkill, 'contains-key');
   write(path.join(keySkill, 'references', 'identity.txt'), '-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n');
+  createSkill(lateKeySkill, 'contains-late-key');
+  write(path.join(lateKeySkill, 'references', 'late-identity.txt'), `${'x'.repeat(1024 * 1024 + 1)}\n-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n`);
   createSkill(path.join(fixture.home, '.agents', 'skills', 'safe-sensitive-control'), 'safe-sensitive-control');
 
   const result = invoke(fixture.environment, fixture.project);
@@ -128,9 +131,90 @@ function testSensitiveFilesAndPrivateKeys() {
   assert(names.has('safe-sensitive-control'));
   assert(!names.has('contains-env'), 'skills containing environment files must be rejected');
   assert(!names.has('contains-key'), 'skills containing private-key material must be rejected');
+  assert(!names.has('contains-late-key'), 'private-key material after the first MiB must still be rejected');
   assert(warningIncludes(result, 'skill tree contains a sensitive file: .env'));
   assert(warningIncludes(result, 'skill tree contains private-key material: references'));
   assert(!result.warnings.join('\n').includes('do-not-copy'), 'warnings must not disclose rejected secret contents');
+}
+
+function testCorruptGenerationSelfHealing() {
+  const fixture = setup('corrupt-generation');
+  createSkill(path.join(fixture.home, '.agents', 'skills', 'self-healing'), 'self-healing');
+  const first = invoke(fixture.environment, fixture.project);
+  const published = path.join(first.overlay, '.claude', 'skills', 'self-healing', 'SKILL.md');
+  fs.unlinkSync(published);
+
+  const repaired = invoke(fixture.environment, fixture.project);
+  assert.strictEqual(repaired.overlay, first.overlay, 'content-addressed repair should restore the expected generation path');
+  assert(fs.existsSync(published), 'a structurally incomplete generation must be rebuilt before reuse');
+  assert(aliases(repaired).has('self-healing'));
+}
+
+function testPolicyAwareCacheAndFallback() {
+  const fixture = setup('policy-aware-cache');
+  const source = path.join(fixture.home, '.agents', 'skills', 'policy-cache');
+  const asset = path.join(source, 'asset.txt');
+  createSkill(source, 'policy-cache');
+  write(asset, 'policy version one\n');
+  const enabled = invoke({ ...fixture.environment, CLAUDEX_SKILL_PLUGINS: 'on' }, fixture.project);
+  const disabled = invoke({ ...fixture.environment, CLAUDEX_SKILL_PLUGINS: 'off' }, fixture.project);
+  assert.notStrictEqual(disabled.overlay, enabled.overlay,
+    'generations with different bridge policy fingerprints must not share a manifest');
+  const disabledManifest = JSON.parse(fs.readFileSync(path.join(disabled.overlay, 'manifest.json'), 'utf8'));
+  const pointers = fs.readdirSync(path.join(fixture.config, 'skill-bridge', 'generations'))
+    .filter((entry) => entry.startsWith('.latest-'));
+  const disabledPointer = pointers.map((entry) => ({
+    entry,
+    value: JSON.parse(fs.readFileSync(path.join(fixture.config, 'skill-bridge', 'generations', entry), 'utf8')),
+  })).find(({ value }) => value.generation === path.basename(disabled.overlay));
+  assert(disabledPointer && disabledPointer.entry.includes(disabledManifest.policyFingerprint));
+
+  write(asset, 'publication should fail under disabled plugin policy\n');
+  const fallback = invoke({
+    ...fixture.environment,
+    CLAUDEX_SKILL_PLUGINS: 'off',
+    NODE_ENV: 'test',
+    CLAUDEX_TEST_FAIL_SKILL_PUBLICATION: '1',
+  }, fixture.project);
+  assert.strictEqual(fallback.overlay, disabled.overlay, 'policy-matched LKG must survive a failed refresh');
+  assert(warningIncludes(fallback, 'Skill refresh failed; using the last known good snapshot'));
+}
+
+function testFreshWarningsOnCacheHits() {
+  const fixture = setup('fresh-cache-warnings');
+  createSkill(path.join(fixture.home, '.agents', 'skills', 'warning-control'), 'warning-control');
+  write(fixture.inventory, '[]\n');
+  const clean = invoke(fixture.environment, fixture.project);
+  assert.strictEqual(clean.warnings.length, 0);
+
+  write(fixture.inventory, '[null]\n');
+  const malformed = invoke(fixture.environment, fixture.project);
+  assert.strictEqual(malformed.overlay, clean.overlay, 'diagnostic-only changes should reuse immutable content');
+  assert(warningIncludes(malformed, 'Ignored malformed Codex plugin record'));
+
+  write(fixture.inventory, '[]\n');
+  const repaired = invoke(fixture.environment, fixture.project);
+  assert.strictEqual(repaired.overlay, clean.overlay);
+  assert(!warningIncludes(repaired, 'Ignored malformed Codex plugin record'), 'resolved discovery warnings must not persist from the manifest');
+}
+
+function testBoundedGenerationAndStageRetention() {
+  const fixture = setup('bounded-retention');
+  const source = path.join(fixture.home, '.agents', 'skills', 'changing');
+  for (let revision = 0; revision < 12; revision++) {
+    createSkill(source, 'changing', `revision ${revision}`);
+    invoke(fixture.environment, fixture.project);
+  }
+  const generations = path.join(fixture.config, 'skill-bridge', 'generations');
+  const published = fs.readdirSync(generations, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'));
+  assert(published.length <= 8, `generation retention exceeded the hard cap: ${published.length}`);
+
+  for (let index = 0; index < 12; index++) fs.mkdirSync(path.join(generations, `.stage-fixture-${index}`));
+  invoke(fixture.environment, fixture.project);
+  const stages = fs.readdirSync(generations, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('.stage-'));
+  assert(stages.length <= 8, `stage retention exceeded the hard cap: ${stages.length}`);
 }
 
 function testSpecialFileHandling() {
@@ -274,6 +358,10 @@ try {
   testSpecialFileHandling();
   testMalformedPluginInventories();
   testImmutableSnapshotsAndFullTreeFingerprint();
+  testCorruptGenerationSelfHealing();
+  testPolicyAwareCacheAndFallback();
+  testFreshWarningsOnCacheHits();
+  testBoundedGenerationAndStageRetention();
   testNativeConfigCollisionReservation();
   testNativePluginNamespaceReservation();
   testLastKnownGoodFallback();

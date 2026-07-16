@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { constants as osConstants, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {
+  acquireSetupLock as acquireGenerationLock,
+  releaseSetupLock as releaseGenerationLock,
+} from './package-setup-lock.mjs';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
@@ -15,6 +19,7 @@ const home = isWindows ? process.env.USERPROFILE || homedir() : process.env.HOME
 const configDir = process.env.CLAUDEX_CONFIG_DIR || join(home, '.config', 'claudex');
 const markerPath = join(configDir, 'package-manager.json');
 const setupLockPath = join(configDir, 'package-setup.lock');
+const setupResultPath = join(configDir, 'package-setup-result.json');
 const envPath = join(configDir, 'env');
 
 // A package manager owns the public `claudex` shim. Keep the managed launcher
@@ -70,80 +75,84 @@ function writeMarker() {
   renameSync(temporary, markerPath);
 }
 
-const setupWait = new Int32Array(new SharedArrayBuffer(4));
-function sleep(milliseconds) {
-  Atomics.wait(setupWait, 0, 0, milliseconds);
-}
-
-function processIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+function readSetupResult() {
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === 'EPERM';
-  }
-}
-
-function readSetupOwner() {
-  try {
-    return JSON.parse(readFileSync(join(setupLockPath, 'owner.json'), 'utf8'));
+    const result = JSON.parse(readFileSync(setupResultPath, 'utf8'));
+    return result && typeof result === 'object' ? result : null;
   } catch {
     return null;
   }
 }
 
-function acquireSetupLock(force) {
-  mkdirSync(configDir, { recursive: true, mode: 0o700 });
-  const deadline = Date.now() + 120_000;
-  while (Date.now() < deadline) {
-    try {
-      mkdirSync(setupLockPath, { mode: 0o700 });
-      writeFileSync(
-        join(setupLockPath, 'owner.json'),
-        `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`,
-        { mode: 0o600 },
-      );
-      return true;
-    } catch (error) {
-      if (error?.code !== 'EEXIST') throw error;
-    }
-
-    const owner = readSetupOwner();
-    let age = 0;
-    try { age = Date.now() - statSync(setupLockPath).mtimeMs; } catch { continue; }
-    // A setup process can die immediately after mkdir, before owner.json is
-    // durable. Give that handoff a short grace, then recover a lock that has no
-    // live owner instead of making every future launch wait the full 2 minutes.
-    if (age >= 2_000 && !processIsAlive(Number(owner?.pid))) {
-      const quarantine = `${setupLockPath}.stale.${process.pid}.${Date.now()}`;
-      try {
-        renameSync(setupLockPath, quarantine);
-        rmSync(quarantine, { recursive: true, force: true });
-        continue;
-      } catch {
-        // Another waiter changed the observed lock. Re-read it on the next pass.
-      }
-    }
-    if (!force && !needsSetup()) return false;
-    sleep(100);
+function readActiveSetupGeneration() {
+  try {
+    const owner = JSON.parse(readFileSync(join(setupLockPath, 'owner.json'), 'utf8'));
+    return typeof owner?.generation === 'string' ? owner.generation : null;
+  } catch {
+    return null;
   }
-  fail('timed out waiting for another package setup; retry or run claudex --package-setup');
 }
 
-function releaseSetupLock() {
-  const owner = readSetupOwner();
-  if (Number(owner?.pid) === process.pid) rmSync(setupLockPath, { recursive: true, force: true });
+function writeSetupResult(generation, status) {
+  const temporary = `${setupResultPath}.tmp.${process.pid}.${generation}`;
+  const result = {
+    package: packageName,
+    version,
+    method: installMethod,
+    generation,
+    status,
+    finishedAt: new Date().toISOString(),
+  };
+  writeFileSync(temporary, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
+  if (!isWindows) chmodSync(temporary, 0o600);
+  renameSync(temporary, setupResultPath);
+}
+
+function isFailureForWave(result, baseline, joinedGeneration) {
+  return (
+    result?.package === packageName &&
+    result?.version === version &&
+    result?.method === installMethod &&
+    typeof result.generation === 'string' &&
+    Number.isInteger(result.status) &&
+    result.status !== 0 &&
+    (result.generation !== baseline?.generation || result.generation === joinedGeneration)
+  );
+}
+
+function acquireSetupLock(force) {
+  mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  const generation = acquireGenerationLock(setupLockPath, {
+    shouldContinue: () => force || needsSetup(),
+  });
+  if (!generation && (force || needsSetup())) {
+    fail('timed out waiting for another package setup; retry or run claudex --package-setup');
+  }
+  return generation;
 }
 
 function ensurePackageSetup(login, force = false) {
-  const acquired = acquireSetupLock(force);
-  if (!acquired) return;
+  // Every caller records the last completed attempt before it joins the lock
+  // queue. If that generation changes to a failure while it waits, this caller
+  // belongs to the same failure wave and must propagate the result instead of
+  // serially rerunning the installer.
+  const baselineResult = readSetupResult();
+  const joinedGeneration = readActiveSetupGeneration();
+  const generation = acquireSetupLock(force);
+  if (!generation) return;
+  let status = 0;
   try {
-    if (force || needsSetup()) runInstaller(login);
+    const completedWhileWaiting = readSetupResult();
+    if (isFailureForWave(completedWhileWaiting, baselineResult, joinedGeneration)) {
+      status = completedWhileWaiting.status;
+    } else if (force || needsSetup()) {
+      status = runInstaller(login);
+      writeSetupResult(generation, status);
+    }
   } finally {
-    releaseSetupLock();
+    releaseGenerationLock(setupLockPath, generation);
   }
+  if (status !== 0) process.exit(status);
 }
 
 function run(command, args, env = process.env) {
@@ -185,8 +194,9 @@ function runInstaller(login) {
     if (login) args.push('--login');
     status = run('bash', args, installerEnvironment);
   }
-  if (status !== 0) process.exit(status);
+  if (status !== 0) return status;
   writeMarker();
+  return 0;
 }
 
 function needsSetup() {

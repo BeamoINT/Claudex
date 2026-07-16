@@ -107,7 +107,8 @@ try {
   for (const expected of ['claude-alpha', 'codex-alpha', 'old-command', 'root-skill', 'nested-skill', 'legacy-codex', 'claude-plugin:plugin-skill', 'codex-plugin:plugin-task']) {
     assert(aliases.has(expected), `missing bridged alias ${expected}`);
   }
-  assert(aliases.has('alpha'), 'Claude personal skill must retain its documented precedence and unqualified alias');
+  assert(!aliases.has('alpha'), 'an imported personal skill must not claim a native project skill short alias through --add-dir');
+  assert(aliases.has('claude-alpha'), 'a personal/project collision must keep a deterministic imported alias');
   assert(!aliases.has('disabled'), 'disabled Codex skill must stay disabled');
   assert(!aliases.has('outside-repo'), 'project discovery must stop at repository root');
 

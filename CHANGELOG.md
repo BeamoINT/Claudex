@@ -5,6 +5,48 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-07-16
+
+### Added
+
+- Added transactional, retrying source installers with automatic Node.js 22,
+  Claude Code, and Codex CLI provisioning, explicit Codex browser login, safe
+  crash recovery, and rollback on interrupted upgrades across Unix and Windows.
+- Added deterministic, type-safe release archives, an immutable draft-first
+  publication workflow, full cross-platform tag gates, and automatic live
+  website-installer verification after every successful release.
+- Added generation-fenced package bootstrap locking so simultaneous first runs
+  share one verified result without stale-lock takeovers or retry storms.
+
+### Changed
+
+- Made auto mode honor explicit, scoped user authorization after a soft policy
+  denial, ask fewer questions, stay in execution mode for routine work, and
+  keep all leader, classifier, and subagent paths on Codex/OpenAI models.
+- Hardened Claude Code and Codex skill compatibility with complete-file secret
+  screening, policy-bound last-known-good generations, structural self-heal,
+  collision-safe aliases, bounded garbage collection, and fresh diagnostics.
+- Added `Fable` model remapping and consistent `Terra (high)` / `Luna (medium)`
+  activity labels on both Bash and PowerShell launchers.
+- Restricted remote proxy use to explicit HTTPS opt-in while preserving
+  automatic recovery for Claudex's managed local proxy.
+
+### Fixed
+
+- Fixed intermittent `ConnectionRefused` and repeated API warning loops by
+  recovering stale local authentication once, cleaning failed proxy children,
+  and avoiding unsafe retries against user-managed or remote proxies.
+- Fixed Codex usage refresh hangs, orphaned app-server processes, unbounded
+  output drains, refresh-lock races, stale cache buildup, and noisy `/dev/tty`
+  errors; plan labels and cached usage now degrade cleanly under failure.
+- Fixed split terminal writes that could leave `API Usage Billing`, `/opus 1m`,
+  duplicated status lines, or broken bottom-of-screen UI visible.
+- Fixed launch from a deleted working directory, ignored `CLAUDEX_NODE_BIN`,
+  shell metacharacter handling on Windows, and self-update shell edge cases.
+- Fixed package setup failure propagation, accidental npm publication risk,
+  generated-release documentation scanning, and inaccurate WinGet availability
+  claims.
+
 ## [1.5.0] - 2026-07-16
 
 ### Added
@@ -67,8 +109,9 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 - Discontinued the unpublished `claudex-codex` npm distribution: the npm
   publish workflow, the npm self-update path, and every npm install
-  instruction. Homebrew, Scoop, WinGet, and the verified source installers
-  are the supported channels.
+  instruction. Homebrew, Scoop, and the verified source installers are the
+  supported channels; WinGet remains unavailable until its community manifest
+  passes validation and review.
 
 ## [1.4.2] - 2026-07-15
 

@@ -91,20 +91,31 @@ Maintainers release from a clean `main` branch after the post-merge matrix
 passes:
 
 1. update `CHANGELOG.md` and move Unreleased entries into a SemVer version;
-2. run local tests and confirm hosted CI;
+2. run local tests and confirm hosted CI on `main`;
 3. create an annotated `vMAJOR.MINOR.PATCH` tag on the verified main commit;
-4. push the tag;
-5. build both release archives and `SHA256SUMS`, and verify the tag version,
-   archive roots, file types, and hashes before exposing the release as latest;
-6. publish a GitHub Release with installation notes and user-visible changes;
-7. verify the release archive, checksum asset, and latest-release link.
+4. push the tag, which invokes the reusable full macOS, Linux, legacy-Linux,
+   Windows, and package-artifact matrix against that exact tag;
+5. after the matrix passes, let the release workflow build both archives and
+   `SHA256SUMS` reproducibly from the explicit payload allowlist, rejecting
+   non-regular source files and ignoring unlisted files under `bin/`, `docs/`,
+   and `skills/`;
+6. let the workflow create a private draft, attach and re-download the exact
+   three verified assets, and only then publish it and mark it latest;
+7. verify the latest-release link and the automatically triggered live website
+   installer matrix.
+
+A failed test, build, or upload leaves no public release. An interrupted upload
+may leave a private draft; manually dispatch `release-assets.yml` with the same
+annotated tag to resume it. A retry accepts only missing assets or existing
+assets with identical SHA-256 digests. It refuses unexpected or mismatched
+draft assets and never changes an already-published release.
 
 For a package-manager release, also:
 
 1. keep `package.json` and `CHANGELOG.md` on the same version;
-2. verify `npm test` and `./scripts/build-release.sh`;
-3. wait for the release-assets workflow to attach both archives and
-   `SHA256SUMS`;
+2. verify `npm test` and `./scripts/check-release-artifacts.sh`;
+3. wait for the release-assets workflow to publish both archives and
+   `SHA256SUMS` from the verified tag;
 4. update and test the BeamoINT Homebrew tap and Scoop bucket with the exact
    release-asset hashes;
 5. submit the matching WinGet manifest and link its external review.
@@ -112,6 +123,9 @@ For a package-manager release, also:
 Publish only archives built from the verified release tag. Do not publish
 credentials, installed state, or the downloaded CLIProxyAPI binary from a local
 machine; CLIProxyAPI remains a verified install-time dependency.
+When adding a release-time runtime or support file, add its exact path to the
+payload in `scripts/build-release.sh` and extend the required-content checks
+when installation depends on it.
 
 ## Review checklist
 

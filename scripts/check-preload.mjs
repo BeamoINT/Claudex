@@ -13,6 +13,7 @@ for (const name of ['CLAUDEX_INTERACTIVE_TUI', 'CLAUDEX_CHATGPT_PLAN_LABEL', 'CL
 const {
   chatGptPlanLabel,
   createInputRewriter,
+  createWelcomePlanStreamFilter,
   filterClaudexOutput,
   replaceWelcomeBillingColumns,
 } = require(preloadPath);
@@ -24,6 +25,11 @@ function asBuffer(value) {
 function rewriteChunks(chunks) {
   const rewriter = createInputRewriter();
   return Buffer.concat(chunks.map((chunk) => asBuffer(rewriter.rewrite(chunk))));
+}
+
+function filterWelcomeChunks(chunks, label = 'ChatGPT Pro') {
+  const filter = createWelcomePlanStreamFilter(label);
+  return Buffer.concat(chunks.map((chunk) => asBuffer(filter(chunk).output)));
 }
 
 function chunksAtEveryByte(input) {
@@ -182,6 +188,55 @@ assert.deepEqual(
   { output: '\x1b[43GChatGPT Pro      |\x1b[43GAPI\x1b[47GUsage\x1b[53GBilling', replaced: true },
 );
 
+// Claude Code may split a fullscreen render across stdout.write calls. The
+// welcome detector must recognize every boundary without buffering, decoding,
+// or reordering the already-written terminal stream. A same-write field is
+// replaced directly; a split field is corrected with one absolute-positioned
+// overwrite after its final byte, leaving the cursor at the native end column.
+const welcomePrelude = Buffer.from('\x1b[?1049h\x1b]0;✳ Claude Code\x07prefix');
+const positionedBillingField = Buffer.from('\x1b[43GAPI\x1b[47GUsage\x1b[53GBilling');
+const positionedPlanField = Buffer.from('\x1b[43GChatGPT Pro      ');
+for (let split = 0; split <= positionedBillingField.length; split += 1) {
+  const output = filterWelcomeChunks([
+    welcomePrelude,
+    positionedBillingField.subarray(0, split),
+    positionedBillingField.subarray(split),
+  ]);
+  const expectedField = split === 0 || split === positionedBillingField.length
+    ? positionedPlanField
+    : Buffer.concat([positionedBillingField, positionedPlanField]);
+  assert.deepEqual(output, Buffer.concat([welcomePrelude, expectedField]), `welcome field split at byte ${split}`);
+}
+
+for (let split = 0; split <= welcomePrelude.length; split += 1) {
+  const output = filterWelcomeChunks([
+    welcomePrelude.subarray(0, split),
+    welcomePrelude.subarray(split),
+    positionedBillingField,
+  ]);
+  assert.deepEqual(output, Buffer.concat([welcomePrelude, positionedPlanField]), `welcome markers split at byte ${split}`);
+}
+
+assert.deepEqual(
+  filterWelcomeChunks([...welcomePrelude, ...positionedBillingField].map((byte) => Buffer.from([byte]))),
+  Buffer.concat([welcomePrelude, positionedBillingField, positionedPlanField]),
+  'byte-at-a-time welcome render receives one final positioned overwrite',
+);
+assert.deepEqual(
+  filterWelcomeChunks([
+    welcomePrelude,
+    Buffer.from('\x1b[43GAPI\x1b[999GUs'),
+    Buffer.from('age\x1b[53GBilling'),
+  ]),
+  Buffer.concat([welcomePrelude, Buffer.from('\x1b[43GAPI\x1b[999GUsage\x1b[53GBilling')]),
+  'split text with invalid native column relationships is untouched',
+);
+assert.deepEqual(
+  filterWelcomeChunks([welcomePrelude, Buffer.from('· API Usage Bil'), Buffer.from('ling')]),
+  Buffer.concat([welcomePrelude, Buffer.from('· API Usage Billing')]),
+  'unpositioned billing prose is never rewritten by the stream filter',
+);
+
 // Interactive startup filtering is intentionally one-shot: it rewrites only
 // the positioned billing field, preserves native write return/callback
 // behavior, then restores stdout before later fullscreen frames.
@@ -212,6 +267,48 @@ assert.equal(welcomeProbe.stdout, '\x1b[?1049h\x1b]0;✳ Claude Code\x07prefix\x
 assert.deepEqual(
   JSON.parse(welcomeProbe.stderr),
   { wrappedBefore: true, restored: true, returned: true, callbackOrder: ['welcome', 'followup'] },
+);
+
+const splitWelcomeProbe = spawnSync(process.execPath, ['-e', `
+  const nativeWrite = process.stdout.write;
+  require(${JSON.stringify(preloadPath)});
+  const callbackOrder = [];
+  process.stdout.write(Buffer.from('\\x1b[?1049h\\x1b]0;✳ Claude Code\\x07prefix'));
+  const cachedWrite = process.stdout.write;
+  const firstReturned = cachedWrite.call(process.stdout, Buffer.from('\\x1b[43GAPI\\x1b[47GUs'), () => callbackOrder.push('first'));
+  const secondReturned = cachedWrite.call(process.stdout, Buffer.from('age\\x1b[53GBilling'), () => callbackOrder.push('second'));
+  process.stdout.write('native-followup', () => {
+    callbackOrder.push('followup');
+    process.stderr.write(JSON.stringify({
+      restored: process.stdout.write === nativeWrite,
+      firstReturned,
+      secondReturned,
+      callbackOrder,
+    }));
+  });
+`], {
+  encoding: 'utf8',
+  env: {
+    ...process.env,
+    CLAUDEX_INTERACTIVE_TUI: '1',
+    CLAUDEX_CHATGPT_PLAN_LABEL: 'ChatGPT Pro',
+    CLAUDEX_TEST_WELCOME_FILTER: '1',
+  },
+});
+assert.equal(splitWelcomeProbe.status, 0, splitWelcomeProbe.stderr);
+assert.equal(
+  splitWelcomeProbe.stdout,
+  '\x1b[?1049h\x1b]0;✳ Claude Code\x07prefix\x1b[43GAPI\x1b[47GUsage\x1b[53GBilling\x1b[43GChatGPT Pro      native-followup',
+);
+assert.deepEqual(
+  JSON.parse(splitWelcomeProbe.stderr),
+  {
+    restored: true,
+    firstReturned: true,
+    secondReturned: true,
+    callbackOrder: ['first', 'second', 'followup'],
+  },
+  'installed split-write filter preserves native callback and return-value behavior',
 );
 
 assert.equal(createInputRewriter().rewrite('/model solplan \r'), '/model opusplan\r');

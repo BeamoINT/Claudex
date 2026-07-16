@@ -44,7 +44,10 @@ for (const file of [
 function collectMarkdown(directory) {
   const files = [];
   for (const entry of readdirSync(directory)) {
-    if (entry === '.git' || entry === 'node_modules') continue;
+    // dist/ is a generated release staging tree. It can coexist with a source
+    // checkout after artifact verification and must not be treated as another
+    // repository root when resolving relative documentation links.
+    if (entry === '.git' || entry === 'node_modules' || (directory === root && entry === 'dist')) continue;
     const path = join(directory, entry);
     if (statSync(path).isDirectory()) files.push(...collectMarkdown(path));
     else if (entry.endsWith('.md')) files.push(path);

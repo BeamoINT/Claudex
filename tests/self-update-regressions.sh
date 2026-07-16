@@ -136,6 +136,29 @@ if "$root/self-update" --apply >"$temporary/missing-bridge.stdout" 2>"$temporary
 fi
 grep -F 'release archive is missing its skill bridge' "$temporary/missing-bridge.stderr" >/dev/null
 
+# Every shipped shell entrypoint is syntax-checked as its own script. Passing
+# additional paths to one `bash -n` invocation only treats them as arguments
+# and previously allowed a broken launcher to be installed.
+rm -rf "$temporary/archive-source"
+mkdir -p "$temporary/archive-source/claudex-1.3.2"
+printf '%s\n' '{"version":"1.3.2"}' > "$temporary/archive-source/claudex-1.3.2/package.json"
+for script in bootstrap.sh install.sh codex-session self-update statusline usage-limit; do
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$temporary/archive-source/claudex-1.3.2/$script"
+done
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$temporary/archive-source/claudex-1.3.2/install.zsh"
+printf '%s\n' '#!/usr/bin/env bash' 'if then' > "$temporary/archive-source/claudex-1.3.2/claudex"
+printf '%s\n' "'use strict';" > "$temporary/archive-source/claudex-1.3.2/skill-bridge.cjs"
+chmod +x "$temporary/archive-source/claudex-1.3.2/"{bootstrap.sh,install.sh,install.zsh,claudex,codex-session,self-update,statusline,usage-limit}
+tar -czf "$fixtures/release.tar.gz" -C "$temporary/archive-source" claudex-1.3.2
+if command -v sha256sum >/dev/null 2>&1; then digest=$(sha256sum "$fixtures/release.tar.gz" | awk '{print $1}')
+else digest=$(shasum -a 256 "$fixtures/release.tar.gz" | awk '{print $1}'); fi
+printf '%s  %s\n' "$digest" 'claudex-1.3.2.tar.gz' > "$fixtures/SHA256SUMS"
+if "$root/self-update" --apply >"$temporary/syntax.stdout" 2>"$temporary/syntax.stderr"; then
+  printf '%s\n' 'expected a syntax-broken launcher to be rejected' >&2
+  exit 1
+fi
+grep -F 'release shell entrypoint failed validation: claudex' "$temporary/syntax.stderr" >/dev/null
+
 # A failed archive installer restores every prior managed file and removes any
 # managed file that did not exist before the attempt.
 rm -rf "$temporary/archive-source"
@@ -161,12 +184,21 @@ cat > "$temporary/archive-source/claudex-1.3.2/self-update" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
+for script in bootstrap.sh codex-session statusline usage-limit; do
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$temporary/archive-source/claudex-1.3.2/$script"
+done
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$temporary/archive-source/claudex-1.3.2/install.zsh"
 cat > "$temporary/archive-source/claudex-1.3.2/skill-bridge.cjs" <<'EOF'
 'use strict';
 EOF
 chmod +x "$temporary/archive-source/claudex-1.3.2/install.sh" \
   "$temporary/archive-source/claudex-1.3.2/claudex" \
-  "$temporary/archive-source/claudex-1.3.2/self-update"
+  "$temporary/archive-source/claudex-1.3.2/self-update" \
+  "$temporary/archive-source/claudex-1.3.2/bootstrap.sh" \
+  "$temporary/archive-source/claudex-1.3.2/codex-session" \
+  "$temporary/archive-source/claudex-1.3.2/statusline" \
+  "$temporary/archive-source/claudex-1.3.2/usage-limit" \
+  "$temporary/archive-source/claudex-1.3.2/install.zsh"
 tar -czf "$fixtures/release.tar.gz" -C "$temporary/archive-source" claudex-1.3.2
 if command -v sha256sum >/dev/null 2>&1; then digest=$(sha256sum "$fixtures/release.tar.gz" | awk '{print $1}')
 else digest=$(shasum -a 256 "$fixtures/release.tar.gz" | awk '{print $1}'); fi

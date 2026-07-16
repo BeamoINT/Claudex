@@ -65,15 +65,18 @@ For Claude skills, the source directory is the default identity. For Codex
 skills, the required frontmatter `name` is the identity. When imported sources
 collide, the highest-priority imported source keeps the short alias and every
 source also receives a deterministic qualified alias such as `/claude-name`,
-`/codex-name`, or `/codex-legacy-name`. A normal Claude personal skill retains
-Claude Code's documented precedence over a project skill and keeps the short
-alias. A Claudex-managed isolated-profile skill keeps its own short alias;
-imported conflicts receive only qualified aliases. Plugin namespaces remain
-separate. `claudex skills` shows the resolved mapping rather than silently
-dropping either skill.
+`/codex-name`, or `/codex-legacy-name`. Claude Code classifies compatibility
+views supplied through `--add-dir` as additional-directory skills rather than
+personal-profile skills. A native project or Claudex-managed isolated-profile
+skill therefore keeps its short alias; an imported personal conflict receives
+only a qualified alias instead of claiming personal-scope precedence it does
+not have at runtime. Plugin namespaces remain separate. `claudex skills` shows
+the resolved mapping rather than silently dropping either skill.
 
-The bridge recomputes discovery on every launch and creates a bounded,
-content-addressed snapshot. Scripts, references, assets, executable bits, and
+The bridge recomputes discovery on every launch and creates a hard-bounded,
+content-addressed snapshot. The newest eight generations per project are kept,
+with a global emergency cap, and abandoned staging directories are age- and
+count-bounded. Scripts, references, assets, executable bits, and
 metadata all participate in the fingerprint, so an active session cannot
 change underneath the user. Source trees are never linked into the runtime
 view. Escaping symlinks, special files, private keys, credential files, and
@@ -81,6 +84,9 @@ unreasonably large trees are rejected without blocking other skills. Codex
 user and project `[[skills.config]]` entries with `enabled = false`, Claude
 `skillOverrides` states (`on`, `name-only`, `user-invocable-only`, and `off`),
 `defaultEnabled`, disabled plugins, and project plugin scope are respected.
+Published generations are structurally validated before cache or last-known-
+good reuse, and policy changes receive distinct generations so fallback never
+crosses a compatibility-policy boundary.
 Existing plugin packages are never loaded wholesale: Claudex copies only their
 validated skill content into generated plugins and strips plugin manifests,
 hooks, MCP configuration, agents, settings, and nested component roots from a

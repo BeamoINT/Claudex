@@ -16,6 +16,30 @@ $usageCacheDir = Join-Path $configDir 'usage-cache'
 $usageAccountFile = Join-Path $configDir 'codex-usage-account'
 $usageGenerationFile = Join-Path $configDir 'usage-generation'
 $utf8 = New-Object Text.UTF8Encoding($false)
+$isWindowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+
+function Protect-PrivatePath([string] $Path, [bool] $Directory) {
+    if (-not $isWindowsPlatform) { return }
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $security = if ($Directory) { New-Object Security.AccessControl.DirectorySecurity } else { New-Object Security.AccessControl.FileSecurity }
+    $security.SetOwner($currentSid)
+    $security.SetAccessRuleProtection($true, $false)
+    $inheritance = if ($Directory) {
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else { [Security.AccessControl.InheritanceFlags]::None }
+    foreach ($sidValue in @($currentSid.Value, 'S-1-5-18', 'S-1-5-32-544')) {
+        $sid = New-Object Security.Principal.SecurityIdentifier($sidValue)
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void] $security.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $security
+}
 
 function Write-Failure([string] $Message) {
     [Console]::Error.WriteLine("claudex: $Message")
@@ -31,9 +55,16 @@ function Clear-AccountScopedState {
         Remove-Item -LiteralPath (Join-Path $usageCacheDir $name) -Force -ErrorAction SilentlyContinue
     }
     [IO.Directory]::CreateDirectory($configDir) | Out-Null
+    Protect-PrivatePath $configDir $true
     $generationTemporary = Join-Path $configDir ('.usage-generation-' + [guid]::NewGuid().ToString('N') + '.tmp')
-    [IO.File]::WriteAllText($generationTemporary, ([guid]::NewGuid().ToString('N') + "`n"), $utf8)
-    Move-Item -LiteralPath $generationTemporary -Destination $usageGenerationFile -Force
+    try {
+        [IO.File]::WriteAllText($generationTemporary, ([guid]::NewGuid().ToString('N') + "`n"), $utf8)
+        Protect-PrivatePath $generationTemporary $false
+        Move-Item -LiteralPath $generationTemporary -Destination $usageGenerationFile -Force
+        Protect-PrivatePath $usageGenerationFile $false
+    } finally {
+        Remove-Item -LiteralPath $generationTemporary -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-JsonProperty($Object, [string] $Name, $Default = $null) {
@@ -99,6 +130,7 @@ function Sync-Session {
     }
 
     [IO.Directory]::CreateDirectory($bridgeAuthDir) | Out-Null
+    Protect-PrivatePath $bridgeAuthDir $true
     $previousAccount = ''
     $shouldWrite = $true
     if (Test-Path -LiteralPath $bridgeAuthFile -PathType Leaf) {
@@ -132,11 +164,17 @@ function Sync-Session {
             expired = $false
         }
         $temporary = Join-Path $bridgeAuthDir ('.codex-session-' + [guid]::NewGuid().ToString('N') + '.tmp')
-        [IO.File]::WriteAllText($temporary, (($candidate | ConvertTo-Json -Compress) + "`n"), $utf8)
-        if (-not $previousAccount -or $previousAccount -ne $accountId) {
-            Clear-AccountScopedState
+        try {
+            [IO.File]::WriteAllText($temporary, (($candidate | ConvertTo-Json -Compress) + "`n"), $utf8)
+            Protect-PrivatePath $temporary $false
+            if (-not $previousAccount -or $previousAccount -ne $accountId) {
+                Clear-AccountScopedState
+            }
+            Move-Item -LiteralPath $temporary -Destination $bridgeAuthFile -Force
+            Protect-PrivatePath $bridgeAuthFile $false
+        } finally {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
         }
-        Move-Item -LiteralPath $temporary -Destination $bridgeAuthFile -Force
     }
     return 0
 }

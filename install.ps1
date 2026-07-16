@@ -8,6 +8,7 @@ $proxyVersion = '7.2.80'
 $binDir = if ($env:CLAUDEX_BIN_DIR) { $env:CLAUDEX_BIN_DIR } else { Join-Path $env:USERPROFILE '.local\bin' }
 $configDir = if ($env:CLAUDEX_CONFIG_DIR) { $env:CLAUDEX_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.config\claudex' }
 $managedBinDir = Join-Path $configDir 'bin'
+$managedNodeDir = Join-Path $configDir 'node'
 $managedProxy = Join-Path $managedBinDir "cliproxyapi-$proxyVersion.exe"
 $authDir = Join-Path $configDir 'codex-accounts'
 $envFile = Join-Path $configDir 'env'
@@ -36,10 +37,90 @@ $installLockNonce = ''
 $codexInstalledBinDir = ''
 $claudeInstalledBinDir = ''
 $packageManagedInstall = $env:CLAUDEX_PACKAGE_ROOT -or $env:CLAUDEX_INSTALL_METHOD -in @('homebrew', 'scoop', 'winget')
+$installTransaction = $null
+$userPathBeforeInstall = [Environment]::GetEnvironmentVariable('Path', 'User')
+
+if (Test-Path -LiteralPath (Join-Path $managedNodeDir 'node.exe') -PathType Leaf) {
+    $env:PATH = "$managedNodeDir$([IO.Path]::PathSeparator)$env:PATH"
+}
 
 function Fail([string] $Message) {
     [Console]::Error.WriteLine("install.ps1: $Message")
     exit 1
+}
+
+function Test-TransientDownloadFailure($ErrorRecord) {
+    $response = $ErrorRecord.Exception.Response
+    if ($null -ne $response) {
+        try {
+            $statusCode = [int] $response.StatusCode
+            return $statusCode -in @(408, 425, 429) -or $statusCode -ge 500
+        } catch { }
+    }
+    if ($ErrorRecord.Exception -is [Net.WebException]) {
+        return $ErrorRecord.Exception.Status -in @(
+            [Net.WebExceptionStatus]::ConnectFailure,
+            [Net.WebExceptionStatus]::ConnectionClosed,
+            [Net.WebExceptionStatus]::KeepAliveFailure,
+            [Net.WebExceptionStatus]::NameResolutionFailure,
+            [Net.WebExceptionStatus]::PipelineFailure,
+            [Net.WebExceptionStatus]::ProxyNameResolutionFailure,
+            [Net.WebExceptionStatus]::ReceiveFailure,
+            [Net.WebExceptionStatus]::SendFailure,
+            [Net.WebExceptionStatus]::Timeout
+        )
+    }
+    return $null -eq $response
+}
+
+function Receive-FileWithRetry([string] $Uri, [string] $Destination, [int] $TimeoutSeconds = 180) {
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination -TimeoutSec $TimeoutSeconds
+            return
+        } catch {
+            $lastError = $_
+            if ($attempt -eq 4 -or -not (Test-TransientDownloadFailure $_)) { throw }
+            Start-Sleep -Seconds ([Math]::Pow(2, $attempt - 1))
+        }
+    }
+    throw $lastError
+}
+
+function Write-TextAtomic([string] $Path, [string] $Value) {
+    $parent = Split-Path $Path -Parent
+    [IO.Directory]::CreateDirectory($parent) | Out-Null
+    $temporary = Join-Path $parent ('.' + (Split-Path $Path -Leaf) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $replacementBackup = Join-Path $parent ('.' + (Split-Path $Path -Leaf) + '.' + [guid]::NewGuid().ToString('N') + '.bak')
+    try {
+        [IO.File]::WriteAllText($temporary, $Value, $utf8)
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [IO.File]::Replace($temporary, $Path, $replacementBackup)
+        } else {
+            [IO.File]::Move($temporary, $Path)
+        }
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $replacementBackup -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function ConvertFrom-ClaudexEnvValue([string] $Value) {
+    $parsed = $Value.Trim()
+    if ($parsed.Length -ge 2 -and (($parsed.StartsWith("'") -and $parsed.EndsWith("'")) -or ($parsed.StartsWith('"') -and $parsed.EndsWith('"')))) {
+        $parsed = $parsed.Substring(1, $parsed.Length - 2)
+    }
+    return ($parsed -replace '\\ ', ' ')
+}
+
+function ConvertTo-ClaudexEnvLine([string] $Name, [string] $Value) {
+    if ($Value.Contains("`r") -or $Value.Contains("`n")) { Fail "$Name contains an unsupported newline" }
+    if ((ConvertFrom-ClaudexEnvValue $Value) -cne $Value) {
+        Fail "$Name cannot be represented exactly in the cross-platform Claudex environment file"
+    }
+    return "$Name=$Value"
 }
 
 function Get-NodeMajorVersion {
@@ -52,6 +133,80 @@ function Get-NodeMajorVersion {
     return 0
 }
 
+function Add-ProcessPathFirst([string] $Directory) {
+    if (-not (Test-Path -LiteralPath $Directory -PathType Container)) { return }
+    $separator = [IO.Path]::PathSeparator
+    $entries = @($env:PATH -split [regex]::Escape([string] $separator) | Where-Object { $_ -and $_ -ne $Directory })
+    $env:PATH = (@($Directory) + $entries) -join $separator
+}
+
+function Install-ManagedNode {
+    $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    switch ($architecture) {
+        'x64' { $arch = 'x64' }
+        'arm64' { $arch = 'arm64' }
+        default { Fail "Node.js 18 or newer is unavailable for Windows/$architecture" }
+    }
+    $temporary = Join-Path $configDir ('.node-install-' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($temporary) | Out-Null
+    try {
+        if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_MANAGED_NODE_DIR) {
+            $source = $env:CLAUDEX_TEST_MANAGED_NODE_DIR
+            if (-not (Test-Path -LiteralPath (Join-Path $source 'node.exe') -PathType Leaf) -or
+                -not (Test-Path -LiteralPath (Join-Path $source 'npm.cmd') -PathType Leaf)) {
+                Fail 'managed Node test fixture is incomplete'
+            }
+            $extracted = Join-Path $temporary 'node-v22-test-win'
+            Copy-Item -LiteralPath $source -Destination $extracted -Recurse
+        } else {
+            $baseUrl = 'https://nodejs.org/dist/latest-v22.x'
+            $checksums = Join-Path $temporary 'SHASUMS256.txt'
+            Receive-FileWithRetry "$baseUrl/SHASUMS256.txt" $checksums 180
+            $archivePattern = '^([0-9A-Fa-f]{64})\s+(node-v\d+\.\d+\.\d+-win-' + [regex]::Escape($arch) + '\.zip)$'
+            $archiveMatches = @([IO.File]::ReadAllLines($checksums) | ForEach-Object {
+                if ($_ -match $archivePattern) {
+                    [pscustomobject]@{ Digest = $Matches[1].ToLowerInvariant(); Name = $Matches[2] }
+                }
+            })
+            if ($archiveMatches.Count -ne 1) { Fail 'official Node.js checksums did not contain one supported Windows archive' }
+            $archiveName = $archiveMatches[0].Name
+            $archive = Join-Path $temporary $archiveName
+            Receive-FileWithRetry "$baseUrl/$archiveName" $archive 300
+            $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -cne $archiveMatches[0].Digest) { Fail 'official Node.js archive checksum mismatch' }
+            Expand-Archive -LiteralPath $archive -DestinationPath $temporary
+            $extracted = Join-Path $temporary $archiveName.Substring(0, $archiveName.Length - 4)
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $extracted 'node.exe') -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $extracted 'npm.cmd') -PathType Leaf)) {
+            Fail 'official Node.js archive is incomplete'
+        }
+        $backup = "$managedNodeDir.backup.$PID.$([guid]::NewGuid().ToString('N'))"
+        $hadExisting = Test-Path -LiteralPath $managedNodeDir
+        if ($hadExisting) { Move-Item -LiteralPath $managedNodeDir -Destination $backup }
+        try {
+            Move-Item -LiteralPath $extracted -Destination $managedNodeDir
+        } catch {
+            if ($hadExisting -and -not (Test-Path -LiteralPath $managedNodeDir)) { Move-Item -LiteralPath $backup -Destination $managedNodeDir }
+            throw
+        }
+        if ($hadExisting) { Remove-Item -LiteralPath $backup -Recurse -Force }
+        Add-ProcessPathFirst $managedNodeDir
+    } finally {
+        Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ((Get-NodeMajorVersion) -lt 18 -or -not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) {
+        Fail 'verified managed Node.js was installed but is not available in PATH'
+    }
+}
+
+function Invoke-DependencyManager([string] $Executable, [string[]] $Arguments) {
+    try {
+        & $Executable @Arguments *> $null
+        return $LASTEXITCODE -eq 0
+    } catch { return $false }
+}
+
 function Install-NodeAndNpm {
     $existingMajor = Get-NodeMajorVersion
     if ($existingMajor -gt 0) {
@@ -62,40 +217,32 @@ function Install-NodeAndNpm {
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     $choco = Get-Command choco -ErrorAction SilentlyContinue
     $scoop = Get-Command scoop -ErrorAction SilentlyContinue
+    $managerSucceeded = $false
     if ($winget) {
         if ($existingMajor -gt 0) {
-            & $winget.Source upgrade --id OpenJS.NodeJS.LTS --exact --accept-package-agreements --accept-source-agreements --disable-interactivity
-            $nodeInstallExitCode = $LASTEXITCODE
-            if ($nodeInstallExitCode -ne 0) {
-                & $winget.Source install --id OpenJS.NodeJS.LTS --exact --accept-package-agreements --accept-source-agreements --disable-interactivity
-            }
+            $managerSucceeded = Invoke-DependencyManager $winget.Source @('upgrade', '--id', 'OpenJS.NodeJS.LTS', '--exact', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+            if (-not $managerSucceeded) { $managerSucceeded = Invoke-DependencyManager $winget.Source @('install', '--id', 'OpenJS.NodeJS.LTS', '--exact', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity') }
         } else {
-            & $winget.Source install --id OpenJS.NodeJS.LTS --exact --accept-package-agreements --accept-source-agreements --disable-interactivity
+            $managerSucceeded = Invoke-DependencyManager $winget.Source @('install', '--id', 'OpenJS.NodeJS.LTS', '--exact', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
         }
     } elseif ($choco) {
-        & $choco.Source upgrade nodejs-lts -y
+        $managerSucceeded = Invoke-DependencyManager $choco.Source @('upgrade', 'nodejs-lts', '-y')
     } elseif ($scoop) {
         if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE 'scoop\apps\nodejs-lts') -PathType Container) {
-            & $scoop.Source update nodejs-lts
+            $managerSucceeded = Invoke-DependencyManager $scoop.Source @('update', 'nodejs-lts')
         } else {
-            & $scoop.Source install nodejs-lts
+            $managerSucceeded = Invoke-DependencyManager $scoop.Source @('install', 'nodejs-lts')
         }
-    } else { Fail 'Node.js 18 or newer is required; install the current Node.js LTS release or enable WinGet, Chocolatey, or Scoop, then retry' }
-    if ($LASTEXITCODE -ne 0) { Fail "Node.js installation failed with exit code $LASTEXITCODE" }
+    }
     foreach ($candidate in @(
         (Join-Path $env:ProgramFiles 'nodejs'),
         (Join-Path $env:USERPROFILE 'scoop\apps\nodejs-lts\current'),
         (Join-Path $env:USERPROFILE 'scoop\shims')
     )) {
-        if ((Test-Path -LiteralPath $candidate -PathType Container) -and $candidate -notin @($env:PATH -split [regex]::Escape([string] [IO.Path]::PathSeparator))) {
-            $env:PATH = "$candidate$([IO.Path]::PathSeparator)$env:PATH"
-        }
+        Add-ProcessPathFirst $candidate
     }
     $installedMajor = Get-NodeMajorVersion
-    if ($installedMajor -lt 18) {
-        $detected = if ($installedMajor -gt 0) { "Node.js $installedMajor remains active in PATH" } else { 'Node.js is still unavailable in PATH' }
-        Fail "$detected after the package-manager upgrade; activate Node.js 18 or newer, open a new terminal, and rerun the installer"
-    }
+    if (-not $managerSucceeded -or $installedMajor -lt 18 -or -not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { Install-ManagedNode }
 }
 
 function Install-CodexCli {
@@ -168,6 +315,119 @@ function Release-InstallLock {
     $script:installLockOwned = $false
 }
 
+function Start-InstallTransaction([string[]] $ManagedPaths) {
+    foreach ($managedPath in $ManagedPaths) {
+        if ((Test-Path -LiteralPath $managedPath) -and -not (Test-Path -LiteralPath $managedPath -PathType Leaf)) {
+            Fail "managed install target is not a regular file: $managedPath"
+        }
+    }
+    $rootPath = Join-Path $configDir ('.install-transaction-' + [guid]::NewGuid().ToString('N'))
+    $backupPath = Join-Path $rootPath 'backup'
+    [IO.Directory]::CreateDirectory($backupPath) | Out-Null
+    $entries = @()
+    $index = 0
+    $hasFiles = $false
+    try {
+        foreach ($managedPath in $ManagedPaths) {
+            $existed = Test-Path -LiteralPath $managedPath -PathType Leaf
+            $backup = Join-Path $backupPath ([string] $index)
+            if ($existed) {
+                Copy-Item -LiteralPath $managedPath -Destination $backup -Force
+                $hasFiles = $true
+            }
+            $entries += [pscustomobject]@{ Path = $managedPath; Backup = $backup; Existed = $existed }
+            $index++
+        }
+    } catch {
+        Remove-Item -LiteralPath $rootPath -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    Write-TextAtomic (Join-Path $rootPath 'manifest.json') (($entries | ConvertTo-Json -Depth 5) + "`n")
+    Write-TextAtomic (Join-Path $rootPath 'state') "committing`n"
+    $script:installTransaction = [pscustomobject]@{ Root = $rootPath; Entries = $entries; HasFiles = $hasFiles }
+}
+
+function Restore-InstallTransactionEntries([string] $RootPath, $Entries, [string[]] $ManagedPaths) {
+    $restoreErrors = @()
+    if (@($Entries).Count -ne $ManagedPaths.Count) { return @('transaction manifest target count is invalid') }
+    for ($index = 0; $index -lt $ManagedPaths.Count; $index++) {
+        $entry = @($Entries)[$index]
+        $expectedPath = [IO.Path]::GetFullPath($ManagedPaths[$index])
+        $recordedPath = [IO.Path]::GetFullPath([string] $entry.Path)
+        if (-not $recordedPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+            $restoreErrors += "transaction manifest contains an unexpected target: $recordedPath"
+            continue
+        }
+        try {
+            if ($entry.Existed) {
+                $bytes = [IO.File]::ReadAllBytes($entry.Backup)
+                $parent = Split-Path $entry.Path -Parent
+                [IO.Directory]::CreateDirectory($parent) | Out-Null
+                $temporary = Join-Path $parent ('.rollback-' + [guid]::NewGuid().ToString('N') + '.tmp')
+                try {
+                    [IO.File]::WriteAllBytes($temporary, $bytes)
+                    if (Test-Path -LiteralPath $entry.Path -PathType Leaf) {
+                        $replacementBackup = Join-Path $parent ('.rollback-' + [guid]::NewGuid().ToString('N') + '.bak')
+                        try { [IO.File]::Replace($temporary, $entry.Path, $replacementBackup) }
+                        finally { Remove-Item -LiteralPath $replacementBackup -Force -ErrorAction SilentlyContinue }
+                    } else {
+                        [IO.File]::Move($temporary, $entry.Path)
+                    }
+                } finally { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+            } else {
+                Remove-Item -LiteralPath $entry.Path -Force -ErrorAction SilentlyContinue
+            }
+        } catch { $restoreErrors += $_.Exception.Message }
+    }
+    if ($restoreErrors.Count -eq 0) { Remove-Item -LiteralPath $RootPath -Recurse -Force -ErrorAction SilentlyContinue }
+    return $restoreErrors
+}
+
+function Restore-InstallTransaction([string[]] $ManagedPaths) {
+    if ($null -eq $script:installTransaction) { return }
+    $restoreErrors = @(Restore-InstallTransactionEntries $script:installTransaction.Root $script:installTransaction.Entries $ManagedPaths)
+    $script:installTransaction = $null
+    if ($restoreErrors.Count -gt 0) {
+        [Console]::Error.WriteLine("install.ps1: installation failed and automatic rollback was incomplete: $($restoreErrors -join '; ')")
+    } else {
+        [Console]::Error.WriteLine('install.ps1: installation failed; restored the previous managed installation.')
+    }
+}
+
+function Recover-IncompleteInstallTransactions([string[]] $ManagedPaths) {
+    $recovered = $false
+    foreach ($directory in @(Get-ChildItem -LiteralPath $configDir -Directory -Filter '.install-transaction-*' -ErrorAction SilentlyContinue)) {
+        $statePath = Join-Path $directory.FullName 'state'
+        if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+            Remove-Item -LiteralPath $directory.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            continue
+        }
+        $state = ([IO.File]::ReadAllText($statePath)).Trim()
+        if ($state -ne 'committing') { Fail "unrecognized interrupted installer transaction: $($directory.FullName)" }
+        $manifestPath = Join-Path $directory.FullName 'manifest.json'
+        try { $entries = @(Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json) }
+        catch { Fail "invalid interrupted installer transaction manifest: $manifestPath" }
+        $restoreErrors = @(Restore-InstallTransactionEntries $directory.FullName $entries $ManagedPaths)
+        if ($restoreErrors.Count -gt 0) { Fail "could not recover interrupted installer transaction: $($restoreErrors -join '; ')" }
+        $recovered = $true
+    }
+    if ($recovered) { [Console]::WriteLine('Recovered the previous interrupted Claudex installation before continuing.') }
+}
+
+function Complete-InstallTransaction {
+    if ($null -eq $script:installTransaction) { return }
+    $transaction = $script:installTransaction
+    if ($transaction.HasFiles) {
+        $backupDir = Join-Path $configDir ("backups\install-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + "-$PID")
+        [IO.Directory]::CreateDirectory((Split-Path $backupDir -Parent)) | Out-Null
+        Move-Item -LiteralPath $transaction.Root -Destination $backupDir
+        [Console]::WriteLine("Backed up the previous managed files to $backupDir")
+    } else {
+        Remove-Item -LiteralPath $transaction.Root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $script:installTransaction = $null
+}
+
 function Test-InteractiveInstall {
     return $env:CLAUDEX_TEST_INTERACTIVE_INSTALL -eq '1' -or
         ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected)
@@ -210,7 +470,7 @@ function Install-Proxy {
     try {
         $archive = Join-Path $temporary $asset
         [Console]::WriteLine("Downloading verified internal compatibility service v$proxyVersion for Windows/$arch...")
-        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
+        Receive-FileWithRetry $url $archive 300
         $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($actual -ne $expected) { Fail "compatibility service checksum mismatch for $asset" }
         Expand-Archive -LiteralPath $archive -DestinationPath $temporary -Force
@@ -227,8 +487,26 @@ function Install-Proxy {
 $separator = [IO.Path]::PathSeparator
 if ($binDir -notin @($env:PATH -split [regex]::Escape([string] $separator))) { $env:PATH = "$binDir$separator$env:PATH" }
 
+$installManagedPaths = @(
+    $launcherTarget,
+    $cmdTarget,
+    $envFile,
+    $proxyConfigTarget,
+    $managedProxy,
+    $settingsTarget,
+    $statuslineTarget,
+    $usageLimitTarget,
+    $codexSessionTarget,
+    $preloadTarget,
+    $skillBridgeTarget,
+    $selfUpdateTarget,
+    $usageSkillTarget,
+    $installReceiptTarget
+)
 Acquire-InstallLock
 try {
+Recover-IncompleteInstallTransactions $installManagedPaths
+Start-InstallTransaction $installManagedPaths
 
 if (-not $skipDependencies) {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -237,7 +515,7 @@ if (-not $skipDependencies) {
         [Console]::WriteLine("Installing Claude Code with Anthropic's native installer...")
         $installer = Join-Path ([IO.Path]::GetTempPath()) ('claude-install-' + [guid]::NewGuid().ToString('N') + '.ps1')
         try {
-            Invoke-WebRequest -UseBasicParsing -Uri 'https://claude.ai/install.ps1' -OutFile $installer
+            Receive-FileWithRetry 'https://claude.ai/install.ps1' $installer 180
             & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $installer
             if ($LASTEXITCODE -ne 0) { Fail "Claude Code's native installer failed with exit code $LASTEXITCODE" }
         } finally { Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue }
@@ -291,11 +569,7 @@ if (Test-Path -LiteralPath $envFile -PathType Leaf) {
     foreach ($line in [IO.File]::ReadAllLines($envFile)) {
         if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
             $name = $Matches[1]
-            $value = $Matches[2].Trim()
-            if ($value.Length -ge 2 -and (($value.StartsWith("'") -and $value.EndsWith("'")) -or ($value.StartsWith('"') -and $value.EndsWith('"')))) {
-                $value = $value.Substring(1, $value.Length - 2)
-            }
-            $value = $value -replace '\\ ', ' '
+            $value = ConvertFrom-ClaudexEnvValue $Matches[2]
             $existingVariables[$name] = $value
         }
         if ($line -notmatch '^(CLAUDEX_PROXY_TOKEN|CLAUDEX_PROXY_URL|CLAUDEX_PROXY_CONFIG|CLAUDEX_PROXY_BIN|CLAUDEX_CODEX_AUTH_DIR)=') { $existingLines += $line }
@@ -332,7 +606,7 @@ streaming:
   keepalive-seconds: 15
   bootstrap-retries: 2
 "@
-[IO.File]::WriteAllText($proxyConfigTarget, $proxyConfig, $utf8)
+Write-TextAtomic $proxyConfigTarget $proxyConfig
 $managedProxyForEnv = if (Test-Path -LiteralPath $managedProxy -PathType Leaf) { $managedProxy } else { $proxyBinary }
 $existingProxyUrl = [string] $existingVariables['CLAUDEX_PROXY_URL']
 $runtimeProxyUrl = if ($callerProxyUrlSet) {
@@ -349,25 +623,14 @@ $previousManagedProxy = $existingProxyBin -and
     ($existingProxyBinLeaf -eq 'cliproxyapi.exe' -or $existingProxyBinLeaf -match '^cliproxyapi-\d+\.\d+\.\d+\.exe$')
 $runtimeProxyBin = if ($env:CLAUDEX_PROXY_BIN) { $env:CLAUDEX_PROXY_BIN } elseif ($existingProxyBin -and -not $previousManagedProxy) { $existingProxyBin } else { $managedProxyForEnv }
 $managedLines = @(
-    "CLAUDEX_PROXY_TOKEN=$proxyToken",
-    "CLAUDEX_PROXY_URL=$runtimeProxyUrl",
-    "CLAUDEX_PROXY_CONFIG=$runtimeProxyConfig",
-    "CLAUDEX_PROXY_BIN=$runtimeProxyBin",
-    "CLAUDEX_CODEX_AUTH_DIR=$runtimeAuthDir"
+    (ConvertTo-ClaudexEnvLine 'CLAUDEX_PROXY_TOKEN' $proxyToken),
+    (ConvertTo-ClaudexEnvLine 'CLAUDEX_PROXY_URL' $runtimeProxyUrl),
+    (ConvertTo-ClaudexEnvLine 'CLAUDEX_PROXY_CONFIG' $runtimeProxyConfig),
+    (ConvertTo-ClaudexEnvLine 'CLAUDEX_PROXY_BIN' $runtimeProxyBin),
+    (ConvertTo-ClaudexEnvLine 'CLAUDEX_CODEX_AUTH_DIR' $runtimeAuthDir)
 )
-[IO.File]::WriteAllLines($envFile, @($managedLines + $existingLines), $utf8)
-
-$timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$backupDir = Join-Path $configDir "backups\install-$timestamp"
-$backedUp = $false
-foreach ($managedFile in @($launcherTarget, $cmdTarget, $settingsTarget, $statuslineTarget, $usageLimitTarget, $codexSessionTarget, $preloadTarget, $skillBridgeTarget, $selfUpdateTarget, $usageSkillTarget, $installReceiptTarget)) {
-    if (Test-Path -LiteralPath $managedFile) {
-        [IO.Directory]::CreateDirectory($backupDir) | Out-Null
-        Copy-Item -LiteralPath $managedFile -Destination (Join-Path $backupDir (Split-Path $managedFile -Leaf)) -Force
-        $backedUp = $true
-    }
-}
-if ($backedUp) { [Console]::WriteLine("Backed up the previous managed files to $backupDir") }
+$environmentText = (@($managedLines + $existingLines) -join [Environment]::NewLine) + [Environment]::NewLine
+Write-TextAtomic $envFile $environmentText
 
 Copy-Item -LiteralPath (Join-Path $root 'claudex.ps1') -Destination $launcherTarget -Force
 Copy-Item -LiteralPath (Join-Path $root 'claudex.cmd') -Destination $cmdTarget -Force
@@ -382,7 +645,7 @@ Copy-Item -LiteralPath (Join-Path $root 'skills\usage-limit\SKILL.windows.md') -
 
 $settings = Get-Content -LiteralPath (Join-Path $root 'settings.json') -Raw | ConvertFrom-Json
 $settings.statusLine.command = 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $statuslineTarget + '"'
-[IO.File]::WriteAllText($settingsTarget, ($settings | ConvertTo-Json -Depth 100), $utf8)
+Write-TextAtomic $settingsTarget ($settings | ConvertTo-Json -Depth 100)
 
 $packageManifest = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
 $installVersion = [string] $packageManifest.version
@@ -396,7 +659,12 @@ Move-Item -LiteralPath $receiptTemporary -Destination $installReceiptTarget -For
 
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $userEntries = if ($userPath) { @($userPath -split [regex]::Escape([string] $separator)) } else { @() }
-foreach ($pathToAdd in @($codexInstalledBinDir, $claudeInstalledBinDir, $(if (-not $packageManagedInstall) { $binDir } else { '' })) | Where-Object { $_ }) {
+foreach ($pathToAdd in @(
+    $codexInstalledBinDir,
+    $claudeInstalledBinDir,
+    $(if (Test-Path -LiteralPath (Join-Path $managedNodeDir 'node.exe') -PathType Leaf) { $managedNodeDir } else { '' }),
+    $(if (-not $packageManagedInstall) { $binDir } else { '' })
+) | Where-Object { $_ }) {
     if ($pathToAdd -notin $userEntries) {
         $userPath = if ($userPath) { "$pathToAdd$separator$userPath" } else { $pathToAdd }
         $userEntries += $pathToAdd
@@ -408,13 +676,16 @@ foreach ($pathToAdd in @($codexInstalledBinDir, $claudeInstalledBinDir, $(if (-n
 [Console]::WriteLine("Installed Claudex launcher: $cmdTarget")
 [Console]::WriteLine("Installed isolated config: $configDir")
 
-& $codexSessionTarget sync *> $null
-$authReady = $LASTEXITCODE -eq 0
-if (-not $authReady -and $Login) {
+$authReady = $false
+if ($Login) {
     & $codexSessionTarget login
     if ($LASTEXITCODE -ne 0) { Fail "Codex login failed with exit code $LASTEXITCODE" }
     $authReady = $true
-} elseif (-not $authReady -and -not $skipDependencies -and (Test-InteractiveInstall)) {
+} else {
+    & $codexSessionTarget sync *> $null
+    $authReady = $LASTEXITCODE -eq 0
+}
+if (-not $authReady -and -not $skipDependencies -and (Test-InteractiveInstall)) {
     [Console]::WriteLine('Codex sign-in is required. Opening the official browser login now...')
     & $codexSessionTarget login
     $authReady = $LASTEXITCODE -eq 0
@@ -425,6 +696,11 @@ if (-not $skipService -and $authReady) {
     if ($LASTEXITCODE -eq 0) { [Console]::WriteLine('Claudex is ready. Run: claudex') }
     else { Fail 'the live compatibility check did not pass; run `claudex --doctor` for details' }
 }
+Complete-InstallTransaction
 } finally {
+    if ($null -ne $script:installTransaction) {
+        Restore-InstallTransaction $installManagedPaths
+        [Environment]::SetEnvironmentVariable('Path', $userPathBeforeInstall, 'User')
+    }
     Release-InstallLock
 }

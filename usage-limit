@@ -22,12 +22,17 @@ readonly alert_percent="${CLAUDEX_USAGE_ALERT_PERCENT:-20}"
 mode=detail
 refresh=1
 lock_held=0
+lock_token=""
 account_action=""
 account_selector=""
 temporary_curl_config=""
 temporary_limits_file=""
 temporary_appserver_dir=""
 appserver_pid=""
+appserver_process_group=""
+appserver_stdout_drain_pid=""
+appserver_stderr_drain_pid=""
+appserver_input_open=0
 
 fail() {
   printf 'usage-limit: %s\n' "$*" >&2
@@ -52,16 +57,62 @@ read_usage_generation() {
   printf '%s\n' "$generation"
 }
 
+new_lock_token() {
+  printf '%s-%s-%s\n' "$(date +%s)" "$$" "${RANDOM:-0}"
+}
+
+read_refresh_owner() {
+  local owner_dir="${1:-$refresh_lock}" owner_record="" owner_file
+  owner_file="$owner_dir/owner-pid"
+  if [[ -r "$owner_file" ]]; then
+    IFS= read -r owner_record < "$owner_file" || owner_record=""
+  fi
+  printf '%s\n' "$owner_record"
+}
+
+quarantine_refresh_lock() {
+  local expected_record="$1" quarantine moved_record
+  quarantine="$cache_dir/.refresh.lock.quarantine.$$.$RANDOM"
+  mv "$refresh_lock" "$quarantine" 2>/dev/null || return 1
+  moved_record=$(read_refresh_owner "$quarantine")
+  if [[ "$moved_record" == "$expected_record" ]]; then
+    rm -f "$quarantine/owner-pid"
+    rmdir "$quarantine" 2>/dev/null || true
+    return 0
+  fi
+  # We moved a newer generation. Restore it if the canonical path is still
+  # free; otherwise preserve the quarantined directory for recovery rather
+  # than deleting a lock we do not own.
+  if [[ ! -e "$refresh_lock" ]]; then
+    mv "$quarantine" "$refresh_lock" 2>/dev/null || true
+  fi
+  return 1
+}
+
+release_refresh_lock() {
+  local current_record=""
+  (( lock_held )) && [[ -n "$lock_token" ]] || return 0
+  current_record=$(read_refresh_owner)
+  [[ "${current_record#* }" == "$lock_token" ]] || return 0
+  quarantine_refresh_lock "$current_record" || return 0
+  lock_held=0
+}
+
 acquire_refresh_lock() {
-  local refresh_owner=""
+  local refresh_owner="" refresh_pid="" observed_record=""
   (( lock_held == 0 )) || return 0
   mkdir -p "$cache_dir"
   chmod 700 "$cache_dir" 2>/dev/null || true
   if ! mkdir "$refresh_lock" 2>/dev/null; then
-    if [[ -r "$refresh_owner_file" ]]; then IFS= read -r refresh_owner < "$refresh_owner_file" || refresh_owner=""; fi
-    if [[ "$refresh_owner" =~ ^[0-9]+$ ]] && ! kill -0 "$refresh_owner" 2>/dev/null; then
-      rm -f "$refresh_owner_file"
-      rmdir "$refresh_lock" 2>/dev/null || true
+    observed_record=$(read_refresh_owner)
+    refresh_pid="${observed_record%% *}"
+    refresh_owner="${observed_record#* }"
+    if [[ "$refresh_pid" =~ ^[0-9]+$ && -n "$refresh_owner" ]] && ! kill -0 "$refresh_pid" 2>/dev/null; then
+      # Recheck the generation before reclaiming so a stale observer cannot
+      # remove a lock whose ownership record changed while it was inspecting.
+      if [[ "$(read_refresh_owner)" == "$observed_record" ]]; then
+        quarantine_refresh_lock "$observed_record" || true
+      fi
       mkdir "$refresh_lock" 2>/dev/null || {
         fail 'another usage refresh is already in progress.'
         return 1
@@ -71,8 +122,9 @@ acquire_refresh_lock() {
       return 1
     fi
   fi
+  lock_token=$(new_lock_token)
   lock_held=1
-  (umask 077; printf '%s\n' "$$" > "$refresh_owner_file")
+  (umask 077; printf '%s %s\n' "$$" "$lock_token" > "$refresh_owner_file")
 }
 
 usage() {
@@ -87,6 +139,11 @@ while (( $# > 0 )); do
     --statusline) mode=statusline; refresh=0 ;;
     --refresh-cache) mode=refresh-cache; refresh=1 ;;
     --lock-held) lock_held=1 ;;
+    --lock-token)
+      shift
+      (( $# > 0 )) || { fail '--lock-token requires a generation token.'; exit 2; }
+      lock_token="$1"
+      ;;
     --accounts) account_action=list; refresh=0 ;;
     --account)
       shift
@@ -101,6 +158,11 @@ while (( $# > 0 )); do
   esac
   shift
 done
+
+if (( lock_held )) && [[ ! "$lock_token" =~ ^[A-Za-z0-9._-]{8,128}$ ]]; then
+  fail '--lock-held requires a valid --lock-token generation.'
+  exit 2
+fi
 
 if [[ ! "$refresh_seconds" =~ ^[0-9]+$ ]] || (( refresh_seconds < 60 || refresh_seconds > 3600 )); then
   fail 'CLAUDEX_USAGE_REFRESH_SECONDS must be an integer from 60 to 3600.'
@@ -122,18 +184,94 @@ if [[ ! "$alert_percent" =~ ^[0-9]+$ ]] || (( alert_percent < 0 || alert_percent
   exit 2
 fi
 
+process_children() {
+  ps -axo pid=,ppid= 2>/dev/null | awk -v parent="$1" '$2 == parent { print $1 }'
+}
+
+signal_process_tree() {
+  local root_pid="$1" signal_name="$2" child_pid
+  while IFS= read -r child_pid; do
+    [[ "$child_pid" =~ ^[0-9]+$ ]] || continue
+    signal_process_tree "$child_pid" "$signal_name"
+  done < <(process_children "$root_pid")
+  kill "-$signal_name" "$root_pid" 2>/dev/null || true
+}
+
+drain_capped_stream() {
+  local source_fifo="$1" destination_file="$2" byte_limit="$3"
+  local line="" line_bytes remaining written=0
+  # The app-server protocol is JSONL. A shell-builtin writer keeps each
+  # complete response visible to the polling loop immediately, while the
+  # reader continues draining after the persisted diagnostic cap is reached.
+  # This avoids stdio buffering in `head`, which can otherwise hide a small
+  # response until EOF and make a healthy app-server look timed out.
+  LC_ALL=C
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_bytes=${#line}
+    if (( written < byte_limit )); then
+      remaining=$(( byte_limit - written ))
+      if (( line_bytes + 1 <= remaining )); then
+        printf '%s\n' "$line" >> "$destination_file"
+        written=$(( written + line_bytes + 1 ))
+      else
+        printf '%s' "${line:0:remaining}" >> "$destination_file"
+        written=$byte_limit
+      fi
+    fi
+  done < "$source_fifo"
+}
+
+terminate_appserver() {
+  local attempt
+  [[ "$appserver_input_open" == 0 ]] || { exec 9>&- 2>/dev/null || true; appserver_input_open=0; }
+  if [[ -n "$appserver_pid" ]]; then
+    if [[ -n "$appserver_process_group" ]]; then
+      kill -TERM -- "-$appserver_process_group" 2>/dev/null || true
+      kill -TERM "$appserver_pid" 2>/dev/null || true
+    else
+      signal_process_tree "$appserver_pid" TERM
+    fi
+    for attempt in {1..10}; do
+      kill -0 "$appserver_pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    if [[ -n "$appserver_process_group" ]]; then
+      # KILL the group even if its leader exited after TERM; a descendant may
+      # still be holding a redirected pipe open or deliberately ignoring TERM.
+      kill -KILL -- "-$appserver_process_group" 2>/dev/null || true
+      kill -KILL "$appserver_pid" 2>/dev/null || true
+    elif kill -0 "$appserver_pid" 2>/dev/null; then
+        signal_process_tree "$appserver_pid" KILL
+    fi
+    wait "$appserver_pid" 2>/dev/null || true
+    appserver_pid=""
+    appserver_process_group=""
+  fi
+  for attempt in "$appserver_stdout_drain_pid" "$appserver_stderr_drain_pid"; do
+    [[ -n "$attempt" ]] || continue
+    for _ in {1..10}; do
+      kill -0 "$attempt" 2>/dev/null || break
+      sleep 0.05
+    done
+    kill -TERM "$attempt" 2>/dev/null || true
+    wait "$attempt" 2>/dev/null || true
+  done
+  appserver_stdout_drain_pid=""
+  appserver_stderr_drain_pid=""
+}
+
+finish_appserver() {
+  terminate_appserver
+  [[ -z "$temporary_appserver_dir" ]] || rm -rf "$temporary_appserver_dir"
+  temporary_appserver_dir=""
+}
+
 cleanup() {
   [[ -z "$temporary_curl_config" ]] || rm -f "$temporary_curl_config"
   [[ -z "$temporary_limits_file" ]] || rm -f "$temporary_limits_file"
-  if [[ -n "$appserver_pid" ]]; then
-    kill "$appserver_pid" 2>/dev/null || true
-    wait "$appserver_pid" 2>/dev/null || true
-  fi
+  terminate_appserver
   [[ -z "$temporary_appserver_dir" ]] || rm -rf "$temporary_appserver_dir"
-  if (( lock_held )); then
-    rm -f "$refresh_owner_file"
-    rmdir "$refresh_lock" 2>/dev/null || true
-  fi
+  release_refresh_lock
 }
 trap cleanup EXIT
 
@@ -336,28 +474,71 @@ fetch_appserver_usage() {
     return 1
   fi
 
-  local input_fifo output_file error_file attempts response=""
+  local input_fifo output_fifo error_fifo output_file error_file attempts response="" initialized=0
   temporary_appserver_dir=$(mktemp -d "${TMPDIR:-/tmp}/claudex-appserver.XXXXXX") || return 1
   input_fifo="$temporary_appserver_dir/input"
+  output_fifo="$temporary_appserver_dir/stdout"
+  error_fifo="$temporary_appserver_dir/stderr"
   output_file="$temporary_appserver_dir/output"
   error_file="$temporary_appserver_dir/error"
-  mkfifo "$input_fifo" || return 1
+  if ! mkfifo "$input_fifo" "$output_fifo" "$error_fifo"; then
+    rm -rf "$temporary_appserver_dir"
+    temporary_appserver_dir=""
+    return 1
+  fi
   : > "$output_file"
-  exec 9<>"$input_fifo"
-  codex app-server <"$input_fifo" >"$output_file" 2>"$error_file" &
+  : > "$error_file"
+  # Continuously drain both streams so the app-server can never deadlock on a
+  # full pipe. Persist at most 1 MiB of stdout and 64 KiB of stderr; excess is
+  # discarded while the process remains alive.
+  drain_capped_stream "$output_fifo" "$output_file" 1048576 &
+  appserver_stdout_drain_pid=$!
+  drain_capped_stream "$error_fifo" "$error_file" 65536 &
+  appserver_stderr_drain_pid=$!
+  if ! exec 9<>"$input_fifo"; then
+    finish_appserver
+    return 1
+  fi
+  appserver_input_open=1
+  if command -v setsid >/dev/null 2>&1; then
+    setsid codex app-server <"$input_fifo" >"$output_fifo" 2>"$error_fifo" 9>&- &
+    appserver_process_group=$!
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MPOSIX -e 'POSIX::setsid() >= 0 or die "setsid failed: $!"; exec @ARGV' \
+      codex app-server <"$input_fifo" >"$output_fifo" 2>"$error_fifo" 9>&- &
+    appserver_process_group=$!
+  else
+    codex app-server <"$input_fifo" >"$output_fifo" 2>"$error_fifo" 9>&- &
+  fi
   appserver_pid=$!
-  printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"Claudex","title":"Claudex usage fallback","version":"1.0.0"}}}' >&9
+  if ! printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"Claudex","title":"Claudex usage fallback","version":"1.0.0"}}}' >&9; then
+    finish_appserver
+    fail 'Codex app-server closed during initialization.'
+    return 1
+  fi
+  # One shared budget covers initialization and rate-limit retrieval. This is
+  # deliberately not reset after initialize succeeds.
   attempts=$(( timeout_seconds * 20 ))
   while (( attempts > 0 )); do
-    jq -e 'select(.id == 1 and .result)' "$output_file" >/dev/null 2>&1 && break
+    if jq -e 'select(.id == 1 and .result)' "$output_file" >/dev/null 2>&1; then
+      initialized=1
+      break
+    fi
     kill -0 "$appserver_pid" 2>/dev/null || break
     attempts=$(( attempts - 1 ))
     sleep 0.05
   done
-  (( attempts > 0 )) || { exec 9>&-; fail 'Codex app-server initialization timed out.'; return 1; }
+  if (( ! initialized )); then
+    finish_appserver
+    fail 'Codex app-server initialization timed out.'
+    return 1
+  fi
 
-  printf '%s\n' '{"method":"initialized"}' '{"id":2,"method":"account/rateLimits/read","params":null}' >&9
-  attempts=$(( timeout_seconds * 20 ))
+  if ! printf '%s\n' '{"method":"initialized"}' '{"id":2,"method":"account/rateLimits/read","params":null}' >&9; then
+    finish_appserver
+    fail 'Codex app-server closed before the rate-limit request.'
+    return 1
+  fi
   while (( attempts > 0 )); do
     response=$(jq -c 'select(.id == 2 and .result) | .result' "$output_file" 2>/dev/null | tail -1)
     [[ -z "$response" ]] || break
@@ -365,10 +546,7 @@ fetch_appserver_usage() {
     attempts=$(( attempts - 1 ))
     sleep 0.05
   done
-  exec 9>&-
-  kill "$appserver_pid" 2>/dev/null || true
-  wait "$appserver_pid" 2>/dev/null || true
-  appserver_pid=""
+  finish_appserver
   [[ -n "$response" ]] || { fail 'Codex app-server returned no rate-limit snapshot.'; return 1; }
 
   printf '%s' "$response" | jq '

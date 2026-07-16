@@ -1,6 +1,7 @@
 {
   "name": "claudex-codex",
-  "version": "1.5.0",
+  "version": "1.5.1",
+  "private": true,
   "description": "Cross-platform compatibility layer for using Codex GPT models in Claude Code",
   "type": "module",
   "files": [
@@ -40,7 +41,8 @@
     "check:docs": "node scripts/check-docs.mjs",
     "check:preload": "node scripts/check-preload.mjs",
     "check:skills": "node tests/skill-bridge.test.cjs && node tests/skill-contract.test.cjs && node tests/skill-security.test.cjs",
-    "test": "npm run check:docs && npm run check:preload && npm run check:skills",
+    "check:package-setup-lock": "node tests/package-setup-lock.test.cjs",
+    "test": "npm run check:docs && npm run check:preload && npm run check:skills && npm run check:package-setup-lock",
     "test:all": "bash ./test.sh",
     "build:release": "bash ./scripts/build-release.sh"
   },

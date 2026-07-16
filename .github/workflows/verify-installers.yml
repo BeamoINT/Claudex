@@ -1,19 +1,56 @@
 name: Verify website installers
 
 # Runs the public claudex.work source-install bootstraps end to end on fresh
-# runners, exactly as a new user would, and asserts the installed launcher
-# responds. Manual trigger: these hit the live site and the latest release.
+# runners, exactly as a new user would, and verifies that the expected release
+# and its skill runtime were installed. Successful release-asset builds trigger
+# this automatically; maintainers can also run it manually against latest or a
+# specific stable version.
 on:
   workflow_dispatch:
+    inputs:
+      expected_version:
+        description: Stable version to require, without the leading v (blank uses latest)
+        required: false
+        type: string
+  workflow_run:
+    workflows: [Release assets]
+    types: [completed]
 
 permissions:
   contents: read
 
 jobs:
+  expected:
+    name: Resolve expected release
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - id: release
+        name: Resolve stable version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_RELEASE_REF: ${{ inputs.expected_version }}
+        run: |
+          release_ref="$MANUAL_RELEASE_REF"
+          if [ -z "$release_ref" ]; then
+            release_ref=$(curl -fsSL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              https://api.github.com/repos/BeamoINT/Claudex/releases/latest | jq -r '.tag_name // empty')
+          fi
+          version=${release_ref#v}
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
   linux:
     name: Linux install from claudex.work
+    needs: expected
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      EXPECTED_VERSION: ${{ needs.expected.outputs.version }}
     steps:
       - name: Run the public bootstrap
         run: curl -fsSL --proto '=https' --tlsv1.2 https://claudex.work/install.sh | bash
@@ -23,12 +60,20 @@ jobs:
           command -v claudex
           command -v claude
           command -v codex
+          test "$(jq -r '.version // empty' "$HOME/.config/claudex/install.json")" = "$EXPECTED_VERSION"
+          test "$(jq -r '.method // empty' "$HOME/.config/claudex/install.json")" = archive
+          test -f "$HOME/.config/claudex/skill-bridge.cjs"
+          node --check "$HOME/.config/claudex/skill-bridge.cjs"
+          claudex skills >/dev/null
           claudex self-update --status
 
   macos:
     name: macOS install from claudex.work
+    needs: expected
     runs-on: macos-latest
     timeout-minutes: 20
+    env:
+      EXPECTED_VERSION: ${{ needs.expected.outputs.version }}
     steps:
       - name: Run the public bootstrap
         run: curl -fsSL --proto '=https' --tlsv1.2 https://claudex.work/install.sh | bash
@@ -38,12 +83,20 @@ jobs:
           command -v claudex
           command -v claude
           command -v codex
+          test "$(jq -r '.version // empty' "$HOME/.config/claudex/install.json")" = "$EXPECTED_VERSION"
+          test "$(jq -r '.method // empty' "$HOME/.config/claudex/install.json")" = archive
+          test -f "$HOME/.config/claudex/skill-bridge.cjs"
+          node --check "$HOME/.config/claudex/skill-bridge.cjs"
+          claudex skills >/dev/null
           claudex self-update --status
 
   windows:
     name: Windows install from claudex.work
+    needs: expected
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      EXPECTED_VERSION: ${{ needs.expected.outputs.version }}
     steps:
       - name: Run the public bootstrap
         shell: powershell
@@ -57,5 +110,15 @@ jobs:
           if (-not (Test-Path -LiteralPath $launcher)) { throw "launcher not found at $launcher" }
           if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { throw 'Claude Code was not installed' }
           if (-not (Get-Command codex -ErrorAction SilentlyContinue)) { throw 'Codex CLI was not installed' }
+          $configDir = Join-Path $env:USERPROFILE '.config\claudex'
+          $receipt = Get-Content -LiteralPath (Join-Path $configDir 'install.json') -Raw | ConvertFrom-Json
+          if ([string]$receipt.version -cne $env:EXPECTED_VERSION) { throw "installed $($receipt.version), expected $env:EXPECTED_VERSION" }
+          if ([string]$receipt.method -cne 'archive') { throw "unexpected install method: $($receipt.method)" }
+          $skillBridge = Join-Path $configDir 'skill-bridge.cjs'
+          if (-not (Test-Path -LiteralPath $skillBridge -PathType Leaf)) { throw 'skill bridge was not installed' }
+          & node --check $skillBridge
+          if ($LASTEXITCODE -ne 0) { throw 'installed skill bridge failed syntax validation' }
+          & $launcher skills | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "claudex skills exited with $LASTEXITCODE" }
           & $launcher self-update --status
           if ($LASTEXITCODE -ne 0) { throw "claudex self-update --status exited with $LASTEXITCODE" }

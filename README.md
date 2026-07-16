@@ -48,7 +48,7 @@ scoop install beamoint/claudex
 Then run `claudex --login`. Package installs bootstrap their private managed
 configuration automatically on first use. See the
 [package-manager guide](docs/package-managers.md) for upgrades and WinGet
-submission status.
+submission status; WinGet is not currently an installable channel.
 
 ### macOS, Linux, or WSL
 
@@ -140,7 +140,7 @@ Claude Code's own platform limitations still apply. In particular, native Window
 | --- | --- |
 | [Documentation index](docs/README.md) | Find the right guide quickly |
 | [Installation](docs/installation.md) | Requirements, setup, updates, and removal |
-| [Package managers](docs/package-managers.md) | Homebrew, Scoop, and WinGet installation |
+| [Package managers](docs/package-managers.md) | Homebrew and Scoop installation; WinGet submission status |
 | [Usage](docs/usage.md) | Commands, model modes, Chrome, and pass-through behavior |
 | [Configuration](docs/configuration.md) | Supported environment variables and settings |
 | [Skills](docs/skills.md) | Existing Claude Code and Codex skill discovery, aliases, and compatibility |

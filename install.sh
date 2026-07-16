@@ -41,6 +41,27 @@ install_lock_owned=0
 install_lock_nonce=""
 claude_installer=""
 settings_tmp=""
+proxy_config_tmp=""
+proxy_temp_dir=""
+transaction_dir=""
+transaction_active=0
+transaction_had_files=0
+
+transaction_targets=(
+  "$launcher_target"
+  "$env_file"
+  "$proxy_config_target"
+  "$managed_proxy"
+  "$settings_target"
+  "$statusline_target"
+  "$usage_limit_target"
+  "$codex_session_target"
+  "$preload_target"
+  "$skill_bridge_target"
+  "$self_update_target"
+  "$usage_skill_target"
+  "$install_receipt_target"
+)
 
 usage() {
   printf '%s\n' 'Usage: ./install.sh [--login]'
@@ -75,6 +96,17 @@ run_as_root() {
   fi
 }
 
+can_run_as_root() {
+  [[ "$(id -u)" == 0 ]] || command -v sudo >/dev/null 2>&1
+}
+
+download_with_retry() {
+  local destination="$1" url="$2" timeout="${3:-180}"
+  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    --connect-timeout 10 --max-time "$timeout" --retry 3 --retry-delay 1 --retry-connrefused \
+    --output "$destination" "$url"
+}
+
 install_jq() {
   if command -v brew >/dev/null 2>&1; then brew install jq
   elif command -v apt-get >/dev/null 2>&1; then run_as_root apt-get update; run_as_root apt-get install -y jq
@@ -92,14 +124,16 @@ install_node() {
   if [[ "${CLAUDEX_TEST_MODE:-}" == 1 && -n "${CLAUDEX_TEST_MANAGED_NODE_DIR:-}" ]]; then
     install_managed_node
     return
-  elif command -v brew >/dev/null 2>&1; then brew install node
-  elif command -v apt-get >/dev/null 2>&1; then run_as_root apt-get update; run_as_root apt-get install -y nodejs npm
-  elif command -v dnf >/dev/null 2>&1; then run_as_root dnf install -y nodejs npm
-  elif command -v yum >/dev/null 2>&1; then run_as_root yum install -y nodejs npm
-  elif command -v zypper >/dev/null 2>&1; then run_as_root zypper --non-interactive install nodejs npm
-  elif command -v pacman >/dev/null 2>&1; then run_as_root pacman -S --needed --noconfirm nodejs npm
-  elif command -v apk >/dev/null 2>&1; then run_as_root apk add nodejs npm
-  else fail 'Node.js 18 or newer and npm are required, and no supported package manager was found'
+  fi
+  if command -v brew >/dev/null 2>&1; then
+    brew install node >/dev/null 2>&1 || true
+  elif command -v apt-get >/dev/null 2>&1 && can_run_as_root; then
+    { run_as_root apt-get update && run_as_root apt-get install -y nodejs npm; } >/dev/null 2>&1 || true
+  elif command -v dnf >/dev/null 2>&1 && can_run_as_root; then run_as_root dnf install -y nodejs npm >/dev/null 2>&1 || true
+  elif command -v yum >/dev/null 2>&1 && can_run_as_root; then run_as_root yum install -y nodejs npm >/dev/null 2>&1 || true
+  elif command -v zypper >/dev/null 2>&1 && can_run_as_root; then run_as_root zypper --non-interactive install nodejs npm >/dev/null 2>&1 || true
+  elif command -v pacman >/dev/null 2>&1 && can_run_as_root; then run_as_root pacman -S --needed --noconfirm nodejs npm >/dev/null 2>&1 || true
+  elif command -v apk >/dev/null 2>&1 && can_run_as_root; then run_as_root apk add nodejs npm >/dev/null 2>&1 || true
   fi
   if ! node_is_compatible; then install_managed_node; fi
 }
@@ -111,8 +145,12 @@ node_is_compatible() {
 }
 
 install_managed_node() {
-  [[ "$(uname -s)" == Linux ]] || fail 'the system package manager did not provide Node.js 18 or newer'
-  local architecture archive base_url sums expected actual node_tmp extracted backup="" fixture
+  local platform architecture archive base_url sums expected actual node_tmp extracted backup="" fixture
+  case "$(uname -s)" in
+    Darwin) platform=darwin ;;
+    Linux) platform=linux ;;
+    *) fail 'the system package manager did not provide Node.js 18 or newer on this platform' ;;
+  esac
   case "$(uname -m)" in
     x86_64|amd64) architecture=x64 ;;
     aarch64|arm64) architecture=arm64 ;;
@@ -123,7 +161,7 @@ install_managed_node() {
   fixture=${CLAUDEX_TEST_MANAGED_NODE_DIR:-}
   if [[ "${CLAUDEX_TEST_MODE:-}" == 1 && -n "$fixture" ]]; then
     [[ -d "$fixture" && -x "$fixture/bin/node" && -x "$fixture/bin/npm" ]] || fail 'managed Node test fixture is incomplete'
-    extracted="$node_tmp/node-v22-test-linux-$architecture"
+    extracted="$node_tmp/node-v22-test-$platform-$architecture"
     mkdir -p "$extracted"
     cp -R "$fixture/." "$extracted/"
   else
@@ -132,9 +170,9 @@ install_managed_node() {
     curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
       --connect-timeout 10 --max-time 180 --retry 3 --retry-delay 1 --retry-connrefused \
       --output "$sums" "$base_url/SHASUMS256.txt"
-    archive=$(awk -v suffix="-linux-$architecture.tar.gz" '$2 ~ /^node-v[0-9]+\.[0-9]+\.[0-9]+-linux-/ && index($2, suffix) == length($2) - length(suffix) + 1 { print $2 }' "$sums")
-    [[ "$archive" != *$'\n'* && "$archive" =~ ^node-v[0-9]+\.[0-9]+\.[0-9]+-linux-(x64|arm64)\.tar\.gz$ ]] || \
-      fail 'official Node.js checksums did not contain one supported Linux archive'
+    archive=$(awk -v suffix="-$platform-$architecture.tar.gz" '$2 ~ /^node-v[0-9]+\.[0-9]+\.[0-9]+-/ && index($2, suffix) == length($2) - length(suffix) + 1 { print $2 }' "$sums")
+    [[ "$archive" != *$'\n'* && "$archive" =~ ^node-v[0-9]+\.[0-9]+\.[0-9]+-(linux|darwin)-(x64|arm64)\.tar\.gz$ ]] || \
+      fail "official Node.js checksums did not contain one supported $platform archive"
     expected=$(awk -v name="$archive" '$2 == name { print tolower($1) }' "$sums")
     [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || fail 'official Node.js checksum is invalid'
     curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
@@ -189,10 +227,114 @@ release_install_lock() {
   install_lock_owned=0
 }
 
+begin_install_transaction() {
+  local index target
+  transaction_dir=$(mktemp -d "$config_dir/.install-transaction.XXXXXX")
+  chmod 700 "$transaction_dir"
+  mkdir -p "$transaction_dir/backup"
+  : > "$transaction_dir/manifest"
+  for index in "${!transaction_targets[@]}"; do
+    target=${transaction_targets[$index]}
+    if [[ -e "$target" || -L "$target" ]]; then
+      [[ -f "$target" && ! -L "$target" ]] || fail "managed install target is not a regular file: $target"
+      cp -p "$target" "$transaction_dir/backup/$index"
+      printf '1\t%s\n' "$target" >> "$transaction_dir/manifest"
+      transaction_had_files=1
+    else
+      printf '0\t%s\n' "$target" >> "$transaction_dir/manifest"
+    fi
+  done
+  local state_tmp="$transaction_dir/.state.tmp"
+  printf '%s\n' committing > "$state_tmp"
+  mv -f "$state_tmp" "$transaction_dir/state"
+  transaction_active=1
+}
+
+transaction_target_is_allowed() {
+  local candidate="$1" target
+  for target in "${transaction_targets[@]}"; do [[ "$candidate" != "$target" ]] || return 0; done
+  return 1
+}
+
+restore_install_transaction_dir() {
+  local source="$1" index=0 existed target restore_failed=0 line_count=0
+  [[ -r "$source/manifest" ]] || return 1
+  while IFS=$'\t' read -r existed target; do
+    [[ "$existed" == 0 || "$existed" == 1 ]] || return 1
+    transaction_target_is_allowed "$target" || return 1
+    [[ "$target" == "${transaction_targets[$index]:-}" ]] || return 1
+    if [[ "$existed" == 1 ]]; then
+      [[ -f "$source/backup/$index" ]] || return 1
+      mkdir -p "$(dirname "$target")" 2>/dev/null || restore_failed=1
+      cp -p "$source/backup/$index" "$target" 2>/dev/null || restore_failed=1
+    else
+      rm -f "$target" 2>/dev/null || restore_failed=1
+    fi
+    index=$(( index + 1 ))
+    line_count=$(( line_count + 1 ))
+  done < "$source/manifest"
+  (( line_count == ${#transaction_targets[@]} )) || return 1
+  (( restore_failed == 0 )) || return 1
+  rm -rf "$source"
+}
+
+restore_install_transaction() {
+  (( transaction_active == 1 )) || return 0
+  local source="$transaction_dir"
+  transaction_active=0
+  transaction_dir=""
+  if ! restore_install_transaction_dir "$source"; then
+    printf '%s\n' 'install.sh: installation failed and automatic rollback was incomplete; restore the latest private backup before retrying.' >&2
+    return 1
+  fi
+  printf '%s\n' 'install.sh: installation failed; restored the previous managed installation.' >&2
+}
+
+recover_incomplete_install_transactions() {
+  local source state recovered=0
+  for source in "$config_dir"/.install-transaction.*; do
+    [[ -d "$source" ]] || continue
+    state=""
+    [[ ! -r "$source/state" ]] || read -r state < "$source/state" || true
+    if [[ -z "$state" ]]; then
+      # The journal is written before the first managed mutation. A directory
+      # without state is therefore an abandoned pre-commit snapshot.
+      rm -rf "$source"
+      continue
+    fi
+    [[ "$state" == committing ]] || fail "unrecognized interrupted installer transaction: $source"
+    restore_install_transaction_dir "$source" || fail "could not recover interrupted installer transaction: $source"
+    recovered=1
+  done
+  (( recovered == 0 )) || printf '%s\n' 'Recovered the previous interrupted Claudex installation before continuing.'
+}
+
+commit_install_transaction() {
+  (( transaction_active == 1 )) || return 0
+  local backup_dir
+  transaction_active=0
+  if (( transaction_had_files == 1 )); then
+    backup_dir="$config_dir/backups/install-$(date +%Y%m%d-%H%M%S)-$$"
+    mkdir -p "$(dirname "$backup_dir")"
+    mv "$transaction_dir" "$backup_dir"
+    chmod 700 "$backup_dir"
+    printf 'Backed up the previous managed files to %s\n' "$backup_dir"
+  else
+    rm -rf "$transaction_dir"
+  fi
+  transaction_dir=""
+}
+
 cleanup() {
+  local status=$?
+  if (( transaction_active == 1 )); then restore_install_transaction || true; fi
   [[ -z "$claude_installer" ]] || rm -f "$claude_installer"
   [[ -z "$settings_tmp" ]] || rm -f "$settings_tmp"
+  [[ -z "$proxy_config_tmp" ]] || rm -f "$proxy_config_tmp"
+  [[ -z "$proxy_temp_dir" ]] || rm -rf "$proxy_temp_dir"
+  [[ -z "$transaction_dir" ]] || rm -rf "$transaction_dir" 2>/dev/null || true
   release_install_lock
+  return "$status"
 }
 
 acquire_install_lock() {
@@ -251,28 +393,29 @@ managed_proxy_is_current() {
 }
 
 install_proxy() {
-  local os arch expected asset url archive actual temp_dir details
+  local os arch expected asset url archive actual details
   details=$(proxy_asset_details) || return
   read -r os arch expected <<< "$details"
   asset="CLIProxyAPI_${proxy_version}_${os}_${arch}.tar.gz"
   url="https://github.com/router-for-me/CLIProxyAPI/releases/download/v${proxy_version}/${asset}"
-  temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/claudex-proxy.XXXXXX")
-  trap 'rm -rf "$temp_dir"' RETURN
-  archive="$temp_dir/$asset"
+  proxy_temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/claudex-proxy.XXXXXX")
+  archive="$proxy_temp_dir/$asset"
   printf 'Downloading verified internal compatibility service v%s for %s/%s...\n' "$proxy_version" "$os" "$arch"
-  curl --fail --location --proto '=https' --tlsv1.2 --output "$archive" "$url"
+  download_with_retry "$archive" "$url" 300
   actual=$(sha256_file "$archive")
   [[ "$actual" == "$expected" ]] || fail "compatibility service checksum mismatch for $asset"
-  tar -xzf "$archive" -C "$temp_dir" cli-proxy-api
-  install -m 755 "$temp_dir/cli-proxy-api" "$managed_proxy"
-  rm -rf "$temp_dir"
-  trap - RETURN
+  tar -xzf "$archive" -C "$proxy_temp_dir" cli-proxy-api
+  install -m 755 "$proxy_temp_dir/cli-proxy-api" "$managed_proxy"
+  rm -rf "$proxy_temp_dir"
+  proxy_temp_dir=""
 }
 
 mkdir -p "$bin_dir" "$config_dir" "$managed_bin_dir" "$auth_dir"
 chmod 700 "$config_dir" "$managed_bin_dir" "$auth_dir"
 acquire_install_lock
 trap cleanup EXIT
+recover_incomplete_install_transactions
+begin_install_transaction
 
 if [[ "$skip_deps" != 1 ]]; then
   command -v curl >/dev/null 2>&1 || fail 'curl is required to install Claudex'
@@ -282,7 +425,7 @@ if [[ "$skip_deps" != 1 ]]; then
   if ! command -v claude >/dev/null 2>&1; then
     printf '%s\n' "Installing Claude Code with Anthropic's native installer..."
     claude_installer=$(mktemp "${TMPDIR:-/tmp}/claude-install.XXXXXX")
-    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --output "$claude_installer" https://claude.ai/install.sh
+    download_with_retry "$claude_installer" https://claude.ai/install.sh 180
     bash "$claude_installer"
     rm -f "$claude_installer"
     claude_installer=""
@@ -342,6 +485,7 @@ fi
 json_token=$(printf '%s' "$proxy_token" | jq -Rs '.')
 json_auth_dir=$(printf '%s' "$runtime_auth_dir" | jq -Rs '.')
 umask 077
+proxy_config_tmp=$(mktemp "$config_dir/.cliproxyapi.yaml.tmp.XXXXXX")
 {
   printf 'host: "127.0.0.1"\n'
   printf 'port: %s\n' "$proxy_port"
@@ -351,8 +495,10 @@ umask 077
   printf 'usage-statistics-enabled: false\nrequest-retry: 3\nmax-retry-credentials: 1\n'
   printf 'max-retry-interval: 5\ntransient-error-cooldown-seconds: 1\n'
   printf 'streaming:\n  keepalive-seconds: 15\n  bootstrap-retries: 2\n'
-} > "$proxy_config_target"
-chmod 600 "$proxy_config_target"
+} > "$proxy_config_tmp"
+chmod 600 "$proxy_config_tmp"
+mv -f "$proxy_config_tmp" "$proxy_config_target"
+proxy_config_tmp=""
 
 env_tmp=$(mktemp "$config_dir/.env.tmp.XXXXXX")
 {
@@ -368,18 +514,6 @@ env_tmp=$(mktemp "$config_dir/.env.tmp.XXXXXX")
 } > "$env_tmp"
 mv -f "$env_tmp" "$env_file"
 chmod 600 "$env_file"
-
-timestamp=$(date +%Y%m%d-%H%M%S)
-backup_dir="$config_dir/backups/install-$timestamp"
-backed_up=0
-for managed_file in "$launcher_target" "$settings_target" "$statusline_target" "$usage_limit_target" "$codex_session_target" "$preload_target" "$skill_bridge_target" "$self_update_target" "$usage_skill_target" "$install_receipt_target"; do
-  if [[ -e "$managed_file" ]]; then
-    mkdir -p "$backup_dir"
-    cp -p "$managed_file" "$backup_dir/$(basename "$managed_file")"
-    backed_up=1
-  fi
-done
-(( backed_up == 0 )) || printf 'Backed up the previous managed files to %s\n' "$backup_dir"
 
 install -m 755 "$root/claudex" "$launcher_target"
 install -m 755 "$root/statusline" "$statusline_target"
@@ -419,10 +553,10 @@ if [[ -z "${CLAUDEX_PACKAGE_ROOT:-}" && ! "${CLAUDEX_INSTALL_METHOD:-}" =~ ^(hom
 fi
 
 auth_ready=0
-if "$codex_session_target" sync >/dev/null 2>&1; then
-  auth_ready=1
-elif (( login )); then
+if (( login )); then
   "$codex_session_target" login
+  auth_ready=1
+elif "$codex_session_target" sync >/dev/null 2>&1; then
   auth_ready=1
 elif [[ "$skip_deps" != 1 ]] && installer_is_interactive; then
   printf '%s\n' 'Codex sign-in is required. Opening the official browser login now...'
@@ -438,3 +572,5 @@ if [[ "$skip_service" != 1 && "$auth_ready" == 1 ]]; then
   else fail 'the live compatibility check did not pass; run `claudex --doctor` for details'
   fi
 fi
+
+commit_install_transaction

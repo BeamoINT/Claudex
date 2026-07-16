@@ -71,6 +71,7 @@ they fit.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CLAUDEX_PROXY_URL` | `http://127.0.0.1:8318` | Local compatibility endpoint |
+| `CLAUDEX_ALLOW_REMOTE_PROXY` | `0` | Set to `1` only to allow an explicitly configured HTTPS remote proxy |
 | `CLAUDEX_PROXY_TOKEN` | generated during install | Local service authentication key |
 | `CLAUDEX_PROXY_CONFIG` | `<config>/cliproxyapi.yaml` | Generated service config |
 | `CLAUDEX_PROXY_BIN` | installed managed binary | Compatibility executable path |
@@ -79,8 +80,10 @@ they fit.
 | `CLAUDEX_CODEX_AUTH_FILE` | automatic | Explicit credential for advanced usage selection |
 | `CLAUDEX_DISABLE_INTERACTIVE_LOGIN` | `0` | Set to `1` to keep foreground startup browser-free and require an explicit `claudex --login` |
 
-Do not point the proxy at a non-loopback address without a separate security
-review. Never share or commit `CLAUDEX_PROXY_TOKEN` or any Codex credential.
+Claudex rejects non-loopback proxy URLs before sending credentials. A reviewed
+remote deployment requires both an HTTPS URL and
+`CLAUDEX_ALLOW_REMOTE_PROXY=1`; automatic local process recovery is disabled
+for remote endpoints. Never share or commit `CLAUDEX_PROXY_TOKEN` or any Codex credential.
 The generated config performs three bounded retries for transient upstream 5xx
 responses plus two pre-stream bootstrap retries, with short cooldowns so a
 recovered blip does not flash as a user-facing API error.
@@ -136,7 +139,7 @@ details and are not a stable public interface.
 | `~/.config/claudex/codex-accounts` | Mode-restricted local credential bridge |
 | `~/.config/claudex/usage-cache` | Sanitized usage values only |
 | `~/.config/claudex/statusline-cache` | Per-session context percentages |
-| `~/.config/claudex/backups` | Previous managed files from reinstalls |
+| `~/.config/claudex/backups` | Private transaction generations containing previous managed files, including env and proxy config, from successful reinstalls |
 
 Run `claudex --doctor` after changing configuration. Invalid values fail fast
 with the accepted range or enum.
