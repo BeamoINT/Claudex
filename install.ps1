@@ -405,7 +405,14 @@ function Recover-IncompleteInstallTransactions([string[]] $ManagedPaths) {
         $state = ([IO.File]::ReadAllText($statePath)).Trim()
         if ($state -ne 'committing') { Fail "unrecognized interrupted installer transaction: $($directory.FullName)" }
         $manifestPath = Join-Path $directory.FullName 'manifest.json'
-        try { $entries = @(Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json) }
+        try {
+            # Windows PowerShell 5 can emit a top-level JSON array as one
+            # non-enumerated pipeline object. Flatten it explicitly so a valid
+            # transaction is not miscounted as a single manifest entry.
+            $parsedEntries = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            $entries = @()
+            foreach ($entry in $parsedEntries) { $entries += $entry }
+        }
         catch { Fail "invalid interrupted installer transaction manifest: $manifestPath" }
         $restoreErrors = @(Restore-InstallTransactionEntries $directory.FullName $entries $ManagedPaths)
         if ($restoreErrors.Count -gt 0) { Fail "could not recover interrupted installer transaction: $($restoreErrors -join '; ')" }
