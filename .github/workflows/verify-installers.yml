@@ -21,7 +21,9 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           command -v claudex
-          claudex --version
+          command -v claude
+          command -v codex
+          claudex self-update --status
 
   macos:
     name: macOS install from claudex.work
@@ -34,7 +36,9 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           command -v claudex
-          claudex --version
+          command -v claude
+          command -v codex
+          claudex self-update --status
 
   windows:
     name: Windows install from claudex.work
@@ -47,7 +51,11 @@ jobs:
       - name: Installed launcher responds
         shell: powershell
         run: |
-          $launcher = Join-Path $env:USERPROFILE '.local\bin\claudex.cmd'
+          $installBin = Join-Path $env:USERPROFILE '.local\bin'
+          $env:PATH = "$installBin$([IO.Path]::PathSeparator)$env:PATH"
+          $launcher = Join-Path $installBin 'claudex.cmd'
           if (-not (Test-Path -LiteralPath $launcher)) { throw "launcher not found at $launcher" }
-          & $launcher --version
-          if ($LASTEXITCODE -ne 0) { throw "claudex --version exited with $LASTEXITCODE" }
+          if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { throw 'Claude Code was not installed' }
+          if (-not (Get-Command codex -ErrorAction SilentlyContinue)) { throw 'Codex CLI was not installed' }
+          & $launcher self-update --status
+          if ($LASTEXITCODE -ne 0) { throw "claudex self-update --status exited with $LASTEXITCODE" }

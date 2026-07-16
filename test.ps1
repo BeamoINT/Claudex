@@ -292,7 +292,7 @@ switch ($Action) {
         environment = @('User custom environment rule')
         soft_deny = @('User custom soft deny rule')
         hard_deny = @('User custom hard deny rule')
-    })
+    }) -Force
     [IO.File]::WriteAllText((Join-Path $testConfig 'settings.json'), ($seedSettings | ConvertTo-Json -Depth 100), $utf8)
 
     $output = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
