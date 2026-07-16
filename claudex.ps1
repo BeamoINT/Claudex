@@ -11,9 +11,10 @@ for ($hostIndex = 0; $hostIndex + 1 -lt $hostArguments.Count; $hostIndex++) {
     } catch { continue }
     if (-not [StringComparer]::OrdinalIgnoreCase.Equals($hostScriptPath, $currentScriptPath)) { continue }
     $firstHostArgument = $hostIndex + 2
-    $ClaudeArguments = if ($firstHostArgument -lt $hostArguments.Count) {
+    $rawClaudeArguments = if ($firstHostArgument -lt $hostArguments.Count) {
         [string[]] $hostArguments[$firstHostArgument..($hostArguments.Count - 1)]
     } else { [string[]] @() }
+    if ($rawClaudeArguments -contains '--') { $ClaudeArguments = $rawClaudeArguments }
     break
 }
 if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '-ClaudexInternalProxyWatchParentProcessId') {
