@@ -5,6 +5,23 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-07-15
+
+### Changed
+
+- Shortened visible custom-agent names to `Terra` and `Luna` and standardized
+  their task labels as `Model - concise task`, while retaining the managed
+  Codex/OpenAI model IDs behind those labels.
+
+### Fixed
+
+- Corrected curl header-file syntax in authenticated proxy health checks. The
+  authorization token remains outside the process argument list, and healthy
+  bridge sessions no longer produce a false token-rejection error.
+- Isolated proxy recovery tests from locally installed Homebrew services and
+  added a regression that rejects literal header-file paths without curl's
+  required `@` prefix.
+
 ## [1.3.0] - 2026-07-15
 
 ### Changed

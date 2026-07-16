@@ -55,6 +55,11 @@ entry for each managed model:
 - **GPT-5.6 Luna** — fast search, triage, and bounded mechanical tasks;
 - **GPT-5.6 Solplan** — Sol in plan mode and Terra during implementation.
 
+Delegated activity uses the short visible agent names `Terra` and `Luna` while
+retaining those full Codex model routes internally. Each activity includes a
+concise task label, for example `Terra - Audit JSON parser bugs`. Sol remains
+the leader unless the user supplies an explicit custom agent configuration.
+
 Enter `/model solplan` as a shortcut for the built-in plan/execution selector.
 Claudex does not activate plan mode merely because a task is large; plan mode
 is reserved for explicit planning or a decision that must precede execution.

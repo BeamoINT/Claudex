@@ -7,7 +7,12 @@ trap 'rm -rf "$tmp"' EXIT
 trap 'status=$?; printf "test.zsh: command failed at line %s (exit %s)\n" "$LINENO" "$status" >&2; exit "$status"' ERR
 
 mkdir -p "$tmp/home/.config/claudex" "$tmp/home/.cli-proxy-api" "$tmp/home/.codex" "$tmp/bin"
-printf '%s\n' 'CLAUDEX_PROXY_TOKEN=test-token' "CLAUDEX_CODEX_AUTH_DIR=$tmp/home/.cli-proxy-api" > "$tmp/home/.config/claudex/env"
+: > "$tmp/home/.config/claudex/cliproxyapi.yaml"
+printf '%s\n' \
+  'CLAUDEX_PROXY_TOKEN=test-token' \
+  "CLAUDEX_CODEX_AUTH_DIR=$tmp/home/.cli-proxy-api" \
+  "CLAUDEX_PROXY_CONFIG=$tmp/home/.config/claudex/cliproxyapi.yaml" \
+  > "$tmp/home/.config/claudex/env"
 cp "$root/settings.json" "$tmp/home/.config/claudex/settings.json"
 cp "$root/usage-limit" "$tmp/home/.config/claudex/usage-limit"
 cp "$root/codex-session" "$tmp/home/.config/claudex/codex-session"
@@ -22,10 +27,16 @@ EOF
 
 cat > "$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
-for argument in "$@"; do
+arguments=("$@")
+for (( index = 0; index < ${#arguments[@]}; index++ )); do
+  argument="${arguments[$index]}"
   if [[ "$argument" == *'test-token'* || "$argument" == *'secret-access-token'* ]]; then
     printf '%s\n' 'credential leaked into curl arguments' >&2
     exit 90
+  fi
+  if [[ "$argument" == '--header' && "${arguments[$((index + 1))]:-}" == /dev/fd/* ]]; then
+    printf '%s\n' 'curl header file path is missing the required @ prefix' >&2
+    exit 91
   fi
   if [[ "$argument" == *'/wham/usage'* ]]; then
     [[ "${FAKE_USAGE_FAIL:-0}" != 1 ]] || exit 22
@@ -79,7 +90,7 @@ fi
 [[ -z "${FAKE_CLAUDE_DELAY:-}" ]] || sleep "$FAKE_CLAUDE_DELAY"
 if [[ "${FAKE_PROXY_RECOVERY:-0}" == 1 ]]; then
   rm -f "$FAKE_PROXY_READY_FILE"
-  for attempt in {1..60}; do
+  for attempt in {1..100}; do
     [[ -e "$FAKE_PROXY_READY_FILE" ]] && break
     sleep 0.1
   done
@@ -227,8 +238,9 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" == *'Ask as few questions as possible'* ]]
 [[ "$default_output" == *'Never repeat a question the user already answered'* ]]
 [[ "$default_output" == *'Do not call EnterPlanMode'* ]]
-[[ "$default_output" == *'"gpt-5-6-terra"'* ]]
-[[ "$default_output" == *'"gpt-5-6-luna"'* ]]
+[[ "$default_output" == *'"Terra"'* ]]
+[[ "$default_output" == *'"Luna"'* ]]
+[[ "$default_output" == *'Terra - Audit JSON parser bugs'* ]]
 [[ "$default_output" != *'"claudex-deep"'* ]]
 [[ "$default_output" != *'"claudex-builder"'* ]]
 [[ "$default_output" != *'"claudex-fast"'* ]]
@@ -344,7 +356,7 @@ explicit_permission_output=$(run_wrapper --permission-mode plan test-prompt)
 
 explicit_agents_output=$(run_wrapper --agents '{}' test-prompt)
 [[ "$explicit_agents_output" == *'--agents {}'* ]]
-[[ "$explicit_agents_output" != *'"gpt-5-6-terra"'* ]]
+[[ "$explicit_agents_output" != *'"Terra"'* ]]
 
 chrome_output=$(run_wrapper --claude-chrome --print chrome-test)
 [[ "$chrome_output" == *'ARGS=--chrome --print chrome-test'* ]]
