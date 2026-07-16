@@ -86,6 +86,10 @@ For release downloads, system requirements, updating, and removal, see the [inst
 - Auto, max-effort, and Ultracode modes with explicit and separate behavior.
 - Stable context accounting and automatic compaction near 280k tokens.
 - Codex usage-limit reporting in the status line and through `/usage-limit`.
+- The detected ChatGPT subscription tier in the startup banner instead of
+  Claude Code's misleading API-billing label.
+- Native agent activity labels that include model, reasoning effort, and task,
+  such as `Terra (high) - Audit JSON parser bugs`.
 - Cross-platform launchers and installers for macOS, Linux, Windows, and WSL.
 - Claude Code argument pass-through, resume-command rewriting, task cleanup, bounded retries, and compatibility detection.
 - A clean full-screen terminal experience without exposing launch commands or internal tool traffic unnecessarily.

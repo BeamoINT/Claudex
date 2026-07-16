@@ -1,14 +1,49 @@
 'use strict';
 
-// Claude Code 2.1.210 has no supported setting for hiding its hardcoded
-// "API Usage Billing" welcome label. Filter only that exact rendered phrase
-// in terminal output; do not modify the signed Claude binary or conversation data.
+// Claude Code 2.1.211 has no supported setting for replacing its hardcoded
+// "API Usage Billing" welcome label for a custom API-compatible backend.
+// Claudex replaces only that one startup field with the real ChatGPT plan.
+// It never modifies the signed Claude binary or conversation data.
 const csi = '\\x1b\\[[0-?]*[ -\\/]*[@-~]';
 const positionedBilling = new RegExp(
   `${csi}·${csi}API${csi}Usage${csi}Billing`,
   'g',
 );
 const splitPositionedBilling = new RegExp(`· API Usage Bil${csi}ing`, 'g');
+const welcomeBillingColumns = /\x1b\[(\d+)GAPI\x1b\[(\d+)GUsage\x1b\[(\d+)GBilling/;
+const billingFieldWidth = 'API Usage Billing'.length;
+const welcomeFrameMarker = '\x1b[?1049h';
+
+function chatGptPlanLabel(value = process.env.CLAUDEX_CHATGPT_PLAN_LABEL) {
+  const label = typeof value === 'string' ? value.trim() : '';
+  return /^ChatGPT(?: (?:Free|Go|Plus|Pro|Business|Enterprise|Edu|Teachers|K-12|Healthcare))?$/.test(label)
+    ? label
+    : 'ChatGPT';
+}
+
+function replaceWelcomeBillingColumns(text, label = chatGptPlanLabel(), options = {}) {
+  if (options.requireWelcomeFrame
+      && (!text.includes(welcomeFrameMarker) || !text.includes('Claude Code'))) {
+    return { output: text, replaced: false };
+  }
+  let replaced = false;
+  const output = text.replace(welcomeBillingColumns, (match, apiColumnText, usageColumnText, billingColumnText) => {
+    const apiColumn = Number.parseInt(apiColumnText, 10);
+    const usageColumn = Number.parseInt(usageColumnText, 10);
+    const billingColumn = Number.parseInt(billingColumnText, 10);
+    if (usageColumn !== apiColumn + 4 || billingColumn !== apiColumn + 10) return match;
+
+    // Consumer labels fit the native 17-cell field. The two 18-character
+    // workspace labels use the blank cell immediately before the field so the
+    // exact plan remains visible without moving the native end cursor.
+    const overflow = Math.max(0, label.length - billingFieldWidth);
+    if (overflow > 1 || apiColumn <= overflow) return match;
+    const replacement = overflow === 0 ? label.padEnd(billingFieldWidth, ' ') : label;
+    replaced = true;
+    return `\x1b[${apiColumn - overflow}G${replacement}`;
+  });
+  return { output, replaced };
+}
 
 function terminalPhrasePattern(phrase) {
   const separator = `(?:${csi})*`;
@@ -23,8 +58,14 @@ function replaceTerminalPhrase(text, phrase, replacement) {
   return text.replace(new RegExp(terminalPhrasePattern(phrase), 'g'), replacement);
 }
 
-function withoutBillingLabel(text) {
-  return replaceTerminalPhrase(text.replace(positionedBilling, '').replace(splitPositionedBilling, ''), '· API Usage Billing', '');
+function withChatGptPlanLabel(text, label = chatGptPlanLabel()) {
+  const positioned = replaceWelcomeBillingColumns(text, label).output;
+  const replacement = `· ${label}`;
+  return replaceTerminalPhrase(
+    positioned.replace(positionedBilling, replacement).replace(splitPositionedBilling, replacement),
+    '· API Usage Billing',
+    replacement,
+  );
 }
 
 // Claude Code owns the session ID, but users launched this session through
@@ -75,7 +116,7 @@ function replaceModelFooterLabels(text) {
 }
 
 function filterClaudexOutput(text) {
-  let filtered = replaceModelFooterLabels(withoutBillingLabel(text).replace(resumeCommand, 'claudex$1'));
+  let filtered = replaceModelFooterLabels(withChatGptPlanLabel(text).replace(resumeCommand, 'claudex$1'));
   for (const [phrase, replacement] of [
     ['Opus Plan Mode', 'GPT-5.6 Solplan'],
     ['Opus Plan', 'GPT-5.6 Solplan'],
@@ -86,6 +127,52 @@ function filterClaudexOutput(text) {
     filtered = replaceTerminalPhrase(filtered, phrase, replacement);
   }
   return filtered;
+}
+
+function installWelcomePlanFilter() {
+  const testOverride = process.env.CLAUDEX_TEST_WELCOME_FILTER === '1';
+  if (process.env.CLAUDEX_INTERACTIVE_TUI !== '1'
+      || (!process.stdout.isTTY && !testOverride)
+      || !process.env.CLAUDEX_CHATGPT_PLAN_LABEL) return;
+
+  const originalWrite = process.stdout.write;
+  let inspectedBytes = 0;
+  let active = true;
+  const restore = () => {
+    if (!active) return;
+    active = false;
+    if (process.stdout.write === filteredWrite) process.stdout.write = originalWrite;
+  };
+  function filteredWrite(chunk, encoding, callback) {
+    if (!active) return originalWrite.call(this, chunk, encoding, callback);
+    let output = chunk;
+    let replaced = false;
+    let sawWelcomeFrame = false;
+    if (typeof chunk === 'string') {
+      sawWelcomeFrame = chunk.includes(welcomeFrameMarker) && chunk.includes('Claude Code');
+      const result = replaceWelcomeBillingColumns(chunk, chatGptPlanLabel(), { requireWelcomeFrame: true });
+      output = result.output;
+      replaced = result.replaced;
+      inspectedBytes += Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : 'utf8');
+    } else if (Buffer.isBuffer(chunk) || chunk instanceof Uint8Array) {
+      const source = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+      const sourceText = source.toString('latin1');
+      sawWelcomeFrame = sourceText.includes(welcomeFrameMarker) && sourceText.includes('Claude Code');
+      const result = replaceWelcomeBillingColumns(sourceText, chatGptPlanLabel(), { requireWelcomeFrame: true });
+      if (result.replaced) output = Buffer.from(result.output, 'latin1');
+      replaced = result.replaced;
+      inspectedBytes += source.length;
+    }
+    // Current Claude Code emits its complete welcome frame atomically. Restore
+    // after that frame even if its layout changes: keeping cross-write text
+    // state would risk corrupting arbitrary terminal and machine output.
+    if (sawWelcomeFrame || replaced || inspectedBytes >= 1024 * 1024) restore();
+    return originalWrite.call(this, output, encoding, callback);
+  }
+
+  process.stdout.write = filteredWrite;
+  const timeout = setTimeout(restore, 15000);
+  timeout.unref?.();
 }
 
 // Claude Code's plan/execution switching is implemented by its built-in
@@ -379,8 +466,16 @@ if (process.stdin.isTTY || process.env.CLAUDEX_TEST_TTY_INPUT === '1') {
   }
 }
 
-// Never rewrite process output. Fullscreen frames depend on exact byte counts,
-// while print/JSON modes treat stdout as user or machine data. The pure helper
-// remains exported for focused compatibility diagnostics only.
+// Keep all process output native except for the one welcome-field write above.
+// The replacement preserves Claude Code's absolute cursor anchor, fills the
+// original field width, restores the native writer immediately, and never runs
+// for print/JSON output.
+installWelcomePlanFilter();
 
-module.exports = { createInputRewriter, filterClaudexOutput, rewriteSolplanInput };
+module.exports = {
+  chatGptPlanLabel,
+  createInputRewriter,
+  filterClaudexOutput,
+  replaceWelcomeBillingColumns,
+  rewriteSolplanInput,
+};

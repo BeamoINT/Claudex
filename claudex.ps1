@@ -22,7 +22,7 @@ $sessionEnvironmentNames = @(
     'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES', 'CLAUDE_CODE_AUTO_MODE_MODEL',
     'CLAUDE_CODE_BG_CLASSIFIER_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_ALWAYS_ENABLE_EFFORT',
     'CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY', 'CLAUDE_CODE_MAX_RETRIES', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
-    'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_CODE_DISABLE_1M_CONTEXT'
+    'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'CLAUDEX_CHATGPT_PLAN_LABEL'
 )
 $previousSessionEnvironment = @{}
 foreach ($environmentName in $sessionEnvironmentNames) {
@@ -1004,6 +1004,7 @@ function Invoke-Doctor {
     Write-Output "Auto-mode classifier: $autoModeModel (only used when auto mode is selected)"
     Write-Output 'Auto-mode provider: Codex/OpenAI through the authenticated loopback bridge'
     Write-Output "Subagent model: $subagentModel (Sol is reserved for the leader)"
+    Write-Output 'Managed agents: Terra (high), Luna (medium)'
     Write-Output "Tool concurrency: $toolConcurrencyNumber"
     Write-Output "Agent concurrency: $agentConcurrencyNumber"
     Write-Output 'Task lifecycle: Sol-owned with final-response reconciliation'
@@ -1138,6 +1139,7 @@ if ($directChrome) {
     else { Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
     Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
     Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue
+    Remove-Item Env:CLAUDEX_CHATGPT_PLAN_LABEL -ErrorAction SilentlyContinue
     foreach ($environmentName in $sessionEnvironmentNames | Where-Object {
         $_ -like 'ANTHROPIC_DEFAULT_*' -or $_ -like 'CLAUDE_CODE_*MODEL*' -or $_ -eq 'CLAUDE_CODE_ALWAYS_ENABLE_EFFORT'
     }) {
@@ -1146,13 +1148,51 @@ if ($directChrome) {
     $forwardArguments.Insert(0, '--chrome')
 }
 
+function Get-ChatGptPlanLabelFromCache {
+    $cacheFile = Join-Path (Join-Path $configDir 'usage-cache') 'limits.json'
+    if (-not (Test-Path -LiteralPath $cacheFile -PathType Leaf)) { return $null }
+    try {
+        $snapshot = Get-Content -LiteralPath $cacheFile -Raw | ConvertFrom-Json
+        $plan = if ($null -ne $snapshot.PSObject.Properties['plan_type']) { [string] $snapshot.plan_type } else { '' }
+        $normalized = ($plan.ToLowerInvariant() -replace '[^a-z0-9]', '')
+        switch ($normalized) {
+            { $_ -in @('free', 'chatgptfree') } { return 'ChatGPT Free' }
+            { $_ -in @('go', 'chatgptgo') } { return 'ChatGPT Go' }
+            { $_ -in @('plus', 'chatgptplus') } { return 'ChatGPT Plus' }
+            { $_ -in @('pro', 'chatgptpro') } { return 'ChatGPT Pro' }
+            { $_ -in @('team', 'chatgptteam', 'business', 'chatgptbusiness') } { return 'ChatGPT Business' }
+            { $_ -in @('enterprise', 'chatgptenterprise') } { return 'ChatGPT Enterprise' }
+            { $_ -in @('edu', 'education', 'chatgptedu', 'chatgpteducation') } { return 'ChatGPT Edu' }
+            { $_ -in @('teacher', 'teachers', 'chatgptteacher', 'chatgptteachers') } { return 'ChatGPT Teachers' }
+            { $_ -in @('k12', 'chatgptk12') } { return 'ChatGPT K-12' }
+            { $_ -in @('healthcare', 'chatgpthealthcare') } { return 'ChatGPT Healthcare' }
+            default { return $null }
+        }
+    } catch { return $null }
+}
+
+function Set-ChatGptPlanLabel {
+    Remove-Item Env:CLAUDEX_CHATGPT_PLAN_LABEL -ErrorAction SilentlyContinue
+    if ($env:CLAUDEX_INTERACTIVE_TUI -ne '1') { return }
+    $planLabel = Get-ChatGptPlanLabelFromCache
+    $usageHelper = Join-Path $configDir 'usage-limit.ps1'
+    # Refresh malformed, incomplete, and unknown snapshots once as well as
+    # missing ones. Otherwise a repaired login or plan can remain hidden until
+    # another command happens to rewrite the cache.
+    if (-not $planLabel -and (Test-Path -LiteralPath $usageHelper -PathType Leaf)) {
+        try { & $usageHelper -RefreshCache *> $null } catch { }
+        $planLabel = Get-ChatGptPlanLabelFromCache
+    }
+    $env:CLAUDEX_CHATGPT_PLAN_LABEL = if ($planLabel) { $planLabel } else { 'ChatGPT' }
+}
+
 if ($useProxy) {
     Assert-ProxyConfiguration
     Update-ModelCache
     if (-not $startModel) { $startModel = $model }
 }
 
-# GPT-specific input aliases and non-interactive cleanup belong only to proxied sessions.
+# GPT-specific input aliases and the one-shot welcome label belong only to proxied sessions.
 $preload = Join-Path $configDir 'preload.cjs'
 $preloadForBun = $preload.Replace('\', '/').Replace(' ', '\ ')
 $existingBunOptions = [Environment]::GetEnvironmentVariable('BUN_OPTIONS', 'Process')
@@ -1223,6 +1263,7 @@ if ($useProxy) {
     Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
     Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue
     Remove-Item Env:CLAUDE_CODE_DISABLE_1M_CONTEXT -ErrorAction SilentlyContinue
+    Remove-Item Env:CLAUDEX_CHATGPT_PLAN_LABEL -ErrorAction SilentlyContinue
 }
 $env:CLAUDE_CODE_USE_POWERSHELL_TOOL = '1'
 $env:CLAUDEX_USAGE_DISPLAY = $usageDisplay
@@ -1236,11 +1277,11 @@ $env:CLAUDE_CODE_ACCESSIBILITY = '1'
 
 $noNestedAgents = "Do not create a team, spawn or delegate to additional agents, or send intermediate progress messages to the parent. Do not create, claim, or update entries in the shared task list; the Sol leader owns task lifecycle. Complete the assigned task yourself and return one final result through the normal agent result channel. If the provider reports a 429 or model cooldown, do not launch a replacement agent or start a retry loop."
 $agents = [ordered]@{
-    'Terra' = [ordered]@{ description = 'Terra for delegated architecture, debugging, implementation, testing, security review, and other substantial engineering work.'; prompt = "You are GPT-5.6 Terra. Investigate thoroughly, make robust focused progress, verify the result, and return concise evidence-backed findings. $noNestedAgents"; model = 'gpt-5.6-terra'; effort = 'high' }
-    'Luna' = [ordered]@{ description = 'Luna for delegated search, triage, inventory, and bounded mechanical tasks.'; prompt = "You are GPT-5.6 Luna. Complete the scoped task efficiently and report only relevant verified findings. $noNestedAgents"; model = 'gpt-5.6-luna'; effort = 'medium' }
+    'Terra (high)' = [ordered]@{ description = 'Terra at high reasoning effort for delegated architecture, debugging, implementation, testing, security review, and other substantial engineering work.'; prompt = "You are GPT-5.6 Terra running at high reasoning effort. Investigate thoroughly, make robust focused progress, verify the result, and return concise evidence-backed findings. $noNestedAgents"; model = 'gpt-5.6-terra'; effort = 'high' }
+    'Luna (medium)' = [ordered]@{ description = 'Luna at medium reasoning effort for delegated search, triage, inventory, and bounded mechanical tasks.'; prompt = "You are GPT-5.6 Luna running at medium reasoning effort. Complete the scoped task efficiently and report only relevant verified findings. $noNestedAgents"; model = 'gpt-5.6-luna'; effort = 'medium' }
 }
 $agentsJson = $agents | ConvertTo-Json -Depth 10 -Compress
-$capacityGuard = "Claudex capacity rule: keep at most $agentConcurrencyNumber Agent tasks active at once. Launch no more than $agentConcurrencyNumber agents in a wave, wait for one to finish before starting another, and never create an agent team. Sol capacity is reserved for the leader; use the named Terra or Luna agents for delegated work. For every Agent call, make its description '- <concise task>' so the activity list renders labels such as 'Terra - Audit JSON parser bugs'. If a model reports a 429 or cooldown, do not launch replacement agents or create a retry storm; continue useful local work and retry at most once after active agents settle."
+$capacityGuard = "Claudex capacity rule: keep at most $agentConcurrencyNumber Agent tasks active at once. Launch no more than $agentConcurrencyNumber agents in a wave, wait for one to finish before starting another, and never create an agent team. Sol capacity is reserved for the leader; use the named Terra (high) or Luna (medium) agents for delegated work. For every Agent call, make its description '- <concise task>' so the activity list renders labels such as 'Terra (high) - Audit JSON parser bugs'. If a model reports a 429 or cooldown, do not launch replacement agents or create a retry storm; continue useful local work and retry at most once after active agents settle."
 $taskGuard = 'Claudex task lifecycle rule: the Sol leader is the sole owner of the shared task list. Keep it compact and create only tasks that represent real remaining deliverables, not duplicate discovery lanes or speculative work. Mark a task in_progress only while the leader or a currently active agent is working on it; queued or blocked work stays pending. After every agent result, immediately reconcile its parent task and mark it completed once its outcome is integrated and verified. Before every final answer, call TaskList and reconcile every entry: completed work must be completed, inactive work must not remain in_progress, and genuinely unfinished pending work must be explicitly reported instead of being hidden behind a completion claim. Never leave stale in_progress tasks after their work is done.'
 $codexGuard = "Claudex Codex-model rule: operate as a Codex coding agent inside Claude Code's interface. Treat the available Claude Code tools and their schemas as the authoritative execution protocol. Prefer direct implementation and verification for concrete change requests. Ask as few questions as possible: inspect available context first, make safe reasonable assumptions, and continue without confirmation for routine, reversible, in-scope work. Never repeat a question the user already answered. Ask only when the missing answer cannot be discovered and would materially change the result, authorize a meaningful scope expansion, or precede an irreversible action. Treat the user's explicit approval as decisive for the specifically named action and target: after a soft auto-mode denial, ask for precise consent only when it is missing, then retry once when the user grants it instead of claiming the denial is permanent. Hard-deny security boundaries still apply. Do not invent unsupported provider behavior, do not expose raw internal tool protocol, and keep progress updates concise and evidence-based."
 $planGuard = if ($planModePolicy -eq 'conservative') { 'Claudex plan-mode rule: remain in the current execution mode by default. Do not call EnterPlanMode or switch into plan permission mode merely because work is large, multi-step, unfamiliar, or benefits from private reasoning. Enter plan mode only when the user explicitly asks for a plan/design-only response, when a required user decision would materially change the implementation, or when the requested action is irreversible and needs approval before execution. For ordinary bug fixes and implementation requests, inspect, implement, test, and report directly.' } else { '' }
@@ -1403,6 +1444,10 @@ function Invoke-ClaudeProcess([Collections.Generic.List[string]] $Arguments) {
 }
 
 try {
+    # Delay the new session-only label until every argument/settings validation
+    # step has completed, so a pre-launch error cannot leak it into an existing
+    # PowerShell host. The finally block restores its original value.
+    if ($useProxy) { Set-ChatGptPlanLabel }
     Set-MousePointer $mousePointer
     $script:claudeProcessExitCode = 1
     Invoke-ClaudeProcess $claudeLaunchArguments

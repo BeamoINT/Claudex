@@ -112,6 +112,7 @@ public static class ClaudexTestCurl
             Write-Output "BASE=$env:ANTHROPIC_BASE_URL"
             Write-Output "BUN=$env:BUN_OPTIONS"
             Write-Output "INTERACTIVE=$env:CLAUDEX_INTERACTIVE_TUI"
+            Write-Output "CHATGPT_PLAN=$env:CLAUDEX_CHATGPT_PLAN_LABEL"
             Write-Output "CONFIG=$env:CLAUDE_CONFIG_DIR"
             Write-Output "ARGS=$($args -join ' ')"
         }
@@ -327,9 +328,9 @@ switch ($Action) {
     Assert-True ($output.Contains('Ask as few questions as possible')) 'low-question autonomy guard'
     Assert-True ($output.Contains('Never repeat a question the user already answered')) 'no-repeat question guard'
     Assert-True ($output.Contains('Do not call EnterPlanMode')) 'conservative plan mode guard'
-    Assert-True ($output.Contains('"Terra"')) 'short visible Terra agent name'
-    Assert-True ($output.Contains('"Luna"')) 'short visible Luna agent name'
-    Assert-True ($output.Contains('Terra - Audit JSON parser bugs')) 'model and task activity label guidance'
+    Assert-True ($output.Contains('"Terra (high)"')) 'Terra agent name includes its configured effort'
+    Assert-True ($output.Contains('"Luna (medium)"')) 'Luna agent name includes its configured effort'
+    Assert-True ($output.Contains('Terra (high) - Audit JSON parser bugs')) 'model, effort, and task activity label guidance'
     Assert-True (-not $output.Contains('"claudex-deep"')) 'legacy deep alias removed'
     Assert-True (-not $output.Contains('"claudex-builder"')) 'legacy builder alias removed'
     Assert-True (-not $output.Contains('"claudex-fast"')) 'legacy fast alias removed'
@@ -353,6 +354,14 @@ switch ($Action) {
     try { $interactiveWrapperOutput = (& (Join-Path $root 'claudex.ps1') --terra interactive-render-test | Out-String) }
     finally { Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT -ErrorAction SilentlyContinue }
     Assert-True ($interactiveWrapperOutput.Contains('INTERACTIVE=1')) 'interactive wrapper disables TUI output rewriting'
+    Assert-True ($interactiveWrapperOutput.Contains('CHATGPT_PLAN=ChatGPT Pro')) 'interactive wrapper exposes the detected ChatGPT plan'
+    [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\limits.json'), '{malformed', $utf8)
+    $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
+    try { $repairedPlanOutput = (& (Join-Path $root 'claudex.ps1') --terra repaired-plan-cache-test | Out-String) }
+    finally { Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT -ErrorAction SilentlyContinue }
+    Assert-True ($repairedPlanOutput.Contains('CHATGPT_PLAN=ChatGPT Pro')) 'interactive wrapper refreshes a malformed plan cache'
+    $repairedPlanCache = Get-Content -LiteralPath (Join-Path $testConfig 'usage-cache\limits.json') -Raw | ConvertFrom-Json
+    Assert-True ($repairedPlanCache.plan_type -eq 'pro') 'malformed plan cache is replaced by a valid snapshot'
     $composedSettings = Get-Content -LiteralPath (Join-Path $testConfig 'settings.json') -Raw | ConvertFrom-Json
     Assert-True (@($composedSettings.autoMode.allow | Where-Object { $_ -eq 'Default allow rule' }).Count -eq 1) 'upstream auto-mode allow rule preserved'
     Assert-True (@($composedSettings.autoMode.allow | Where-Object { $_ -eq 'User custom allow rule' }).Count -eq 1) 'user auto-mode allow rule preserved'
@@ -514,7 +523,7 @@ switch ($Action) {
 
     $explicitAgents = (& (Join-Path $root 'claudex.ps1') --agents '{}' test-prompt | Out-String)
     Assert-True ($explicitAgents.Contains('--agents {}')) 'explicit custom agents preserved'
-    Assert-True (-not $explicitAgents.Contains('"Terra"')) 'managed agents suppressed by explicit custom agents'
+    Assert-True (-not $explicitAgents.Contains('"Terra (high)"')) 'managed agents suppressed by explicit custom agents'
     Assert-True ($explicitAgents.Contains('Ask as few questions as possible')) 'custom agents retain low-question leader guard'
     Assert-True ($explicitAgents.Contains('Never repeat a question the user already answered')) 'custom agents retain no-repeat question guard'
     Assert-True ($explicitAgents.Contains("Treat the user's explicit approval as decisive")) 'custom agents retain explicit-approval guard'
@@ -542,6 +551,7 @@ switch ($Action) {
     Assert-True (-not $doctor.Contains('extra version detail')) 'proxy version extra lines hidden'
     Assert-True ($doctor.Contains('Auto-compact window: 280000 tokens')) 'doctor compaction'
     Assert-True ($doctor.Contains('Task lifecycle: Sol-owned with final-response reconciliation')) 'doctor task lifecycle'
+    Assert-True ($doctor.Contains('Managed agents: Terra (high), Luna (medium)')) 'doctor managed agent efforts'
     Assert-True ($doctor.Contains('Context status: session-stabilized')) 'doctor context stabilization'
     Assert-True ($doctor.Contains('Codex usage: status-line refresh every 300s')) 'doctor usage refresh'
     Assert-True ($doctor.Contains('Rendering: no-flicker mode with native terminal cursor')) 'doctor rendering hardening'

@@ -25,8 +25,11 @@ authenticated Codex account
 
 The preload module runs inside Claude Code's JavaScript runtime only for GPT-
 backed Claudex sessions. It translates the exact `/model solplan` input alias
-without intercepting stdout or stderr. Direct Claude-in-Chrome sessions do not
-receive that preload or the GPT proxy environment.
+and performs one width-preserving replacement of Claude Code's hardcoded
+startup billing field with the account-bound ChatGPT plan label. The native
+stdout writer is restored before the next fullscreen frame; stderr, print
+output, and machine output are never intercepted. Direct Claude-in-Chrome
+sessions do not receive that preload or the GPT proxy environment.
 
 ## Components
 
@@ -37,7 +40,7 @@ receive that preload or the GPT proxy environment.
 | Auth bridge | `codex-session` | `codex-session.ps1` | Validate Codex login and atomically synchronize the minimum credential fields |
 | Usage helper | `usage-limit` | `usage-limit.ps1` | Fetch, sanitize, cache, and display usage limits |
 | Status line | `statusline` | `statusline.ps1` | Render model, effort, stable context, and cached usage status |
-| Terminal preload | `preload.cjs` | shared | Translate Solplan terminal input without modifying Claude Code or machine output |
+| Terminal preload | `preload.cjs` | shared | Translate Solplan input and replace only the interactive startup billing field without modifying Claude Code or machine output |
 | Settings template | `settings.json` | shared | Provide isolated default Claude Code settings |
 
 ## Authentication lifecycle

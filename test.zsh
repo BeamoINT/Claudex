@@ -122,6 +122,7 @@ printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
 printf '%s\n' "BUN=${BUN_OPTIONS:-}"
 printf '%s\n' "INTERACTIVE=${CLAUDEX_INTERACTIVE_TUI:-}"
+printf '%s\n' "CHATGPT_PLAN=${CLAUDEX_CHATGPT_PLAN_LABEL:-}"
 printf '%s\n' "ARGS=$*"
 EOF
 cat > "$tmp/bin/codex" <<'EOF'
@@ -337,9 +338,9 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" == *'Ask as few questions as possible'* ]]
 [[ "$default_output" == *'Never repeat a question the user already answered'* ]]
 [[ "$default_output" == *'Do not call EnterPlanMode'* ]]
-[[ "$default_output" == *'"Terra"'* ]]
-[[ "$default_output" == *'"Luna"'* ]]
-[[ "$default_output" == *'Terra - Audit JSON parser bugs'* ]]
+[[ "$default_output" == *'"Terra (high)"'* ]]
+[[ "$default_output" == *'"Luna (medium)"'* ]]
+[[ "$default_output" == *'Terra (high) - Audit JSON parser bugs'* ]]
 [[ "$default_output" != *'"claudex-deep"'* ]]
 [[ "$default_output" != *'"claudex-builder"'* ]]
 [[ "$default_output" != *'"claudex-fast"'* ]]
@@ -347,6 +348,11 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" != *'"model":"gpt-5.6-sol"'* ]]
 interactive_wrapper_output=$(CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper --terra interactive-render-test)
 [[ "$interactive_wrapper_output" == *'INTERACTIVE=1'* ]]
+[[ "$interactive_wrapper_output" == *'CHATGPT_PLAN=ChatGPT Pro'* ]]
+printf '%s\n' '{malformed' > "$tmp/home/.config/claudex/usage-cache/limits.json"
+repaired_plan_output=$(CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper --terra repaired-plan-cache-test)
+[[ "$repaired_plan_output" == *'CHATGPT_PLAN=ChatGPT Pro'* ]]
+jq -e '.plan_type == "pro"' "$tmp/home/.config/claudex/usage-cache/limits.json" >/dev/null
 jq -e '
   (.autoMode.allow | index("Default allow rule") != null)
   and ([.autoMode.allow[] | select(. == "User custom allow rule")] | length == 1)
@@ -477,7 +483,7 @@ explicit_permission_output=$(run_wrapper --permission-mode plan test-prompt)
 
 explicit_agents_output=$(run_wrapper --agents '{}' test-prompt)
 [[ "$explicit_agents_output" == *'--agents {}'* ]]
-[[ "$explicit_agents_output" != *'"Terra"'* ]]
+[[ "$explicit_agents_output" != *'"Terra (high)"'* ]]
 [[ "$explicit_agents_output" == *'Ask as few questions as possible'* ]]
 [[ "$explicit_agents_output" == *'Never repeat a question the user already answered'* ]]
 [[ "$explicit_agents_output" == *'Treat the user'"'"'s explicit approval as decisive'* ]]
@@ -502,6 +508,7 @@ doctor_output=$(run_wrapper --doctor)
 [[ "$doctor_output" == *'Auto-mode classifier: gpt-5.6-terra'* ]]
 [[ "$doctor_output" == *'Auto-mode provider: Codex/OpenAI through the authenticated loopback bridge'* ]]
 [[ "$doctor_output" == *'Subagent model: gpt-5.6-terra (Sol is reserved for the leader)'* ]]
+[[ "$doctor_output" == *'Managed agents: Terra (high), Luna (medium)'* ]]
 [[ "$doctor_output" == *'Agent concurrency: 3'* ]]
 [[ "$doctor_output" == *'Task lifecycle: Sol-owned with final-response reconciliation'* ]]
 [[ "$doctor_output" == *'API retries: 15'* ]]

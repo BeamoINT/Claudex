@@ -5,6 +5,22 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-07-15
+
+### Changed
+
+- Added each managed subagent's configured reasoning effort to its native
+  activity name: `Terra (high)` and `Luna (medium)`.
+
+### Fixed
+
+- Replaced Claude Code's misleading `API Usage Billing` welcome field with the
+  detected account-bound ChatGPT plan, including Free, Go, Plus, Pro, Business,
+  Enterprise, Edu, and other current workspace tiers.
+- Limited the welcome-field compatibility shim to one positioned startup write,
+  restored native stdout immediately afterward, and retained byte-for-byte
+  machine output and fullscreen rendering for all subsequent writes.
+
 ## [1.4.3] - 2026-07-15
 
 ### Removed
@@ -204,7 +220,9 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first-party profile support.
 - Cross-platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.4.2...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.4.4...HEAD
+[1.4.4]: https://github.com/BeamoINT/Claudex/compare/v1.4.3...v1.4.4
+[1.4.3]: https://github.com/BeamoINT/Claudex/compare/v1.4.2...v1.4.3
 [1.4.2]: https://github.com/BeamoINT/Claudex/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/BeamoINT/Claudex/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/BeamoINT/Claudex/compare/v1.3.1...v1.4.0

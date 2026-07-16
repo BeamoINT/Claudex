@@ -992,6 +992,7 @@ doctor() {
   printf '%s\n' "Auto-mode classifier: ${CLAUDEX_AUTO_MODE_MODEL} (only used when auto mode is selected)"
   printf '%s\n' "Auto-mode provider: Codex/OpenAI through the authenticated loopback bridge"
   printf '%s\n' "Subagent model: ${CLAUDEX_SUBAGENT_MODEL} (Sol is reserved for the leader)"
+  printf '%s\n' 'Managed agents: Terra (high), Luna (medium)'
   printf '%s\n' "Tool concurrency: ${CLAUDEX_MAX_TOOL_USE_CONCURRENCY}"
   printf '%s\n' "Agent concurrency: ${CLAUDEX_MAX_AGENT_CONCURRENCY}"
   printf '%s\n' "Task lifecycle: Sol-owned with final-response reconciliation"
@@ -1158,14 +1159,52 @@ if (( direct_chrome )); then
   else
     unset CLAUDE_CONFIG_DIR
   fi
-  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_DISABLE_1M_CONTEXT
+  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_DISABLE_1M_CONTEXT CLAUDEX_CHATGPT_PLAN_LABEL
   start_model=""
   # Bash 3.2 (the system Bash on macOS) treats an empty array expansion as an
   # unbound variable under `set -u`; use its compatible conditional expansion.
   forwarded_args=(--chrome ${forwarded_args[@]+"${forwarded_args[@]}"})
 fi
 
-# The preload provides GPT-specific input aliases and non-interactive cleanup.
+chatgpt_plan_label_from_cache() {
+  local cache_file="$claudex_config_dir/usage-cache/limits.json"
+  local plan normalized
+  [[ -r "$cache_file" ]] || return 1
+  plan=$(jq -r '.plan_type // empty' "$cache_file" 2>/dev/null) || return 1
+  normalized=$(printf '%s' "$plan" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
+  case "$normalized" in
+    free|chatgptfree) printf '%s\n' 'ChatGPT Free' ;;
+    go|chatgptgo) printf '%s\n' 'ChatGPT Go' ;;
+    plus|chatgptplus) printf '%s\n' 'ChatGPT Plus' ;;
+    pro|chatgptpro) printf '%s\n' 'ChatGPT Pro' ;;
+    team|chatgptteam|business|chatgptbusiness) printf '%s\n' 'ChatGPT Business' ;;
+    enterprise|chatgptenterprise) printf '%s\n' 'ChatGPT Enterprise' ;;
+    edu|education|chatgptedu|chatgpteducation) printf '%s\n' 'ChatGPT Edu' ;;
+    teacher|teachers|chatgptteacher|chatgptteachers) printf '%s\n' 'ChatGPT Teachers' ;;
+    k12|chatgptk12) printf '%s\n' 'ChatGPT K-12' ;;
+    healthcare|chatgpthealthcare) printf '%s\n' 'ChatGPT Healthcare' ;;
+    *) return 1 ;;
+  esac
+}
+
+prepare_chatgpt_plan_label() {
+  local usage_helper="$claudex_config_dir/usage-limit"
+  local plan_label=""
+  unset CLAUDEX_CHATGPT_PLAN_LABEL
+  [[ "${CLAUDEX_INTERACTIVE_TUI:-0}" == 1 ]] || return 0
+  if ! plan_label=$(chatgpt_plan_label_from_cache); then
+    # A stale or malformed snapshot is no more useful than a missing one.
+    # Refresh once on startup so a repaired login/account tier is reflected
+    # immediately instead of falling back indefinitely.
+    if [[ -x "$usage_helper" ]]; then
+      "$usage_helper" --refresh-cache >/dev/null 2>&1 || true
+      plan_label=$(chatgpt_plan_label_from_cache 2>/dev/null || true)
+    fi
+  fi
+  export CLAUDEX_CHATGPT_PLAN_LABEL="${plan_label:-ChatGPT}"
+}
+
+# The preload provides GPT-specific input aliases and a one-shot welcome label.
 # Never inject it into first-party Claude/Chrome or maintenance commands.
 readonly claudex_preload="$claudex_config_dir/preload.cjs"
 inherited_bun_options="${BUN_OPTIONS:-}"
@@ -1219,6 +1258,8 @@ if (( use_proxy )); then
   start_auth_watcher
   start_proxy_watcher
 
+  prepare_chatgpt_plan_label
+
   export ANTHROPIC_BASE_URL="$CLAUDEX_PROXY_URL"
   export ANTHROPIC_AUTH_TOKEN="$CLAUDEX_PROXY_TOKEN"
 
@@ -1258,7 +1299,7 @@ if (( use_proxy )); then
   # entry even though Claudex manages its own explicit context window.
   export CLAUDE_CODE_DISABLE_1M_CONTEXT=1
 else
-  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_DISABLE_1M_CONTEXT
+  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_DISABLE_1M_CONTEXT CLAUDEX_CHATGPT_PLAN_LABEL
 fi
 
 export CLAUDEX_USAGE_DISPLAY CLAUDEX_USAGE_REFRESH_SECONDS CLAUDEX_USAGE_TIMEOUT_SECONDS CLAUDEX_USAGE_MAX_STALE_SECONDS
@@ -1269,8 +1310,8 @@ export CLAUDE_CODE_ACCESSIBILITY=1
 # One proxy credential backs all three aliases. Custom agents must not recursively
 # spawn more agents, or a small parallel batch becomes a retry/429 storm.
 readonly no_nested_agents="Do not create a team, spawn or delegate to additional agents, or send intermediate progress messages to the parent. Do not create, claim, or update entries in the shared task list; the Sol leader owns task lifecycle. Complete the assigned task yourself and return one final result through the normal agent result channel. If the provider reports a 429 or model cooldown, do not launch a replacement agent or start a retry loop."
-readonly claudex_agents="{\"Terra\":{\"description\":\"Terra for delegated architecture, debugging, implementation, testing, security review, and other substantial engineering work.\",\"prompt\":\"You are GPT-5.6 Terra. Investigate thoroughly, make robust focused progress, verify the result, and return concise evidence-backed findings. ${no_nested_agents}\",\"model\":\"gpt-5.6-terra\",\"effort\":\"high\"},\"Luna\":{\"description\":\"Luna for delegated search, triage, inventory, and bounded mechanical tasks.\",\"prompt\":\"You are GPT-5.6 Luna. Complete the scoped task efficiently and report only relevant verified findings. ${no_nested_agents}\",\"model\":\"gpt-5.6-luna\",\"effort\":\"medium\"}}"
-readonly claudex_capacity_guard="Claudex capacity rule: keep at most ${CLAUDEX_MAX_AGENT_CONCURRENCY} Agent tasks active at once. Launch no more than ${CLAUDEX_MAX_AGENT_CONCURRENCY} agents in a wave, wait for one to finish before starting another, and never create an agent team. Sol capacity is reserved for the leader; use the named Terra or Luna agents for delegated work. For every Agent call, make its description '- <concise task>' so the activity list renders labels such as 'Terra - Audit JSON parser bugs'. If a model reports a 429 or cooldown, do not launch replacement agents or create a retry storm; continue useful local work and retry at most once after active agents settle."
+readonly claudex_agents="{\"Terra (high)\":{\"description\":\"Terra at high reasoning effort for delegated architecture, debugging, implementation, testing, security review, and other substantial engineering work.\",\"prompt\":\"You are GPT-5.6 Terra running at high reasoning effort. Investigate thoroughly, make robust focused progress, verify the result, and return concise evidence-backed findings. ${no_nested_agents}\",\"model\":\"gpt-5.6-terra\",\"effort\":\"high\"},\"Luna (medium)\":{\"description\":\"Luna at medium reasoning effort for delegated search, triage, inventory, and bounded mechanical tasks.\",\"prompt\":\"You are GPT-5.6 Luna running at medium reasoning effort. Complete the scoped task efficiently and report only relevant verified findings. ${no_nested_agents}\",\"model\":\"gpt-5.6-luna\",\"effort\":\"medium\"}}"
+readonly claudex_capacity_guard="Claudex capacity rule: keep at most ${CLAUDEX_MAX_AGENT_CONCURRENCY} Agent tasks active at once. Launch no more than ${CLAUDEX_MAX_AGENT_CONCURRENCY} agents in a wave, wait for one to finish before starting another, and never create an agent team. Sol capacity is reserved for the leader; use the named Terra (high) or Luna (medium) agents for delegated work. For every Agent call, make its description '- <concise task>' so the activity list renders labels such as 'Terra (high) - Audit JSON parser bugs'. If a model reports a 429 or cooldown, do not launch replacement agents or create a retry storm; continue useful local work and retry at most once after active agents settle."
 readonly claudex_task_guard="Claudex task lifecycle rule: the Sol leader is the sole owner of the shared task list. Keep it compact and create only tasks that represent real remaining deliverables, not duplicate discovery lanes or speculative work. Mark a task in_progress only while the leader or a currently active agent is working on it; queued or blocked work stays pending. After every agent result, immediately reconcile its parent task and mark it completed once its outcome is integrated and verified. Before every final answer, call TaskList and reconcile every entry: completed work must be completed, inactive work must not remain in_progress, and genuinely unfinished pending work must be explicitly reported instead of being hidden behind a completion claim. Never leave stale in_progress tasks after their work is done."
 readonly claudex_codex_guard="Claudex Codex-model rule: operate as a Codex coding agent inside Claude Code's interface. Treat the available Claude Code tools and their schemas as the authoritative execution protocol. Prefer direct implementation and verification for concrete change requests. Ask as few questions as possible: inspect available context first, make safe reasonable assumptions, and continue without confirmation for routine, reversible, in-scope work. Never repeat a question the user already answered. Ask only when the missing answer cannot be discovered and would materially change the result, authorize a meaningful scope expansion, or precede an irreversible action. Treat the user's explicit approval as decisive for the specifically named action and target: after a soft auto-mode denial, ask for precise consent only when it is missing, then retry once when the user grants it instead of claiming the denial is permanent. Hard-deny security boundaries still apply. Do not invent unsupported provider behavior, do not expose raw internal tool protocol, and keep progress updates concise and evidence-based."
 if [[ "$CLAUDEX_PLAN_MODE_POLICY" == conservative ]]; then

@@ -7,7 +7,15 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const preloadPath = path.join(root, 'preload.cjs');
 const require = createRequire(import.meta.url);
-const { createInputRewriter, filterClaudexOutput } = require(preloadPath);
+for (const name of ['CLAUDEX_INTERACTIVE_TUI', 'CLAUDEX_CHATGPT_PLAN_LABEL', 'CLAUDEX_TEST_WELCOME_FILTER']) {
+  delete process.env[name];
+}
+const {
+  chatGptPlanLabel,
+  createInputRewriter,
+  filterClaudexOutput,
+  replaceWelcomeBillingColumns,
+} = require(preloadPath);
 
 function asBuffer(value) {
   return Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8');
@@ -154,6 +162,56 @@ assert.equal(
 );
 assert.equal(filterClaudexOutput('/model opus[1m normal'), '/model GPT-5.6 Sol normal');
 assert.equal(filterClaudexOutput('Opus Plan Mode'), 'GPT-5.6 Solplan');
+assert.equal(filterClaudexOutput('· API Usage Billing'), '· ChatGPT');
+assert.equal(chatGptPlanLabel('ChatGPT Pro'), 'ChatGPT Pro');
+assert.equal(chatGptPlanLabel('ChatGPT Pro\x1b[2J'), 'ChatGPT');
+assert.deepEqual(
+  replaceWelcomeBillingColumns('\x1b[43GAPI\x1b[47GUsage\x1b[53GBilling', 'ChatGPT Pro'),
+  { output: '\x1b[43GChatGPT Pro      ', replaced: true },
+);
+assert.deepEqual(
+  replaceWelcomeBillingColumns('\x1b[43GAPI\x1b[47GUsage\x1b[53GBilling', 'ChatGPT Enterprise'),
+  { output: '\x1b[42GChatGPT Enterprise', replaced: true },
+);
+assert.deepEqual(
+  replaceWelcomeBillingColumns('\x1b[1GAPI\x1b[999GUsage\x1b[2GBilling', 'ChatGPT Pro'),
+  { output: '\x1b[1GAPI\x1b[999GUsage\x1b[2GBilling', replaced: false },
+);
+assert.deepEqual(
+  replaceWelcomeBillingColumns('\x1b[43GAPI\x1b[47GUsage\x1b[53GBilling|\x1b[43GAPI\x1b[47GUsage\x1b[53GBilling', 'ChatGPT Pro'),
+  { output: '\x1b[43GChatGPT Pro      |\x1b[43GAPI\x1b[47GUsage\x1b[53GBilling', replaced: true },
+);
+
+// Interactive startup filtering is intentionally one-shot: it rewrites only
+// the positioned billing field, preserves native write return/callback
+// behavior, then restores stdout before later fullscreen frames.
+const welcomeProbe = spawnSync(process.execPath, ['-e', `
+  const nativeWrite = process.stdout.write;
+  require(${JSON.stringify(preloadPath)});
+  const wrappedBefore = process.stdout.write !== nativeWrite;
+  const callbackOrder = [];
+  const cachedWrite = process.stdout.write;
+  const returned = cachedWrite.call(process.stdout, Buffer.from('\\x1b[?1049h\\x1b]0;✳ Claude Code\\x07prefix\\x1b[43GAPI\\x1b[47GUsage\\x1b[53GBilling\\r'), () => callbackOrder.push('welcome'));
+  cachedWrite.call(process.stdout, '\\x1b[43GAPI\\x1b[47GUsage\\x1b[53GBilling');
+  process.stdout.write('native-followup', () => {
+    callbackOrder.push('followup');
+    process.stderr.write(JSON.stringify({ wrappedBefore, restored: process.stdout.write === nativeWrite, returned, callbackOrder }));
+  });
+`], {
+  encoding: 'utf8',
+  env: {
+    ...process.env,
+    CLAUDEX_INTERACTIVE_TUI: '1',
+    CLAUDEX_CHATGPT_PLAN_LABEL: 'ChatGPT Pro',
+    CLAUDEX_TEST_WELCOME_FILTER: '1',
+  },
+});
+assert.equal(welcomeProbe.status, 0, welcomeProbe.stderr);
+assert.equal(welcomeProbe.stdout, '\x1b[?1049h\x1b]0;✳ Claude Code\x07prefix\x1b[43GChatGPT Pro      \r\x1b[43GAPI\x1b[47GUsage\x1b[53GBillingnative-followup');
+assert.deepEqual(
+  JSON.parse(welcomeProbe.stderr),
+  { wrappedBefore: true, restored: true, returned: true, callbackOrder: ['welcome', 'followup'] },
+);
 
 assert.equal(createInputRewriter().rewrite('/model solplan \r'), '/model opusplan\r');
 assert.equal(createInputRewriter().rewrite('/MODEL\tsOlPlAn\r'), '/MODEL\topusplan\r');

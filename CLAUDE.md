@@ -59,7 +59,7 @@ user -> claudex launcher (Bash or PowerShell)
 | Auth bridge | `codex-session` | `codex-session.ps1` | Validate Codex login, atomically sync the minimum credential fields |
 | Usage helper | `usage-limit` | `usage-limit.ps1` | Fetch, sanitize, cache, and display Codex usage limits |
 | Status line | `statusline` | `statusline.ps1` | Render model, effort, stable context %, cached usage status |
-| Terminal preload | `preload.cjs` | shared | Translate Solplan terminal input (`/model solplan`) without touching stdout/stderr |
+| Terminal preload | `preload.cjs` | shared | Translate Solplan input and replace only the positioned interactive welcome billing field before restoring native stdout |
 | Settings template | `settings.json` | shared | Isolated default Claude Code settings written into the managed config |
 
 Every shared behavior change must touch both the Bash and PowerShell implementation (`claudex`/`claudex.ps1`, `codex-session`/`codex-session.ps1`, etc.) — platform drift is treated as a bug unless the underlying OS genuinely lacks the feature, in which case the boundary must be documented, not silently emulated.
@@ -110,7 +110,7 @@ Updating the CLIProxyAPI pin is security-sensitive: collect every macOS/Linux/Wi
 | `codex-session*` | Authentication bridge |
 | `usage-limit*` | Detailed and cached quota reporting |
 | `statusline*` | Stable compact footer |
-| `preload.cjs` | Byte-preserving Solplan terminal-input alias |
+| `preload.cjs` | Byte-preserving Solplan input alias and one-shot interactive ChatGPT plan label |
 | `settings.json`, `env.example` | Reproducible configuration templates |
 | `test.zsh`, `test.ps1`, `test.sh` | Isolated cross-platform regression suites |
 | `scripts/` | `build-release.sh`, `check-docs.mjs`, `check-preload.mjs` |

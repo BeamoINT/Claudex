@@ -52,7 +52,8 @@ instead of asking for routine confirmations. It asks only when an answer cannot
 be discovered and would materially change the result, expand scope, or precede
 an irreversible action, and it does not repeat questions already answered. This
 leader guidance remains active when callers provide their own `--agents` JSON;
-only Claudex's built-in Terra and Luna definitions are replaced in that case.
+only Claudex's built-in `Terra (high)` and `Luna (medium)` definitions are
+replaced in that case.
 
 ## Model picker
 
@@ -64,10 +65,16 @@ entry for each managed model:
 - **GPT-5.6 Luna** — fast search, triage, and bounded mechanical tasks;
 - **GPT-5.6 Solplan** — Sol in plan mode and Terra during implementation.
 
-Delegated activity uses the short visible agent names `Terra` and `Luna` while
-retaining those full Codex model routes internally. Each activity includes a
-concise task label, for example `Terra - Audit JSON parser bugs`. Sol remains
-the leader unless the user supplies an explicit custom agent configuration.
+Delegated activity shows both the short model name and its configured reasoning
+effort: `Terra (high)` or `Luna (medium)`. Each activity also includes a concise
+task label, for example `Terra (high) - Audit JSON parser bugs`. Sol remains the
+leader unless the user supplies an explicit custom agent configuration.
+
+On interactive startup, Claudex reads the sanitized plan type from the same
+account-bound Codex usage snapshot used by `/usage-limit`. The welcome banner
+shows `ChatGPT Free`, `ChatGPT Go`, `ChatGPT Plus`, `ChatGPT Pro`, or the
+applicable workspace tier. If OpenAI does not return a recognized tier, it
+shows the honest fallback `ChatGPT` and never claims API usage billing.
 
 Enter `/model solplan` as a shortcut for the built-in plan/execution selector.
 Claudex does not activate plan mode merely because a task is large; plan mode

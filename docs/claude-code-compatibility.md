@@ -1,6 +1,6 @@
 # Claude Code compatibility audit
 
-This audit targets Claude Code 2.1.210, the version used for the July 2026 production verification. Claudex is a launcher and compatibility layer, not a fork of the signed Claude Code binary. Unknown options and arguments are preserved in order and forwarded to Claude Code.
+This audit targets Claude Code 2.1.211, the version used for the July 2026 production verification. Claudex is a launcher and compatibility layer, not a fork of the signed Claude Code binary. Unknown options and arguments are preserved in order and forwarded to Claude Code.
 
 ## Fully exercised Claudex paths
 
@@ -12,17 +12,17 @@ This audit targets Claude Code 2.1.210, the version used for the July 2026 produ
 | Max effort | `--max-effort` maps to native `--effort max` and labels the session `max` | Isolated launcher test and live exact-output prompt |
 | Ultracode | `--ultracode` enables session-only `ultracode`, `workflows`, and xhigh effort | Isolated launcher test and live exact-output prompt |
 | Auto mode | Terra classifier is pinned through the Codex bridge, explicit named approvals are carried into classification, and Anthropic model IDs are rejected for classifier overrides | Environment, settings-schema, and doctor tests |
-| Agents and tasks | Terra/Luna names expose the actual model; concurrency and no-recursion guards limit cooldown storms; Sol reconciles task state | Argument-contract tests |
+| Agents and tasks | `Terra (high)` and `Luna (medium)` expose the actual model and configured reasoning effort; concurrency and no-recursion guards limit cooldown storms; Sol reconciles task state | Argument-contract tests |
 | Context and compaction | 400k accounting, 280k automatic compaction, Anthropic-only 1M selector suppression, and session cache suppression of transient false zero values | Launcher and status-line regression tests |
 | Usage limits | Direct web response, cached outage behavior, low-quota alert, account selection, and app-server recovery | Fake-service regressions and live app-server query |
-| Model picker and banner | Stable friendly labels through model metadata, no unsupported Anthropic 1M row, and a width-aware status line without rewriting terminal or machine output | JSON/state, narrow-width, and output-immutability regressions |
+| Model picker and banner | Stable friendly model metadata, no unsupported Anthropic 1M row, an account-bound ChatGPT plan label in the welcome banner, and a width-aware status line | JSON/state, one-shot welcome-write, narrow-width, and output-immutability regressions |
 | Cursor and mouse | Native terminal cursor plus application pointer OSC with cleanup | Pseudo-terminal regression on macOS |
 | macOS/Linux install | Bash installer, dependency selection, service startup, backups, and private permissions | Isolated install test and GitHub matrix |
 | Native Windows install | PowerShell tool mode, CMD shim, native installer, backups, and private config | PowerShell isolated suite and GitHub Windows runner |
 | Codex authentication | Standard Codex file-backed session is synchronized atomically; live account changes invalidate account-scoped state; logout removes the bridge | Logged-in, refreshed-session, switched-account, missing-file, and logged-out regressions |
 | Claude Code updates | Installer checks immediately; launcher checks daily without blocking and negotiates optional flags from current `--help` | Capability and update scheduling regressions |
 | Resume hints | An unambiguous Claudex or direct-Chrome resume command is appended without cursor movement or row erasure | Concurrent-session and narrow-terminal safety regressions |
-| Machine output | Stdout/stderr, JSON, stream-JSON, and schema-constrained output remain byte-for-byte native | Split UTF-8, callback-order, and structured-output regressions |
+| Machine output | After the one positioned interactive welcome-field replacement, stdout/stderr, JSON, stream-JSON, and schema-constrained output remain byte-for-byte native | One-shot writer restoration, split UTF-8, callback-order, and structured-output regressions |
 
 ## Transparent Claude Code features
 
