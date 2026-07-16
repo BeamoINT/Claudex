@@ -32,6 +32,7 @@ appserver_pid=""
 appserver_process_group=""
 appserver_stdout_drain_pid=""
 appserver_stderr_drain_pid=""
+appserver_timeout_pid=""
 appserver_input_open=0
 
 fail() {
@@ -224,6 +225,11 @@ drain_capped_stream() {
 terminate_appserver() {
   local attempt
   [[ "$appserver_input_open" == 0 ]] || { exec 9>&- 2>/dev/null || true; appserver_input_open=0; }
+  if [[ -n "$appserver_timeout_pid" ]]; then
+    kill -TERM "$appserver_timeout_pid" 2>/dev/null || true
+    wait "$appserver_timeout_pid" 2>/dev/null || true
+    appserver_timeout_pid=""
+  fi
   if [[ -n "$appserver_pid" ]]; then
     if [[ -n "$appserver_process_group" ]]; then
       kill -TERM -- "-$appserver_process_group" 2>/dev/null || true
@@ -511,6 +517,15 @@ fetch_appserver_usage() {
     codex app-server <"$input_fifo" >"$output_fifo" 2>"$error_fifo" 9>&- &
   fi
   appserver_pid=$!
+  # Enforce the timeout with one wall-clock watchdog. Poll-count budgets can
+  # drift across platforms when shell scheduling or fractional sleeps differ,
+  # accidentally giving initialization and retrieval separate effective
+  # windows. The watchdog covers the complete protocol exchange.
+  (
+    sleep "$timeout_seconds"
+    kill -TERM "$appserver_pid" 2>/dev/null || true
+  ) &
+  appserver_timeout_pid=$!
   if ! printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"Claudex","title":"Claudex usage fallback","version":"1.0.0"}}}' >&9; then
     finish_appserver
     fail 'Codex app-server closed during initialization.'
