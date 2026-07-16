@@ -1020,7 +1020,16 @@ process.stdout.write(JSON.stringify({
     [IO.File]::WriteAllText((Join-Path $crashTransaction 'state'), "committing`n", $utf8)
     [IO.File]::WriteAllText((Join-Path $env:CLAUDEX_CONFIG_DIR 'env'), "CLAUDEX_PROXY_TOKEN=corrupted-crash-token`n", $utf8)
     Remove-Item Env:CLAUDEX_PROXY_TOKEN
-    $recoveryOutput = (& (Join-Path $root 'install.ps1') | Out-String)
+    $previousConsoleOut = [Console]::Out
+    $recoveryConsoleOut = New-Object IO.StringWriter
+    [Console]::SetOut($recoveryConsoleOut)
+    try {
+        $recoveryOutput = (& (Join-Path $root 'install.ps1') | Out-String)
+        $recoveryOutput += $recoveryConsoleOut.ToString()
+    } finally {
+        [Console]::SetOut($previousConsoleOut)
+        $recoveryConsoleOut.Dispose()
+    }
     Assert-True ($recoveryOutput.Contains('Recovered the previous interrupted Claudex installation')) 'Windows installer recovers a durable interrupted transaction'
     $recoveredTokenLine = [IO.File]::ReadAllLines((Join-Path $env:CLAUDEX_CONFIG_DIR 'env')) | Where-Object { $_.StartsWith('CLAUDEX_PROXY_TOKEN=') } | Select-Object -First 1
     Assert-True ($recoveredTokenLine.Substring('CLAUDEX_PROXY_TOKEN='.Length) -ceq $specialInstallerToken) 'Windows interrupted-transaction recovery restores env before reinstall'
