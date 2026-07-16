@@ -403,8 +403,17 @@ process.stdout.write(JSON.stringify({
 }) + '\n');
 '@, $utf8)
     $env:CLAUDEX_SKILL_BRIDGE_HELPER = $warningBridge
-    try { $warningBridgeOutput = (& (Join-Path $root 'claudex.ps1') --terra warning-test 2>&1 | Out-String) }
-    finally { Remove-Item Env:CLAUDEX_SKILL_BRIDGE_HELPER -ErrorAction SilentlyContinue }
+    $previousConsoleError = [Console]::Error
+    $warningConsoleError = New-Object IO.StringWriter
+    [Console]::SetError($warningConsoleError)
+    try {
+        $warningBridgeOutput = (& (Join-Path $root 'claudex.ps1') --terra warning-test | Out-String)
+        $warningBridgeOutput += $warningConsoleError.ToString()
+    } finally {
+        [Console]::SetError($previousConsoleError)
+        $warningConsoleError.Dispose()
+        Remove-Item Env:CLAUDEX_SKILL_BRIDGE_HELPER -ErrorAction SilentlyContinue
+    }
     Assert-True ($warningBridgeOutput.Contains('claudex: skill bridge: Skill refresh failed; using the last known good snapshot. Review the rejected skill.')) 'ordinary Windows launch surfaces skill bridge warnings on one line'
     Assert-True ($warningBridgeOutput.Contains('AUTO=gpt-5.6-terra')) 'skill bridge warning does not prevent launch'
     $env:CLAUDEX_MODEL = 'gpt-5.6-luna'
