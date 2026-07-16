@@ -266,7 +266,8 @@ switch ($Action) {
     $env:CI = '0'
     try {
         $interactiveAuthOutput = (& (Join-Path $root 'claudex.ps1') --terra auth-recovery-test 2>&1 | Out-String)
-        Assert-True ($interactiveAuthOutput.Contains('Codex sign-in is required. Opening the official Codex browser login')) 'interactive startup explains and opens official Codex login'
+        $windowsLauncherSource = Get-Content -LiteralPath (Join-Path $root 'claudex.ps1') -Raw
+        Assert-True ($windowsLauncherSource.Contains('Codex sign-in is required. Opening the official Codex browser login')) 'interactive startup explains official Codex login'
         Assert-True ($interactiveAuthOutput.Contains('AUTO=gpt-5.6-terra')) 'interactive startup retries after Codex login'
         $interactiveAuthActions = @(Get-Content -LiteralPath $authRecoveryLog)
         Assert-True (@($interactiveAuthActions | Where-Object { $_ -eq 'sync' }).Count -eq 2) 'interactive startup retries auth synchronization once'
