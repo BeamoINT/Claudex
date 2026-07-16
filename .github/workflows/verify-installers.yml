@@ -1,17 +1,14 @@
 name: Verify website installers
 
-# Runs the public claudex.work source-install bootstraps end to end on fresh
+# Runs the public claudex.work source installation bootstraps end to end on fresh
 # runners, exactly as a new user would, and verifies that the expected release
-# and its skill runtime were installed. Successful release-asset builds trigger
-# this automatically; maintainers can also run it manually against latest or a
-# specific stable version.
+# and its skill runtime were installed. Successful release asset builds trigger
+# this automatically; maintainers can also rerun it manually against the latest
+# public stable release. Release assets for a specific version are verified before
+# publication by the release workflow instead of through the website, which serves only the latest release
+# bootstrap.
 on:
   workflow_dispatch:
-    inputs:
-      expected_version:
-        description: Stable version to require, without the leading v (blank uses latest)
-        required: false
-        type: string
   workflow_run:
     workflows: [Release assets]
     types: [completed]
@@ -31,15 +28,11 @@ jobs:
         name: Resolve stable version
         env:
           GH_TOKEN: ${{ github.token }}
-          MANUAL_RELEASE_REF: ${{ inputs.expected_version }}
         run: |
-          release_ref="$MANUAL_RELEASE_REF"
-          if [ -z "$release_ref" ]; then
-            release_ref=$(curl -fsSL \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H 'Accept: application/vnd.github+json' \
-              https://api.github.com/repos/BeamoINT/Claudex/releases/latest | jq -r '.tag_name // empty')
-          fi
+          release_ref=$(curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/BeamoINT/Claudex/releases/latest | jq -r '.tag_name // empty')
           version=${release_ref#v}
           [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
@@ -65,6 +58,8 @@ jobs:
           test -f "$HOME/.config/claudex/skill-bridge.cjs"
           node --check "$HOME/.config/claudex/skill-bridge.cjs"
           claudex skills >/dev/null
+          claudex codex --version
+          claudex claude --version
           claudex self-update --status
 
   macos:
@@ -88,6 +83,8 @@ jobs:
           test -f "$HOME/.config/claudex/skill-bridge.cjs"
           node --check "$HOME/.config/claudex/skill-bridge.cjs"
           claudex skills >/dev/null
+          claudex codex --version
+          claudex claude --version
           claudex self-update --status
 
   windows:
@@ -120,5 +117,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'installed skill bridge failed syntax validation' }
           & $launcher skills | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "claudex skills exited with $LASTEXITCODE" }
+          & $launcher codex --version
+          if ($LASTEXITCODE -ne 0) { throw "claudex codex --version exited with $LASTEXITCODE" }
+          & $launcher claude --version
+          if ($LASTEXITCODE -ne 0) { throw "claudex claude --version exited with $LASTEXITCODE" }
           & $launcher self-update --status
           if ($LASTEXITCODE -ne 0) { throw "claudex self-update --status exited with $LASTEXITCODE" }

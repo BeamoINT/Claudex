@@ -41,6 +41,42 @@ installer_env=(
 )
 env "${installer_env[@]}" CLAUDEX_PROXY_TOKEN=stable-installer-token "$root/install.sh" >/dev/null
 
+# Reinstalling must replace every shell-valid spelling of a managed assignment,
+# not leave an exported/indented duplicate that wins when the env file is
+# sourced later. The explicit repair token must remain identical in both the
+# shell env and the generated proxy YAML.
+cat >> "$config/env" <<EOF
+  export CLAUDEX_PROXY_TOKEN=stale-export-token
+	export CLAUDEX_PROXY_URL=http://127.0.0.1:8318
+ export CLAUDEX_PROXY_CONFIG=$config/cliproxyapi.yaml
+    CLAUDEX_PROXY_BIN=$config/bin/cliproxyapi
+	CLAUDEX_CODEX_AUTH_DIR=$config/codex-accounts
+ export CLAUDEX_NODE_BIN=$temporary/stale-node
+PRESERVE_UNMANAGED_SETTING=yes
+EOF
+env "${installer_env[@]}" CLAUDEX_PROXY_TOKEN=stable-installer-token "$root/install.sh" >/dev/null
+for managed_name in CLAUDEX_PROXY_TOKEN CLAUDEX_PROXY_URL CLAUDEX_PROXY_CONFIG CLAUDEX_PROXY_BIN CLAUDEX_CODEX_AUTH_DIR; do
+  assignment_count=$(awk -v name="$managed_name" '
+    $0 ~ "^[[:space:]]*(export[[:space:]]+)?" name "[[:space:]]*=" { count++ }
+    END { print count + 0 }
+  ' "$config/env")
+  [[ "$assignment_count" == 1 ]]
+done
+! grep -Eq '^[[:space:]]*(export[[:space:]]+)?CLAUDEX_NODE_BIN[[:space:]]*=' "$config/env"
+grep -Fx 'PRESERVE_UNMANAGED_SETTING=yes' "$config/env" >/dev/null
+env_token=$(HOME="$home" bash -c 'source "$1"; printf %s "$CLAUDEX_PROXY_TOKEN"' bash "$config/env")
+yaml_token=$(awk '/^api-keys:$/ { getline; sub(/^[[:space:]]*-[[:space:]]*/, ""); gsub(/^"|"$/, ""); print; exit }' "$config/cliproxyapi.yaml")
+[[ "$env_token" == stable-installer-token && "$yaml_token" == "$env_token" ]]
+! grep -F 'stale-export-token' "$config/env" "$config/cliproxyapi.yaml" >/dev/null
+
+# A second reinstall without caller overrides must remain idempotent and retain
+# the same single effective assignment and proxy credential.
+env "${installer_env[@]}" "$root/install.sh" >/dev/null
+[[ "$(awk '/^[[:space:]]*(export[[:space:]]+)?CLAUDEX_PROXY_TOKEN[[:space:]]*=/ { count++ } END { print count + 0 }' "$config/env")" == 1 ]]
+env_token=$(HOME="$home" bash -c 'source "$1"; printf %s "$CLAUDEX_PROXY_TOKEN"' bash "$config/env")
+yaml_token=$(awk '/^api-keys:$/ { getline; sub(/^[[:space:]]*-[[:space:]]*/, ""); gsub(/^"|"$/, ""); print; exit }' "$config/cliproxyapi.yaml")
+[[ "$env_token" == stable-installer-token && "$yaml_token" == "$env_token" ]]
+
 login_log="$temporary/login.log"
 env "${installer_env[@]}" FAKE_CODEX_LOGIN_LOG="$login_log" "$root/install.sh" --login >/dev/null
 [[ "$(wc -l < "$login_log" | tr -d ' ')" == 1 ]]
@@ -124,5 +160,10 @@ grep -F "CLAUDEX_NODE_BIN=$managed_config/node/bin" "$managed_config/env" >/dev/
 grep -F -- '--retry-connrefused' "$root/install.sh" >/dev/null
 grep -F 'download_with_retry "$claude_installer"' "$root/install.sh" >/dev/null
 grep -F 'download_with_retry "$archive" "$url"' "$root/install.sh" >/dev/null
+
+# Cross-platform source checks enforce the Windows installer ACL policy even on
+# Unix CI: direct/archive bin directories are private, while package-manager
+# shim directories retain their package-owned ACLs.
+node "$root/tests/windows-installer-private-state.test.cjs"
 
 printf '%s\n' 'installer regressions passed'

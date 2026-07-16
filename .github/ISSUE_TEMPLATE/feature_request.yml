@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please describe the user problem before proposing an implementation. For open-ended ideas and setup questions, start a GitHub Discussion instead.
+        Please describe the user problem before proposing an implementation. For broad ideas and setup questions, start a GitHub Discussion instead.
   - type: checkboxes
     id: prerequisites
     attributes:
@@ -28,7 +28,7 @@ body:
     id: proposal
     attributes:
       label: Proposed behavior
-      description: Describe the desired user-visible result without assuming a specific implementation.
+      description: Describe the desired result for users without assuming a specific implementation.
     validations:
       required: true
   - type: dropdown

@@ -58,6 +58,45 @@ jq -e '.account_id == "account-b" and .id_token == "" and .last_refresh == ""' \
 [[ ! -e "$CLAUDEX_CONFIG_DIR/usage-cache/summary" ]]
 [[ ! -e "$CLAUDEX_CONFIG_DIR/codex-usage-account" ]]
 
+# A worker that snapshotted an older credential must revalidate after it owns
+# the publication lock. It may retry with the current source, but can never
+# overwrite that source with its stale token set.
+session_sync_lock="$CLAUDEX_CODEX_AUTH_DIR/.codex-session-sync.lock"
+write_source_auth account-b access-stale
+mkdir "$session_sync_lock"
+printf '%s\n' "$$ held-by-test" > "$session_sync_lock/owner"
+"$root/codex-session" sync & stale_sync_pid=$!
+for _ in {1..100}; do
+  find "$CLAUDEX_CODEX_AUTH_DIR" -maxdepth 1 -name '.codex-session.tmp.*' -print -quit | grep . >/dev/null && break
+  sleep 0.02
+done
+find "$CLAUDEX_CODEX_AUTH_DIR" -maxdepth 1 -name '.codex-session.tmp.*' -print -quit | grep . >/dev/null
+write_source_auth account-b access-current
+rm -rf "$session_sync_lock"
+wait "$stale_sync_pid"
+jq -e '.access_token == "access-current"' "$CLAUDEX_CODEX_AUTH_DIR/codex-claudex-managed.json" >/dev/null
+
+# Catchable termination cannot strand the candidate credential beside the
+# bridge file. The EXIT cleanup is shared by HUP, INT, and TERM handlers.
+write_source_auth account-b access-interrupted
+mkdir "$session_sync_lock"
+printf '%s\n' "$$ held-by-test" > "$session_sync_lock/owner"
+"$root/codex-session" sync & interrupted_sync_pid=$!
+for _ in {1..100}; do
+  find "$CLAUDEX_CODEX_AUTH_DIR" -maxdepth 1 -name '.codex-session.tmp.*' -print -quit | grep . >/dev/null && break
+  sleep 0.02
+done
+kill -TERM "$interrupted_sync_pid"
+if wait "$interrupted_sync_pid"; then
+  printf '%s\n' 'terminated credential synchronization unexpectedly succeeded' >&2
+  exit 1
+fi
+rm -rf "$session_sync_lock"
+if find "$CLAUDEX_CODEX_AUTH_DIR" -maxdepth 1 -name '.codex-session.tmp.*' -print -quit | grep . >/dev/null; then
+  printf '%s\n' 'terminated credential synchronization leaked a secret temporary' >&2
+  exit 1
+fi
+
 mkdir -p "$CLAUDEX_CONFIG_DIR/usage-cache"
 printf '%s\n' old > "$CLAUDEX_CONFIG_DIR/usage-cache/summary"
 printf '%s\n' codex-a.json > "$CLAUDEX_CONFIG_DIR/codex-usage-account"
@@ -98,14 +137,31 @@ fi
 "$root/codex-session" sync
 
 cat > "$CLAUDEX_CODEX_AUTH_DIR/codex-a.json" <<'EOF'
-{"type":"codex","access_token":"token-a","account_id":"account-a","email":"a@example.com"}
+{"type":"codex","access_token":"token-a","account_id":"account-a","email":"a@example.com","last_refresh":"2026-07-15T03:00:00Z"}
 EOF
 cat > "$CLAUDEX_CODEX_AUTH_DIR/codex-b.json" <<'EOF'
-{"type":"codex","access_token":"token-b","account_id":"account-b","email":"b@example.com"}
+{"type":"codex","access_token":"token-b","account_id":"account-b","email":"b@example.com","last_refresh":"2026-07-15T03:00:00Z"}
 EOF
+cat > "$CLAUDEX_CODEX_AUTH_DIR/codex-c.json" <<'EOF'
+{"type":"codex","access_token":"token-c","account_id":"account-c","email":"c@example.com","last_refresh":"2026-07-15T02:00:00Z"}
+EOF
+touch -t 202001010000 "$CLAUDEX_CODEX_AUTH_DIR/codex-a.json"
+touch -t 203001010000 "$CLAUDEX_CODEX_AUTH_DIR/codex-c.json"
+
+"$root/usage-limit" --account auto >/dev/null
+ordered_accounts=$("$root/usage-limit" --accounts)
+[[ "$(printf '%s\n' "$ordered_accounts" | sed -n '2p')" == '[*] 1. a@example.com' ]]
+[[ "$(printf '%s\n' "$ordered_accounts" | sed -n '3p')" == '[ ] 2. b@example.com' ]]
+[[ "$(printf '%s\n' "$ordered_accounts" | sed -n '4p')" == '[ ] 3. c@example.com' ]]
+"$root/usage-limit" --account 2 >/dev/null
+[[ "$(<"$CLAUDEX_CONFIG_DIR/codex-usage-account")" == codex-b.json ]]
+"$root/usage-limit" --account auto >/dev/null
 
 cat > "$tmp/bin/fake-curl" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${FAKE_CURL_ARGUMENTS_FILE:-}" ]]; then
+  printf '%s\n' "$@" > "$FAKE_CURL_ARGUMENTS_FILE"
+fi
 config=""
 while (( $# )); do
   if [[ "$1" == --config ]]; then shift; config=$1; fi
@@ -133,6 +189,39 @@ export CLAUDEX_CURL_BIN="$tmp/bin/fake-curl"
 export CLAUDEX_USAGE_SOURCE=web
 export CLAUDEX_USAGE_REFRESH_SECONDS=60
 export CLAUDEX_USAGE_MAX_STALE_SECONDS=60
+
+usage_url_error="$tmp/usage-url-error"
+blocked_curl_arguments="$tmp/blocked-curl-arguments"
+if CLAUDEX_USAGE_SOURCE=auto \
+  CLAUDEX_USAGE_URL='http://127.0.0.1:8123/backend-api/wham/usage' \
+  FAKE_CURL_ARGUMENTS_FILE="$blocked_curl_arguments" \
+  "$root/usage-limit" --refresh-cache >/dev/null 2>"$usage_url_error"; then
+  printf '%s\n' 'non-official production usage URL unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -F 'CLAUDEX_USAGE_URL must remain https://chatgpt.com/backend-api/wham/usage' "$usage_url_error" >/dev/null
+[[ ! -e "$blocked_curl_arguments" ]]
+
+if CLAUDEX_INSECURE_TEST_ALLOW_USAGE_URL=1 \
+  CLAUDEX_USAGE_URL='https://example.com/backend-api/wham/usage' \
+  FAKE_CURL_ARGUMENTS_FILE="$blocked_curl_arguments" \
+  "$root/usage-limit" --refresh-cache >/dev/null 2>"$usage_url_error"; then
+  printf '%s\n' 'non-loopback test usage URL unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -F 'permits only loopback HTTP(S) usage endpoints' "$usage_url_error" >/dev/null
+[[ ! -e "$blocked_curl_arguments" ]]
+
+loopback_usage_url='http://127.0.0.1:8123/backend-api/wham/usage'
+loopback_curl_arguments="$tmp/loopback-curl-arguments"
+CLAUDEX_INSECURE_TEST_ALLOW_USAGE_URL=1 CLAUDEX_USAGE_URL="$loopback_usage_url" \
+  FAKE_CURL_ARGUMENTS_FILE="$loopback_curl_arguments" \
+  "$root/usage-limit" --refresh-cache >/dev/null
+awk -v expected="$loopback_usage_url" '
+  previous == "--" && $0 == expected { found = 1 }
+  { previous = $0 }
+  END { exit(found ? 0 : 1) }
+' "$loopback_curl_arguments"
 
 "$root/usage-limit" --account a@example.com >/dev/null
 export FAKE_CURL_STARTED="$tmp/curl-started"
@@ -177,7 +266,12 @@ printf '%s\n' '99999999 dead-token-123' > "$CLAUDEX_CONFIG_DIR/usage-cache/refre
 # A helper carrying an obsolete generation must never release a fresh lock.
 mkdir -p "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock"
 printf '%s\n' "$$ fresh-token-123" > "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock/owner-pid"
-"$root/usage-limit" --refresh-cache --lock-held --lock-token stale-token-123
+if "$root/usage-limit" --refresh-cache --lock-held --lock-token stale-token-123 \
+    >"$tmp/stale-helper.out" 2>"$tmp/stale-helper.err"; then
+  printf '%s\n' 'obsolete lock generation unexpectedly refreshed usage' >&2
+  exit 1
+fi
+grep -F 'no longer owned by this generation' "$tmp/stale-helper.err" >/dev/null
 [[ "$(<"$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock/owner-pid")" == "$$ fresh-token-123" ]]
 rm -rf "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock"
 
@@ -239,6 +333,17 @@ grep -F '$ownerlessIsStale = $lockAge -ge 2' "$root/usage-limit.ps1" >/dev/null
 grep -F '$ownerlessIsStale = $lockAge -ge 2' "$root/statusline.ps1" >/dev/null
 grep -F '[Claudex.CappedTextReader]::DrainAsync' "$root/usage-limit.ps1" >/dev/null
 grep -F 'taskkill.exe /PID' "$root/usage-limit.ps1" >/dev/null
+grep -F 'function Assert-SafeUsageUrl' "$root/usage-limit.ps1" >/dev/null
+grep -F 'CLAUDEX_INSECURE_TEST_ALLOW_USAGE_URL permits only loopback HTTP(S) usage endpoints.' "$root/usage-limit.ps1" >/dev/null
+grep -F -- '--config $curlConfig -- $usageUrl' "$root/usage-limit.ps1" >/dev/null
 grep -F 'Protect-PrivatePath $bridgeAuthFile $false' "$root/codex-session.ps1" >/dev/null
+grep -F 'function Acquire-SessionSyncLock' "$root/codex-session.ps1" >/dev/null
+grep -F 'if ($currentFingerprint -ne $sourceFingerprint) { continue }' "$root/codex-session.ps1" >/dev/null
+grep -F 'function Clear-SensitiveSessionState' "$root/codex-session.ps1" >/dev/null
+grep -F 'CredentialSyncCleanup' "$root/codex-session.ps1" >/dev/null
+grep -F 'AppDomain.CurrentDomain.ProcessExit' "$root/codex-session.ps1" >/dev/null
+grep -F 'Console.CancelKeyPress' "$root/codex-session.ps1" >/dev/null
+grep -F 'RefreshTicks = $refreshTicks' "$root/usage-limit.ps1" >/dev/null
+grep -F 'Sort-Object -Property $sortProperties' "$root/usage-limit.ps1" >/dev/null
 
 printf '%s\n' 'auth/usage regressions passed'

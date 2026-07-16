@@ -24,7 +24,8 @@ $refreshOwnerFile = Join-Path $refreshLock 'owner-pid'
 $accountSelectionFile = Join-Path $configDir 'codex-usage-account'
 $usageGenerationFile = Join-Path $configDir 'usage-generation'
 $curlCommand = if ($env:CLAUDEX_CURL_BIN) { $env:CLAUDEX_CURL_BIN } else { 'curl.exe' }
-$usageUrl = if ($env:CLAUDEX_USAGE_URL) { $env:CLAUDEX_USAGE_URL } else { 'https://chatgpt.com/backend-api/wham/usage' }
+$officialUsageUrl = 'https://chatgpt.com/backend-api/wham/usage'
+$usageUrl = if ($env:CLAUDEX_USAGE_URL) { $env:CLAUDEX_USAGE_URL } else { $officialUsageUrl }
 
 function Get-IntegerSetting([string] $Name, [int] $Default, [int] $Minimum, [int] $Maximum) {
     $raw = [Environment]::GetEnvironmentVariable($Name, 'Process')
@@ -47,6 +48,20 @@ $ownedRefreshToken = ''
 $isWindowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 if ($LockHeld -and ($LockToken -notmatch '^[A-Za-z0-9._-]{8,128}$')) {
     throw '-LockHeld requires a valid -LockToken generation.'
+}
+
+function Assert-SafeUsageUrl {
+    if ([string]::Equals($usageUrl, $officialUsageUrl, [StringComparison]::Ordinal)) { return }
+    if ($env:CLAUDEX_INSECURE_TEST_ALLOW_USAGE_URL -ne '1') {
+        throw "CLAUDEX_USAGE_URL must remain $officialUsageUrl; only tests may enable a loopback override with CLAUDEX_INSECURE_TEST_ALLOW_USAGE_URL=1."
+    }
+    $parsed = $null
+    $validAbsoluteUrl = [Uri]::TryCreate($usageUrl, [UriKind]::Absolute, [ref] $parsed)
+    $validScheme = $validAbsoluteUrl -and ($parsed.Scheme -in @('http', 'https'))
+    $validHost = $validAbsoluteUrl -and ($parsed.Host -in @('localhost', '127.0.0.1', '::1', '[::1]'))
+    if (-not $validScheme -or -not $validHost -or $parsed.UserInfo) {
+        throw 'CLAUDEX_INSECURE_TEST_ALLOW_USAGE_URL permits only loopback HTTP(S) usage endpoints.'
+    }
 }
 
 function Protect-PrivatePath([string] $Path, [bool] $Directory) {
@@ -209,11 +224,8 @@ function Find-CodexAuthFile {
         if (-not (Test-UsableCodexCredential $selected)) { throw 'the selected Codex usage account is disabled, expired, or invalid.' }
         return $selectedPath
     }
-    foreach ($file in @(Get-ChildItem -LiteralPath $authDir -File -Filter 'codex*.json' | Sort-Object LastWriteTimeUtc -Descending)) {
-        try {
-            $candidate = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
-            if (Test-UsableCodexCredential $candidate) { return $file.FullName }
-        } catch { }
+    foreach ($entry in @(Get-CodexAuthFiles)) {
+        if (Test-UsableCodexCredential $entry.Data) { return $entry.File.FullName }
     }
     throw 'no CLIProxyAPI Codex OAuth credential was found; run the installer with -Login.'
 }
@@ -230,15 +242,38 @@ function Get-CodexAuthFiles {
     $authDir = Get-ProxyAuthDirectory
     if (-not (Test-Path -LiteralPath $authDir -PathType Container)) { throw 'CLIProxyAPI Codex OAuth directory was not found.' }
     $valid = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $authDir -File -Filter 'codex*.json' | Sort-Object Name)) {
+    foreach ($file in @(Get-ChildItem -LiteralPath $authDir -File -Filter 'codex*.json')) {
         try {
             $candidate = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
             if ((Get-Property $candidate 'type' '') -eq 'codex' -and (Get-Property $candidate 'access_token' '')) {
-                $valid += [pscustomobject]@{ File = $file; Data = $candidate }
+                $refreshText = [string] (Get-Property $candidate 'last_refresh' '')
+                $refreshTicks = 0L
+                $parsedRefresh = [DateTimeOffset]::MinValue
+                if ([DateTimeOffset]::TryParse(
+                    $refreshText,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal,
+                    [ref] $parsedRefresh
+                )) {
+                    $refreshTicks = $parsedRefresh.UtcDateTime.Ticks
+                } else {
+                    [void][long]::TryParse($refreshText, [ref] $refreshTicks)
+                }
+                $valid += [pscustomobject]@{
+                    File = $file
+                    Data = $candidate
+                    RefreshTicks = $refreshTicks
+                    StableName = $file.Name.ToLowerInvariant()
+                }
             }
         } catch { }
     }
-    return @($valid)
+    $sortProperties = @(
+        @{ Expression = { $_.RefreshTicks }; Descending = $true }
+        @{ Expression = { $_.StableName }; Descending = $false }
+        @{ Expression = { $_.File.Name }; Descending = $false }
+    )
+    return @($valid | Sort-Object -Property $sortProperties)
 }
 
 function Show-CodexAccounts {
@@ -406,6 +441,7 @@ function Write-AtomicText([string] $Path, [string] $Content) {
 }
 
 function Get-WebUsageResponse {
+    Assert-SafeUsageUrl
     $authFile = Find-CodexAuthFile
     $auth = Get-Content -LiteralPath $authFile -Raw | ConvertFrom-Json
     $token = [string] (Get-Property $auth 'access_token' '')
@@ -423,7 +459,7 @@ function Get-WebUsageResponse {
         $configLines += 'header = "Accept: application/json"'
         [IO.File]::WriteAllLines($curlConfig, $configLines, $utf8)
         Protect-PrivatePath $curlConfig $false
-        $output = @(& $curlCommand --silent --show-error --fail --connect-timeout 3 --max-time $timeoutSeconds --config $curlConfig $usageUrl 2>$null)
+        $output = @(& $curlCommand --silent --show-error --fail --connect-timeout 3 --max-time $timeoutSeconds --config $curlConfig -- $usageUrl 2>$null)
         if ($LASTEXITCODE -ne 0) { throw 'OpenAI usage refresh failed.' }
         $raw = $output -join "`n"
     } finally {
@@ -565,6 +601,7 @@ function Get-AppServerUsageResponse {
 
 function Refresh-UsageCache {
     [IO.Directory]::CreateDirectory($cacheDir) | Out-Null
+    if ($usageSource -ne 'app-server') { Assert-SafeUsageUrl }
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $generationAtStart = Get-UsageGeneration
     $authBindingAtStart = Get-UsageAuthBinding

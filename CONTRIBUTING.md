@@ -19,7 +19,7 @@ must be reported through the private process in [SECURITY.md](SECURITY.md).
 - Improve documentation through the
   [documentation issue form](https://github.com/BeamoINT/Claudex/issues/new?template=documentation.yml).
 - Read the [roadmap](ROADMAP.md) and start an Ideas discussion before building a
-  large or cross-cutting feature.
+  large or cross cutting feature.
 
 If you want to help but no existing issue fits, open a Discussion. Maintainers
 can help turn the idea into a reviewable issue before you invest significant
@@ -44,7 +44,7 @@ Claudex has no package installation step. A development checkout needs:
 - Git;
 - Bash 3.2 or later and Zsh on macOS/Linux;
 - PowerShell 5.1 or later for Windows changes;
-- Node.js for terminal-filter and documentation checks;
+- Node.js for terminal filter and documentation checks;
 - `jq` for the Unix test harness.
 
 Fork the repository, clone your fork, and create a focused branch:
@@ -56,9 +56,9 @@ git switch -c fix/short-description
 ```
 
 Read [docs/development.md](docs/development.md) for the component map, testing
-strategy, cross-platform expectations, and review checklist.
+strategy, cross platform expectations, and review checklist.
 
-Draft pull requests are welcome for early design or cross-platform feedback.
+Draft pull requests are welcome for early design or cross platform feedback.
 You do not need every supported operating system locally: run the checks your
 platform supports, list them exactly, and let GitHub Actions provide the full
 matrix. Mark the pull request ready only after the documented behavior and
@@ -67,8 +67,8 @@ regression coverage are complete.
 ## Making changes
 
 - Keep macOS, Linux, and Windows behavior aligned. Change the Bash and
-  PowerShell implementations together unless a feature is platform-specific.
-- Preserve the zero-configuration installer and existing private user state.
+  PowerShell implementations together unless a feature is platform specific.
+- Preserve the zero configuration installer and existing private user state.
 - Treat authentication, usage data, and session files as sensitive.
 - Pin and verify every downloaded executable or archive.
 - Preserve unknown Claude Code arguments exactly and avoid assuming future
@@ -121,10 +121,10 @@ maintainer merges accepted changes after CI passes. No contributor license
 agreement is required; contributors retain copyright in their work and license
 their contribution under this repository's MIT License.
 
-Contributors are responsible for every submitted line, including AI-assisted
+Contributors are responsible for every submitted line, including AI assisted
 work. Review generated changes, remove private or proprietary data, disclose
 substantial automated assistance in the pull request when it affects review,
 and provide the same tests and reasoning expected for manually written code.
 Accepted contributions are credited through Git history, release notes when
-user-visible, and the repository's
+user visible, and the repository's
 [contributors page](https://github.com/BeamoINT/Claudex/graphs/contributors).

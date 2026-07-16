@@ -72,7 +72,10 @@ public static class ClaudexTestCurl
         if (!String.IsNullOrEmpty(ready) && !File.Exists(ready)) return 7;
         if (String.IsNullOrEmpty(headerFile) || !File.Exists(headerFile) ||
             !File.ReadAllText(headerFile).Contains("Authorization: Bearer test-token")) return 91;
-        Console.WriteLine(@"{""data"":[{""id"":""gpt-5.6-sol""},{""id"":""gpt-5.6-terra""},{""id"":""gpt-5.6-luna""}]}");
+        string models = Environment.GetEnvironmentVariable("FAKE_PROXY_MODELS_JSON");
+        Console.WriteLine(String.IsNullOrEmpty(models)
+            ? @"{""data"":[{""id"":""gpt-5.6-sol""},{""id"":""gpt-5.6-terra""},{""id"":""gpt-5.6-luna""}]}"
+            : models);
         return 0;
     }
 }
@@ -114,6 +117,7 @@ public static class ClaudexTestCurl
             Write-Output "AUTO=$env:CLAUDE_CODE_AUTO_MODE_MODEL"
             Write-Output "BG=$env:CLAUDE_CODE_BG_CLASSIFIER_MODEL"
             Write-Output "SUBAGENT=$env:CLAUDE_CODE_SUBAGENT_MODEL"
+            Write-Output "ADDITIONAL_DIR_MD=$env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
             Write-Output "CONCURRENCY=$env:CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY"
             Write-Output "RETRIES=$env:CLAUDE_CODE_MAX_RETRIES"
             Write-Output "CONTEXT=$env:CLAUDE_CODE_MAX_CONTEXT_TOKENS"
@@ -127,11 +131,21 @@ public static class ClaudexTestCurl
             Write-Output "OPUS_NAME=$env:ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"
             Write-Output "POWERSHELL_TOOL=$env:CLAUDE_CODE_USE_POWERSHELL_TOOL"
             Write-Output "MODE=$env:CLAUDEX_SESSION_MODE"
+            Write-Output "MODEL_MODE=$env:CLAUDEX_MODEL_MODE"
             Write-Output "BASE=$env:ANTHROPIC_BASE_URL"
+            Write-Output "AUTH_TOKEN=$env:ANTHROPIC_AUTH_TOKEN"
+            Write-Output "PROXY_TOKEN=$env:CLAUDEX_PROXY_TOKEN"
+            Write-Output "PROXY_URL=$env:CLAUDEX_PROXY_URL"
+            Write-Output "PROXY_CONFIG=$env:CLAUDEX_PROXY_CONFIG"
+            Write-Output "CODEX_AUTH_DIR=$env:CLAUDEX_CODEX_AUTH_DIR"
+            Write-Output "PROVIDERS=$env:CLAUDE_CODE_USE_BEDROCK|$env:CLAUDE_CODE_USE_VERTEX|$env:CLAUDE_CODE_USE_FOUNDRY|$env:ANTHROPIC_BEDROCK_BASE_URL|$env:ANTHROPIC_VERTEX_BASE_URL|$env:ANTHROPIC_FOUNDRY_BASE_URL"
             Write-Output "BUN=$env:BUN_OPTIONS"
             Write-Output "INTERACTIVE=$env:CLAUDEX_INTERACTIVE_TUI"
+            Write-Output "MANAGED=$env:CLAUDEX_MANAGED_SESSION"
+            Write-Output "INSTRUCTION_BRIDGE=$env:CLAUDEX_INSTRUCTION_BRIDGE"
             Write-Output "CHATGPT_PLAN=$env:CLAUDEX_CHATGPT_PLAN_LABEL"
             Write-Output "CONFIG=$env:CLAUDE_CONFIG_DIR"
+            Write-Output "ARGC=$($args.Count)"
             Write-Output "ARGS=$($args -join ' ')"
         }
         Add-Type -TypeDefinition @'
@@ -171,6 +185,15 @@ public static class ClaudexTestProxy
 '@ -OutputAssembly (Join-Path $fakeBin 'cliproxyapi.exe') -OutputType ConsoleApplication
         [IO.File]::WriteAllText((Join-Path $fakeBin 'codex.cmd'), @'
 @echo off
+if not "%FAKE_CODEX_NATIVE_LOG%"=="" (
+  >"%FAKE_CODEX_NATIVE_LOG%" echo ARGS=%*
+  >>"%FAKE_CODEX_NATIVE_LOG%" echo BASE=%ANTHROPIC_BASE_URL%
+  >>"%FAKE_CODEX_NATIVE_LOG%" echo AUTH_TOKEN=%ANTHROPIC_AUTH_TOKEN%
+  >>"%FAKE_CODEX_NATIVE_LOG%" echo PROXY_TOKEN=%CLAUDEX_PROXY_TOKEN%
+  >>"%FAKE_CODEX_NATIVE_LOG%" echo MANAGED=%CLAUDEX_MANAGED_SESSION%
+  >>"%FAKE_CODEX_NATIVE_LOG%" echo BUN=%BUN_OPTIONS%
+  if not "%FAKE_CODEX_NATIVE_EXIT%"=="" exit /b %FAKE_CODEX_NATIVE_EXIT%
+)
 if "%1"=="app-server" (
   echo {"id":1,"result":{}}
   echo {"id":2,"result":{"rateLimits":{"limitId":"codex","limitName":"Codex","planType":"pro","primary":{"usedPercent":63,"windowDurationMins":10080,"resetsAt":1784705933}},"rateLimitsByLimitId":{}}}
@@ -191,6 +214,16 @@ exit /b 2
         # fixture so those tests reach proxy recovery instead of exiting early.
         [IO.File]::WriteAllText((Join-Path $fakeBin 'claude.cmd'), @'
 @echo off
+if not "%FAKE_CLAUDE_NATIVE_LOG%"=="" (
+  >"%FAKE_CLAUDE_NATIVE_LOG%" echo ARGS=%*
+  >>"%FAKE_CLAUDE_NATIVE_LOG%" echo BASE=%ANTHROPIC_BASE_URL%
+  >>"%FAKE_CLAUDE_NATIVE_LOG%" echo AUTH_TOKEN=%ANTHROPIC_AUTH_TOKEN%
+  >>"%FAKE_CLAUDE_NATIVE_LOG%" echo PROXY_TOKEN=%CLAUDEX_PROXY_TOKEN%
+  >>"%FAKE_CLAUDE_NATIVE_LOG%" echo MANAGED=%CLAUDEX_MANAGED_SESSION%
+  >>"%FAKE_CLAUDE_NATIVE_LOG%" echo BUN=%BUN_OPTIONS%
+  >>"%FAKE_CLAUDE_NATIVE_LOG%" echo PROVIDERS=%CLAUDE_CODE_USE_BEDROCK%^|%CLAUDE_CODE_USE_VERTEX%^|%CLAUDE_CODE_USE_FOUNDRY%^|%ANTHROPIC_BEDROCK_BASE_URL%^|%ANTHROPIC_VERTEX_BASE_URL%^|%ANTHROPIC_FOUNDRY_BASE_URL%
+  if not "%FAKE_CLAUDE_NATIVE_EXIT%"=="" exit /b %FAKE_CLAUDE_NATIVE_EXIT%
+)
 if "%~1"=="--version" (
   echo 2.1.210 ^(test^)
   exit /b 0
@@ -204,6 +237,11 @@ if "%~1"=="auto-mode" if "%~2"=="defaults" (
   exit /b 0
 )
 if "%~1"=="update" exit /b 0
+if not "%FAKE_CLAUDE_MAINTENANCE_LOG%"=="" (
+  >"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo ARGS=%*
+  >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo BASE=%ANTHROPIC_BASE_URL%
+  >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo MANAGED=%CLAUDEX_MANAGED_SESSION%
+)
 exit /b 0
 '@, $utf8)
     } else {
@@ -236,6 +274,7 @@ if [ "${1:-}" = "update" ]; then exit 0; fi
 printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
 printf '%s\n' "BG=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
 printf '%s\n' "SUBAGENT=${CLAUDE_CODE_SUBAGENT_MODEL}"
+printf '%s\n' "ADDITIONAL_DIR_MD=${CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD}"
 printf '%s\n' "CONCURRENCY=${CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY}"
 printf '%s\n' "RETRIES=${CLAUDE_CODE_MAX_RETRIES}"
 printf '%s\n' "CONTEXT=${CLAUDE_CODE_MAX_CONTEXT_TOKENS}"
@@ -248,8 +287,12 @@ printf '%s\n' "OPUS_NAME=${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME}"
 printf '%s\n' "POWERSHELL_TOOL=${CLAUDE_CODE_USE_POWERSHELL_TOOL}"
 printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
 printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
+printf '%s\n' "AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}"
+printf '%s\n' "PROXY_TOKEN=${CLAUDEX_PROXY_TOKEN:-}"
 printf '%s\n' "BUN=${BUN_OPTIONS:-}"
 printf '%s\n' "INTERACTIVE=${CLAUDEX_INTERACTIVE_TUI:-}"
+printf '%s\n' "MANAGED=${CLAUDEX_MANAGED_SESSION:-}"
+printf '%s\n' "INSTRUCTION_BRIDGE=${CLAUDEX_INSTRUCTION_BRIDGE:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
 printf 'ARGS='; printf ' %s' "$@"; printf '\n'
 '@, $utf8)
@@ -302,6 +345,124 @@ exit 1
         }
         Assert-True ($oldNodeExit -eq 1) 'Node 16 is rejected before skill bridge startup'
         Assert-True (($oldNodeOutput | Out-String).Contains('Node.js 18 or newer is required for skill compatibility (found Node.js 16)')) 'old Node diagnostic is actionable'
+
+        $missingMaintenanceConfig = Join-Path $temporary 'missing-maintenance-config'
+        $maintenanceLog = Join-Path $temporary 'maintenance-command.log'
+        $savedConfigDir = [Environment]::GetEnvironmentVariable('CLAUDEX_CONFIG_DIR', 'Process')
+        $savedSettingsFile = [Environment]::GetEnvironmentVariable('CLAUDEX_SETTINGS_FILE', 'Process')
+        $savedMaintenanceLog = [Environment]::GetEnvironmentVariable('FAKE_CLAUDE_MAINTENANCE_LOG', 'Process')
+        $savedBaseUrl = [Environment]::GetEnvironmentVariable('ANTHROPIC_BASE_URL', 'Process')
+        $savedManagedSession = [Environment]::GetEnvironmentVariable('CLAUDEX_MANAGED_SESSION', 'Process')
+        try {
+            $env:CLAUDEX_CONFIG_DIR = $missingMaintenanceConfig
+            Remove-Item Env:CLAUDEX_SETTINGS_FILE -ErrorAction SilentlyContinue
+            $env:FAKE_CLAUDE_MAINTENANCE_LOG = $maintenanceLog
+            $env:ANTHROPIC_BASE_URL = 'https://managed-parent.invalid'
+            $env:CLAUDEX_MANAGED_SESSION = '1'
+            foreach ($maintenanceCommand in @('doctor', 'attach', 'respawn', 'stop', 'kill', 'rm', 'logs')) {
+                Remove-Item -LiteralPath $maintenanceLog -Force -ErrorAction SilentlyContinue
+                $maintenanceOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') $maintenanceCommand 'maintenance-sentinel' 2>&1
+                $maintenanceExit = $LASTEXITCODE
+                Assert-True ($maintenanceExit -eq 0) "Windows $maintenanceCommand bypasses missing Claudex configuration"
+                Assert-True (Test-Path -LiteralPath $maintenanceLog -PathType Leaf) "Windows $maintenanceCommand reaches Claude"
+                $maintenanceLines = @([IO.File]::ReadAllLines($maintenanceLog))
+                Assert-True ($maintenanceLines.Count -eq 3) "Windows $maintenanceCommand writes one maintenance launch record"
+                Assert-True ($maintenanceLines[0] -eq "ARGS=$maintenanceCommand maintenance-sentinel") "Windows $maintenanceCommand preserves exact Claude argv without managed flags"
+                Assert-True ($maintenanceLines[1] -eq 'BASE=') "Windows $maintenanceCommand clears the managed proxy URL"
+                Assert-True ($maintenanceLines[2] -eq 'MANAGED=') "Windows $maintenanceCommand clears the managed-session marker"
+            }
+            Remove-Item -LiteralPath $maintenanceLog -Force -ErrorAction SilentlyContinue
+            $maintenanceSavedPath = $env:PATH
+            try {
+                $env:PATH = "$oldNodeBin$([IO.Path]::PathSeparator)$maintenanceSavedPath"
+                $verboseMaintenanceOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --verbose mcp list 2>&1
+                $verboseMaintenanceExit = $LASTEXITCODE
+            } finally { $env:PATH = $maintenanceSavedPath }
+            Assert-True ($verboseMaintenanceExit -eq 0) 'global options before maintenance bypass missing configuration and stale Node'
+            $verboseMaintenanceLines = @([IO.File]::ReadAllLines($maintenanceLog))
+            Assert-True ($verboseMaintenanceLines[0] -eq 'ARGS=--verbose mcp list') 'global options preserve exact maintenance argv'
+            Assert-True ($verboseMaintenanceLines[1] -eq 'BASE=' -and $verboseMaintenanceLines[2] -eq 'MANAGED=') 'global-option maintenance launch receives no proxy or managed session injection'
+        } finally {
+            if ($null -eq $savedConfigDir) { Remove-Item Env:CLAUDEX_CONFIG_DIR -ErrorAction SilentlyContinue } else { $env:CLAUDEX_CONFIG_DIR = $savedConfigDir }
+            if ($null -eq $savedSettingsFile) { Remove-Item Env:CLAUDEX_SETTINGS_FILE -ErrorAction SilentlyContinue } else { $env:CLAUDEX_SETTINGS_FILE = $savedSettingsFile }
+            if ($null -eq $savedMaintenanceLog) { Remove-Item Env:FAKE_CLAUDE_MAINTENANCE_LOG -ErrorAction SilentlyContinue } else { $env:FAKE_CLAUDE_MAINTENANCE_LOG = $savedMaintenanceLog }
+            if ($null -eq $savedBaseUrl) { Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue } else { $env:ANTHROPIC_BASE_URL = $savedBaseUrl }
+            if ($null -eq $savedManagedSession) { Remove-Item Env:CLAUDEX_MANAGED_SESSION -ErrorAction SilentlyContinue } else { $env:CLAUDEX_MANAGED_SESSION = $savedManagedSession }
+        }
+
+        $nativeBoundaryEnvironment = @{}
+        foreach ($nativeBoundaryName in @(
+            'CLAUDEX_CONFIG_DIR', 'CLAUDEX_MANAGED_SESSION', 'CLAUDEX_PROXY_TOKEN',
+            'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'BUN_OPTIONS',
+            'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+            'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_FOUNDRY_BASE_URL',
+            'FAKE_CODEX_NATIVE_LOG', 'FAKE_CODEX_NATIVE_EXIT',
+            'FAKE_CLAUDE_NATIVE_LOG', 'FAKE_CLAUDE_NATIVE_EXIT'
+        )) {
+            $nativeBoundaryEnvironment[$nativeBoundaryName] = [Environment]::GetEnvironmentVariable($nativeBoundaryName, 'Process')
+        }
+        try {
+            $env:CLAUDEX_CONFIG_DIR = $missingMaintenanceConfig
+            $env:CLAUDEX_MANAGED_SESSION = '1'
+            $env:CLAUDEX_PROXY_TOKEN = 'managed-proxy-secret'
+            $env:ANTHROPIC_BASE_URL = 'https://managed-provider.invalid'
+            $env:ANTHROPIC_AUTH_TOKEN = 'managed-provider-secret'
+            $boundaryManagedPreload = '--preload ' + (Join-Path $missingMaintenanceConfig 'preload.cjs').Replace('\', '/').Replace(' ', '\ ')
+            $env:BUN_OPTIONS = "$boundaryManagedPreload --preload C:/user/preload.cjs"
+
+            $nativeCodexLog = Join-Path $temporary 'native-codex.log'
+            $env:FAKE_CODEX_NATIVE_LOG = $nativeCodexLog
+            $env:FAKE_CODEX_NATIVE_EXIT = '37'
+            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') codex native-codex arg-two 2>&1 | Out-Null
+            Assert-True ($LASTEXITCODE -eq 37) 'native Codex route preserves the child exit code'
+            $nativeCodexLines = @([IO.File]::ReadAllLines($nativeCodexLog))
+            Assert-True ($nativeCodexLines[0] -eq 'ARGS=native-codex arg-two') 'native Codex route preserves exact argv'
+            Assert-True ($nativeCodexLines[1] -eq 'BASE=' -and $nativeCodexLines[2] -eq 'AUTH_TOKEN=') 'managed native Codex route clears provider credentials'
+            Assert-True ($nativeCodexLines[3] -eq 'PROXY_TOKEN=' -and $nativeCodexLines[4] -eq 'MANAGED=' -and $nativeCodexLines[5] -eq 'BUN=') 'managed native Codex route clears proxy, session, and preload state'
+
+            $nativeClaudeLog = Join-Path $temporary 'native-claude.log'
+            $env:FAKE_CLAUDE_NATIVE_LOG = $nativeClaudeLog
+            $env:FAKE_CLAUDE_NATIVE_EXIT = '29'
+            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') claude native-claude arg-two 2>&1 | Out-Null
+            Assert-True ($LASTEXITCODE -eq 29) 'native Claude route preserves the child exit code'
+            $nativeClaudeLines = @([IO.File]::ReadAllLines($nativeClaudeLog))
+            Assert-True ($nativeClaudeLines[0] -eq 'ARGS=native-claude arg-two') 'native Claude route preserves exact argv'
+            Assert-True ($nativeClaudeLines[1] -eq 'BASE=' -and $nativeClaudeLines[2] -eq 'AUTH_TOKEN=' -and $nativeClaudeLines[3] -eq 'PROXY_TOKEN=') 'managed native Claude route clears provider and proxy credentials'
+            Assert-True ($nativeClaudeLines[4] -eq 'MANAGED=' -and $nativeClaudeLines[5] -eq 'BUN=--preload C:/user/preload.cjs') 'managed native Claude route clears its session marker and only its own preload'
+
+            Remove-Item Env:CLAUDEX_MANAGED_SESSION -ErrorAction SilentlyContinue
+            $env:ANTHROPIC_BASE_URL = 'https://caller-provider.invalid'
+            $env:ANTHROPIC_AUTH_TOKEN = 'caller-provider-secret'
+            $env:CLAUDEX_PROXY_TOKEN = 'must-never-reach-native'
+            $env:BUN_OPTIONS = '--preload C:/user/native-preload.cjs'
+            $env:CLAUDE_CODE_USE_BEDROCK = '1'
+            $env:CLAUDE_CODE_USE_VERTEX = '1'
+            $env:CLAUDE_CODE_USE_FOUNDRY = '1'
+            $env:ANTHROPIC_BEDROCK_BASE_URL = 'https://bedrock.invalid'
+            $env:ANTHROPIC_VERTEX_BASE_URL = 'https://vertex.invalid'
+            $env:ANTHROPIC_FOUNDRY_BASE_URL = 'https://foundry.invalid'
+            $env:FAKE_CLAUDE_NATIVE_EXIT = '23'
+            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --remote-control hosted-session 2>&1 | Out-Null
+            Assert-True ($LASTEXITCODE -eq 23) 'Remote Control route preserves the native Claude exit code'
+            $remoteLines = @([IO.File]::ReadAllLines($nativeClaudeLog))
+            Assert-True ($remoteLines[0] -eq 'ARGS=--remote-control hosted-session') 'Remote Control route preserves exact Claude argv'
+            Assert-True ($remoteLines[1] -eq 'BASE=' -and $remoteLines[2] -eq 'AUTH_TOKEN=' -and $remoteLines[3] -eq 'PROXY_TOKEN=') 'Remote Control forces a first-party provider boundary'
+            Assert-True ($remoteLines[5] -eq 'BUN=--preload C:/user/native-preload.cjs') 'Remote Control preserves caller-owned native Bun options'
+            Assert-True ($remoteLines[6] -eq 'PROVIDERS=|||||') 'Remote Control clears alternate provider selectors and base URLs'
+
+            $env:FAKE_CLAUDE_NATIVE_EXIT = '19'
+            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') ultrareview review-target 2>&1 | Out-Null
+            Assert-True ($LASTEXITCODE -eq 19) 'Ultrareview route preserves the native Claude exit code'
+            $ultrareviewLines = @([IO.File]::ReadAllLines($nativeClaudeLog))
+            Assert-True ($ultrareviewLines[0] -eq 'ARGS=ultrareview review-target') 'Ultrareview route preserves exact Claude argv'
+            Assert-True ($ultrareviewLines[1] -eq 'BASE=' -and $ultrareviewLines[2] -eq 'AUTH_TOKEN=' -and $ultrareviewLines[3] -eq 'PROXY_TOKEN=') 'Ultrareview forces a first-party provider boundary'
+        } finally {
+            foreach ($nativeBoundaryName in $nativeBoundaryEnvironment.Keys) {
+                $nativeBoundaryValue = $nativeBoundaryEnvironment[$nativeBoundaryName]
+                if ($null -eq $nativeBoundaryValue) { Remove-Item -LiteralPath "Env:$nativeBoundaryName" -ErrorAction SilentlyContinue }
+                else { [Environment]::SetEnvironmentVariable($nativeBoundaryName, $nativeBoundaryValue, 'Process') }
+            }
+        }
     }
 
     $authRecoveryHelper = Join-Path $temporary 'auth-recovery-helper.ps1'
@@ -355,6 +516,128 @@ switch ($Action) {
         else { $env:CI = $savedCi }
     }
 
+    $nativeProfile = Join-Path $temporary 'native-claude-profile'
+    $nativeManagedPreload = '--preload ' + (Join-Path $testConfig 'preload.cjs').Replace('\', '/').Replace(' ', '\ ')
+    $nativeSavedEnvironment = @{}
+    foreach ($nativeName in @('CLAUDEX_NODE_BIN', 'CLAUDEX_CLAUDE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CLAUDEX_PROXY_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'CLAUDE_CODE_AUTO_MODE_MODEL', 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD', 'CLAUDEX_INTERACTIVE_TUI', 'CLAUDEX_MANAGED_SESSION', 'BUN_OPTIONS')) {
+        $nativeSavedEnvironment[$nativeName] = [Environment]::GetEnvironmentVariable($nativeName, 'Process')
+    }
+    try {
+        $env:CLAUDEX_NODE_BIN = 'Z:\missing\node.exe'
+        $env:CLAUDEX_CLAUDE_CONFIG_DIR = $nativeProfile
+        $env:CLAUDE_CONFIG_DIR = 'Z:\managed-profile'
+        $env:ANTHROPIC_BASE_URL = 'https://managed.invalid'
+        $env:ANTHROPIC_AUTH_TOKEN = 'managed-secret'
+        $env:CLAUDEX_PROXY_TOKEN = 'managed-proxy-secret'
+        $env:ANTHROPIC_DEFAULT_OPUS_MODEL = 'gpt-5.6-sol'
+        $env:CLAUDE_CODE_AUTO_MODE_MODEL = 'gpt-5.6-terra'
+        $env:CLAUDEX_INTERACTIVE_TUI = '1'
+        $env:CLAUDEX_MANAGED_SESSION = '1'
+        $env:BUN_OPTIONS = "$nativeManagedPreload --preload C:/user/preload.cjs"
+        $nativeClaudeOutput = (& (Join-Path $root 'claudex.ps1') claude native-test 'arg with spaces' | Out-String)
+        Assert-True ($env:CLAUDE_CONFIG_DIR -eq 'Z:\managed-profile') 'native Claude route restores the caller Claude profile'
+        Assert-True ($env:ANTHROPIC_BASE_URL -eq 'https://managed.invalid' -and $env:ANTHROPIC_AUTH_TOKEN -eq 'managed-secret') 'native Claude route restores caller provider state'
+        Assert-True ($env:CLAUDEX_PROXY_TOKEN -eq 'managed-proxy-secret') 'native Claude route restores the caller proxy token after child exit'
+        Assert-True ($env:ANTHROPIC_DEFAULT_OPUS_MODEL -eq 'gpt-5.6-sol' -and $env:CLAUDE_CODE_AUTO_MODE_MODEL -eq 'gpt-5.6-terra') 'native Claude route restores caller model routing'
+        Assert-True ($env:CLAUDEX_INTERACTIVE_TUI -eq '1' -and $env:CLAUDEX_MANAGED_SESSION -eq '1' -and $env:BUN_OPTIONS -eq "$nativeManagedPreload --preload C:/user/preload.cjs") 'native Claude route restores caller session and Bun state'
+    } finally {
+        foreach ($nativeName in $nativeSavedEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($nativeName, $nativeSavedEnvironment[$nativeName], 'Process')
+        }
+    }
+    Assert-True ($nativeClaudeOutput.Contains('ARGC=2') -and $nativeClaudeOutput.Contains('ARGS=native-test arg with spaces')) 'native Claude route preserves argument boundaries'
+    Assert-True ($nativeClaudeOutput.Contains("CONFIG=$nativeProfile")) 'native Claude route selects the normal Claude profile'
+    Assert-True ($nativeClaudeOutput.Contains('BASE=') -and -not $nativeClaudeOutput.Contains('BASE=https://managed.invalid')) 'native Claude route removes the compatibility provider'
+    Assert-True ($nativeClaudeOutput.Contains('AUTH_TOKEN=') -and -not $nativeClaudeOutput.Contains('AUTH_TOKEN=managed-secret')) 'native Claude route removes the compatibility provider credential'
+    Assert-True ($nativeClaudeOutput.Contains('PROXY_TOKEN=') -and -not $nativeClaudeOutput.Contains('PROXY_TOKEN=managed-proxy-secret')) 'native Claude route never exposes the Claudex proxy token'
+    Assert-True ($nativeClaudeOutput.Contains('OPUS=') -and -not $nativeClaudeOutput.Contains('OPUS=gpt-5.6-sol')) 'native Claude route removes managed model aliases'
+    Assert-True ($nativeClaudeOutput.Contains('AUTO=') -and -not $nativeClaudeOutput.Contains('AUTO=gpt-5.6-terra')) 'native Claude route removes managed classifier routing'
+    Assert-True ($nativeClaudeOutput.Contains('BUN=--preload C:/user/preload.cjs')) 'native Claude route preserves non-Claudex Bun options'
+    Assert-True ($nativeClaudeOutput.Contains('INTERACTIVE=') -and -not $nativeClaudeOutput.Contains('INTERACTIVE=1')) 'native Claude route removes Claudex session state'
+
+    $nativeUserSavedEnvironment = @{}
+    foreach ($nativeName in @('CLAUDEX_CLAUDE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CLAUDEX_PROXY_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'CLAUDE_CODE_AUTO_MODE_MODEL', 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD', 'CLAUDEX_MANAGED_SESSION', 'BUN_OPTIONS')) {
+        $nativeUserSavedEnvironment[$nativeName] = [Environment]::GetEnvironmentVariable($nativeName, 'Process')
+    }
+    try {
+        Remove-Item Env:CLAUDEX_CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue
+        Remove-Item Env:CLAUDEX_MANAGED_SESSION -ErrorAction SilentlyContinue
+        $env:CLAUDE_CONFIG_DIR = 'C:\user\claude-profile'
+        $env:ANTHROPIC_BASE_URL = 'https://custom-provider.invalid'
+        $env:ANTHROPIC_AUTH_TOKEN = 'custom-provider-secret'
+        $env:CLAUDEX_PROXY_TOKEN = 'native-must-not-see-this'
+        $env:ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-custom'
+        $env:CLAUDE_CODE_AUTO_MODE_MODEL = 'custom-auto'
+        $env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = '1'
+        $env:BUN_OPTIONS = '--preload C:/user/native-preload.cjs'
+        $nativeUserOutput = (& (Join-Path $root 'claudex.ps1') claude native-user-settings | Out-String)
+    } finally {
+        foreach ($nativeName in $nativeUserSavedEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($nativeName, $nativeUserSavedEnvironment[$nativeName], 'Process')
+        }
+    }
+    Assert-True ($nativeUserOutput.Contains('CONFIG=C:\user\claude-profile')) 'native Claude route preserves an explicit user profile'
+    Assert-True ($nativeUserOutput.Contains('OPUS=claude-custom') -and $nativeUserOutput.Contains('AUTO=custom-auto')) 'native Claude route preserves user model settings'
+    Assert-True ($nativeUserOutput.Contains('ADDITIONAL_DIR_MD=1')) 'native Claude route preserves user additional-directory instructions'
+    Assert-True ($nativeUserOutput.Contains('BUN=--preload C:/user/native-preload.cjs')) 'native Claude route preserves user Bun options'
+    Assert-True ($nativeUserOutput.Contains('BASE=https://custom-provider.invalid') -and $nativeUserOutput.Contains('AUTH_TOKEN=custom-provider-secret')) 'explicit native Claude route preserves caller-owned gateway settings'
+    Assert-True ($nativeUserOutput.Contains('PROXY_TOKEN=') -and -not $nativeUserOutput.Contains('PROXY_TOKEN=native-must-not-see-this')) 'explicit native Claude route never exposes the Claudex proxy token'
+
+    $hostedProviderEnvironment = @{}
+    foreach ($hostedProviderName in @('CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_FOUNDRY_BASE_URL')) {
+        $hostedProviderEnvironment[$hostedProviderName] = [Environment]::GetEnvironmentVariable($hostedProviderName, 'Process')
+        [Environment]::SetEnvironmentVariable($hostedProviderName, 'caller-provider-setting', 'Process')
+    }
+    try {
+        $hostedProviderOutput = (& (Join-Path $root 'claudex.ps1') --rc hosted-provider-restore-test | Out-String)
+        foreach ($hostedProviderName in $hostedProviderEnvironment.Keys) {
+            Assert-True ([Environment]::GetEnvironmentVariable($hostedProviderName, 'Process') -eq 'caller-provider-setting') "hosted route restores $hostedProviderName after child exit"
+        }
+    } finally {
+        foreach ($hostedProviderName in $hostedProviderEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($hostedProviderName, $hostedProviderEnvironment[$hostedProviderName], 'Process')
+        }
+    }
+    Assert-True ($hostedProviderOutput.Contains('PROVIDERS=|||||')) 'hosted route clears alternate provider selectors and base URLs in the child'
+
+    $instructionBridgeProbe = Join-Path $temporary 'instruction-bridge-probe.cjs'
+    $instructionBridgeLog = Join-Path $temporary 'instruction-bridge-probe.log'
+    [IO.File]::WriteAllText($instructionBridgeProbe, @'
+const fs = require('fs');
+fs.writeFileSync(process.env.CLAUDEX_TEST_INSTRUCTION_BRIDGE_LOG, process.env.CLAUDEX_INSTRUCTION_BRIDGE || '<unset>');
+process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions: [], warnings: [] }) + '\n');
+'@, $utf8)
+    $savedInstructionBridgeEnvironment = @{}
+    foreach ($instructionName in @('CLAUDEX_SKILL_BRIDGE_HELPER', 'CLAUDEX_INSTRUCTION_BRIDGE', 'CLAUDEX_TEST_INSTRUCTION_BRIDGE_LOG')) {
+        $savedInstructionBridgeEnvironment[$instructionName] = [Environment]::GetEnvironmentVariable($instructionName, 'Process')
+    }
+    try {
+        $env:CLAUDEX_SKILL_BRIDGE_HELPER = $instructionBridgeProbe
+        $env:CLAUDEX_TEST_INSTRUCTION_BRIDGE_LOG = $instructionBridgeLog
+        Remove-Item Env:CLAUDEX_INSTRUCTION_BRIDGE -ErrorAction SilentlyContinue
+        & (Join-Path $root 'claudex.ps1') --terra instruction-default-test | Out-Null
+        Assert-True ([IO.File]::ReadAllText($instructionBridgeLog) -eq 'on') 'instruction bridge defaults to on and is passed to the bridge child'
+        $env:CLAUDEX_INSTRUCTION_BRIDGE = 'off'
+        & (Join-Path $root 'claudex.ps1') --terra instruction-disabled-test | Out-Null
+        Assert-True ([IO.File]::ReadAllText($instructionBridgeLog) -eq 'off') 'instruction bridge passes an explicit off value to the bridge child'
+        if ($isWindowsPlatform) {
+            $savedErrorPreference = $ErrorActionPreference
+            try {
+                $env:CLAUDEX_INSTRUCTION_BRIDGE = 'invalid'
+                $ErrorActionPreference = 'Continue'
+                & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') instruction-invalid-test 2>&1 | Out-Null
+                $invalidInstructionBridgeExit = $LASTEXITCODE
+            } finally { $ErrorActionPreference = $savedErrorPreference }
+            Assert-True ($invalidInstructionBridgeExit -eq 2) 'invalid instruction bridge mode is rejected'
+        }
+    } finally {
+        foreach ($instructionName in $savedInstructionBridgeEnvironment.Keys) {
+            $instructionValue = $savedInstructionBridgeEnvironment[$instructionName]
+            if ($null -eq $instructionValue) { Remove-Item -LiteralPath "Env:$instructionName" -ErrorAction SilentlyContinue }
+            else { [Environment]::SetEnvironmentVariable($instructionName, $instructionValue, 'Process') }
+        }
+    }
+
     $sourceSettings = Get-Content -LiteralPath (Join-Path $root 'settings.json') -Raw | ConvertFrom-Json
     Assert-True ($null -eq $sourceSettings.PSObject.Properties['autoMode']) 'shipped settings defer to complete upstream auto-mode defaults'
 
@@ -380,12 +663,13 @@ switch ($Action) {
         throw "assertion failed: auto classifier; proxy diagnostics: $proxyRecoveryDetail"
     }
     Assert-True ($output.Contains('BG=gpt-5.6-luna')) 'background classifier'
-    Assert-True ($output.Contains('SUBAGENT=gpt-5.6-terra')) 'subagent model'
+    Assert-True ($output.Contains('SUBAGENT=') -and -not $output.Contains('SUBAGENT=gpt-5.6-terra')) 'native Claude subagent routing is not globally overridden'
+    Assert-True ($output.Contains('ADDITIONAL_DIR_MD=1')) 'generated overlay CLAUDE.md files are enabled for additional directories'
     Assert-True ($output.Contains('CONCURRENCY=3')) 'tool concurrency'
     Assert-True ($output.Contains('RETRIES=15')) 'bounded retries cover bridge recovery'
     Assert-True ($output.Contains('CONTEXT=400000')) 'context window'
     Assert-True ($output.Contains('COMPACT=280000')) 'compaction window'
-    Assert-True ($output.Contains('NO_FLICKER=1')) 'no-flicker rendering'
+    Assert-True ($output.Contains('NO_FLICKER=1')) 'stable rendering'
     Assert-True ($output.Contains('ACCESSIBILITY=1')) 'native terminal cursor'
     Assert-True ($output.Contains('DISABLE_1M=1')) 'proxied sessions hide the unsupported Anthropic 1M selector'
     Assert-True ($output.Contains('FABLE=gpt-5.6-sol')) 'Fable selector routes to Sol'
@@ -398,8 +682,10 @@ switch ($Action) {
     Assert-True ($output.Contains('--permission-mode auto')) 'auto permissions'
     Assert-True ($output.Contains('--model gpt-5.6-terra')) 'startup model'
     Assert-True ($output.Contains('--add-dir')) 'Claude and Codex skill overlay forwarded'
-    Assert-True ($output.Contains('Do not create a team, spawn or delegate to additional agents')) 'nested agent guard'
-    Assert-True ($output.Contains('Do not create, claim, or update entries in the shared task list')) 'subagent task ownership'
+    Assert-True ($output.Contains('Do not spawn or delegate to additional agents')) 'nested agent guard'
+    Assert-True ($output.Contains('Unless you are a teammate in a native Agent Team that the user explicitly requested')) 'team-compatible subagent task ownership'
+    Assert-True ($output.Contains('Native Agent Teams may be created only when the user explicitly requests')) 'explicit Agent Teams remain available within the managed capacity'
+    Assert-True ($output.Contains('for ordinary Agent delegation, the Sol leader owns')) 'ordinary delegation retains Sol task ownership'
     Assert-True ($output.Contains('Before every final answer, call TaskList and reconcile every entry')) 'leader task reconciliation'
     Assert-True ($output.Contains('Never leave stale in_progress tasks after their work is done')) 'stale task guard'
     Assert-True ($output.Contains('operate as a Codex coding agent inside Claude Code')) 'Codex tuning guard'
@@ -414,28 +700,89 @@ switch ($Action) {
     Assert-True (-not $output.Contains('"claudex-builder"')) 'legacy builder alias removed'
     Assert-True (-not $output.Contains('"claudex-fast"')) 'legacy fast alias removed'
     Assert-True (-not $output.Contains('"model":"gpt-5.6-sol"')) 'leader model is not delegated'
+
+    $savedUserSubagentModel = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_SUBAGENT_MODEL', 'Process')
+    try {
+        $env:CLAUDE_CODE_SUBAGENT_MODEL = 'caller-owned-subagent'
+        $userSubagentOutput = (& (Join-Path $root 'claudex.ps1') --terra explicit-subagent-test | Out-String)
+        Assert-True ($env:CLAUDE_CODE_SUBAGENT_MODEL -eq 'caller-owned-subagent') 'managed launch restores the caller subagent model'
+    } finally {
+        if ($null -eq $savedUserSubagentModel) { Remove-Item Env:CLAUDE_CODE_SUBAGENT_MODEL -ErrorAction SilentlyContinue }
+        else { $env:CLAUDE_CODE_SUBAGENT_MODEL = $savedUserSubagentModel }
+    }
+    Assert-True ($userSubagentOutput.Contains('SUBAGENT=caller-owned-subagent')) 'managed launch preserves an explicit caller subagent model'
+
+    $delimiterOutput = (& (Join-Path $root 'claudex.ps1') --terra -- --safe-mode --agents --permission-mode --model literal-prompt-token | Out-String)
+    Assert-True ($delimiterOutput.Contains('"Terra (high)"')) 'flag-like prompt text after the delimiter does not disable managed agents'
+    Assert-True ($delimiterOutput.Contains('--permission-mode auto')) 'flag-like prompt text after the delimiter does not disable managed permissions'
+    Assert-True ($delimiterOutput.Contains('--model gpt-5.6-terra')) 'flag-like model text after the delimiter does not replace the selected startup model'
+
+    $restrictedToolsOutput = (& (Join-Path $root 'claudex.ps1') --tools '' --print restricted-tools-test | Out-String)
+    Assert-True (-not $restrictedToolsOutput.Contains('Before every final answer, call TaskList')) 'restricted tool surfaces do not receive impossible task lifecycle requirements'
+    $disallowedLifecycleOutput = (& (Join-Path $root 'claudex.ps1') --disallowedTools 'TaskList Agent' restricted-tools-test | Out-String)
+    Assert-True (-not $disallowedLifecycleOutput.Contains('Before every final answer, call TaskList')) 'explicit TaskList and Agent denial suppresses lifecycle requirements'
+    $kebabAllowedOutput = (& (Join-Path $root 'claudex.ps1') --allowed-tools=TaskList kebab-tools-test | Out-String)
+    Assert-True ($kebabAllowedOutput.Contains('Before every final answer, call TaskList')) 'allowed-tools approval does not remove managed lifecycle tool availability'
+    $kebabDisallowedOutput = (& (Join-Path $root 'claudex.ps1') --disallowed-tools=Agent kebab-deny-test | Out-String)
+    Assert-True (-not $kebabDisallowedOutput.Contains('Before every final answer, call TaskList')) 'kebab-case disallowed-tools with inline value suppresses impossible lifecycle requirements'
+    $unrelatedDisallowedOutput = (& (Join-Path $root 'claudex.ps1') --disallowed-tools=Bash unrelated-deny-test | Out-String)
+    Assert-True ($unrelatedDisallowedOutput.Contains('Before every final answer, call TaskList')) 'unrelated Bash denial retains valid managed lifecycle requirements'
+    $explicitLifecycleToolsOutput = (& (Join-Path $root 'claudex.ps1') --tools=Agent,TaskList explicit-tools-test | Out-String)
+    Assert-True ($explicitLifecycleToolsOutput.Contains('Before every final answer, call TaskList')) 'explicit lifecycle tool availability retains managed lifecycle requirements'
+    $inlinePermissionOutput = (& (Join-Path $root 'claudex.ps1') --permission-mode=manual inline-permission-test | Out-String)
+    Assert-True ($inlinePermissionOutput.Contains('--permission-mode=manual') -and -not $inlinePermissionOutput.Contains('--permission-mode auto')) 'inline permission mode suppresses the managed permission override'
+    $inlineAgentsOutput = (& (Join-Path $root 'claudex.ps1') --agents='{}' inline-agents-test | Out-String)
+    Assert-True (-not $inlineAgentsOutput.Contains('"Terra (high)"')) 'inline agents definition suppresses managed agent definitions'
+    $inlineAgentOutput = (& (Join-Path $root 'claudex.ps1') --agent=reviewer inline-agent-test | Out-String)
+    Assert-True (-not $inlineAgentOutput.Contains('"Terra (high)"')) 'inline current-agent selection suppresses managed agent definitions'
+
+    $arityAgentsOutput = (& (Join-Path $root 'claudex.ps1') --plugin-dir --agents arity-agent-value-test | Out-String)
+    Assert-True ($arityAgentsOutput.Contains('"Terra (high)"')) 'an option value resembling --agents does not suppress managed agents'
+    $arityPermissionOutput = (& (Join-Path $root 'claudex.ps1') --plugin-dir --permission-mode arity-permission-value-test | Out-String)
+    Assert-True ($arityPermissionOutput.Contains('--permission-mode auto')) 'an option value resembling --permission-mode does not suppress managed permissions'
+    $arityModelOutput = (& (Join-Path $root 'claudex.ps1') --settings --model arity-model-value-test | Out-String)
+    Assert-True ($arityModelOutput.Contains('--model gpt-5.6-sol') -and $arityModelOutput.Contains('--settings --model')) 'an option value resembling --model does not replace the managed primary model'
+
+    $forwardedModelOutput = (& (Join-Path $root 'claudex.ps1') --model gpt-5.6-luna explicit-model-test | Out-String)
+    $forwardedModelArgs = @($forwardedModelOutput -split "`r?`n" | Where-Object { $_.StartsWith('ARGS=') })[-1]
+    Assert-True ($forwardedModelArgs.Contains('--model gpt-5.6-luna')) 'explicit native --model reaches Claude unchanged'
+    Assert-True (([regex]::Matches($forwardedModelArgs, '(?:^| )--model(?: |$)')).Count -eq 1) 'explicit native --model suppresses default model injection'
+    $env:FAKE_PROXY_MODELS_JSON = '{"data":[{"id":"gpt-5.6-terra"}]}'
+    try {
+        $fallbackModelOutput = (& (Join-Path $root 'claudex.ps1') --model gpt-5.6-sol --fallback-model=gpt-5.6-terra fallback-model-test | Out-String)
+    } finally { Remove-Item Env:FAKE_PROXY_MODELS_JSON -ErrorAction SilentlyContinue }
+    Assert-True ($fallbackModelOutput.Contains('--model gpt-5.6-sol') -and $fallbackModelOutput.Contains('--fallback-model=gpt-5.6-terra')) 'available fallback model allows launch when the primary route is unavailable'
     $warningBridge = Join-Path $temporary 'warning-skill-bridge.cjs'
     [IO.File]::WriteAllText($warningBridge, @'
 process.stdout.write(JSON.stringify({
   addDirs: [],
   pluginDirs: [],
-  warnings: ['Skill refresh failed; using the last known good snapshot.\nReview the rejected skill.'],
+  instructions: [],
+  warnings: ['Skill refresh failed; using the last known good snapshot.\nReview the rejected skill.\u001b]0;owned\u0007\u202ereversed'],
 }) + '\n');
 '@, $utf8)
     $env:CLAUDEX_SKILL_BRIDGE_HELPER = $warningBridge
+    $env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = 'inherited'
     $previousConsoleError = [Console]::Error
     $warningConsoleError = New-Object IO.StringWriter
     [Console]::SetError($warningConsoleError)
     try {
         $warningBridgeOutput = (& (Join-Path $root 'claudex.ps1') --terra warning-test | Out-String)
         $warningBridgeOutput += $warningConsoleError.ToString()
+        $warningConsoleError.GetStringBuilder().Clear() | Out-Null
+        $warningBridgeSecondOutput = (& (Join-Path $root 'claudex.ps1') --terra warning-test-two | Out-String)
+        $warningBridgeSecondOutput += $warningConsoleError.ToString()
     } finally {
         [Console]::SetError($previousConsoleError)
         $warningConsoleError.Dispose()
         Remove-Item Env:CLAUDEX_SKILL_BRIDGE_HELPER -ErrorAction SilentlyContinue
+        Remove-Item Env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD -ErrorAction SilentlyContinue
     }
-    Assert-True ($warningBridgeOutput.Contains('claudex: skill bridge: Skill refresh failed; using the last known good snapshot. Review the rejected skill.')) 'ordinary Windows launch surfaces skill bridge warnings on one line'
+    Assert-True ($warningBridgeOutput.Contains('claudex: skill bridge warning: Skill refresh failed; using the last known good snapshot. Review the rejected skill.')) 'ordinary Windows launch surfaces skill bridge warnings on one line'
+    Assert-True (-not $warningBridgeOutput.Contains([string][char]27) -and -not $warningBridgeOutput.Contains([string][char]7) -and -not $warningBridgeOutput.Contains([string][char]0x202e)) 'skill bridge warnings strip terminal and bidi controls'
+    Assert-True (-not $warningBridgeSecondOutput.Contains('claudex: skill bridge warning:')) 'identical skill bridge warnings are throttled'
     Assert-True ($warningBridgeOutput.Contains('AUTO=gpt-5.6-terra')) 'skill bridge warning does not prevent launch'
+    Assert-True ($warningBridgeOutput.Contains('ADDITIONAL_DIR_MD=inherited')) 'launches without bridged instructions preserve the caller additional-directory setting'
     $env:CLAUDEX_MODEL = 'gpt-5.6-luna'
     try {
         $configuredModel = (& (Join-Path $root 'claudex.ps1') test-prompt | Out-String)
@@ -443,12 +790,23 @@ process.stdout.write(JSON.stringify({
         $configuredModelOverride = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
         Assert-True ($configuredModelOverride.Contains('--model gpt-5.6-terra')) 'explicit model shortcut overrides configured default'
         $env:CLAUDE_CODE_DISABLE_1M_CONTEXT = 'inherited'
+        $env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = 'inherited'
+        $directChromeSettings = Join-Path $temporary 'direct-chrome-settings.json'
+        [IO.File]::WriteAllText($directChromeSettings, '{}', $utf8)
+        $env:CLAUDEX_SETTINGS_FILE = $directChromeSettings
         try {
             $configuredChrome = (& (Join-Path $root 'claudex.ps1') --claude-chrome --print chrome-test | Out-String)
             Assert-True ($env:CLAUDE_CODE_DISABLE_1M_CONTEXT -eq 'inherited') 'direct Chrome restores inherited 1M override'
+            Assert-True ($env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD -eq 'inherited') 'direct Chrome restores inherited additional-directory instruction setting'
         }
-        finally { Remove-Item Env:CLAUDE_CODE_DISABLE_1M_CONTEXT -ErrorAction SilentlyContinue }
+        finally {
+            Remove-Item Env:CLAUDE_CODE_DISABLE_1M_CONTEXT -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDEX_SETTINGS_FILE -ErrorAction SilentlyContinue
+        }
         Assert-True (-not $configuredChrome.Contains('--model gpt-5.6-luna')) 'direct Chrome ignores managed default model'
+        Assert-True (-not $configuredChrome.Contains('--settings') -and -not $configuredChrome.Contains($directChromeSettings)) 'direct Chrome ignores Claudex custom settings injection'
+        Assert-True ($configuredChrome.Contains('ADDITIONAL_DIR_MD=inherited')) 'direct Chrome preserves the caller additional-directory instruction setting'
         Assert-True ($configuredChrome.Contains('DISABLE_1M=') -and -not $configuredChrome.Contains('DISABLE_1M=inherited')) 'direct Chrome clears managed 1M override'
     } finally { Remove-Item Env:CLAUDEX_MODEL -ErrorAction SilentlyContinue }
     $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
@@ -603,12 +961,45 @@ process.stdout.write(JSON.stringify({
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $testConfig 'run\managed-proxy.json') -PathType Leaf)) 'never-ready proxy metadata is removed'
     }
 
-    $env:BUN_OPTIONS = ''
-    $directChrome = (& (Join-Path $root 'claudex.ps1') --claude-chrome test-prompt | Out-String)
+    $chromeBoundaryEnvironment = @{}
+    foreach ($chromeName in @(
+        'BUN_OPTIONS', 'CLAUDEX_PROXY_TOKEN', 'CLAUDEX_PROXY_URL', 'CLAUDEX_PROXY_CONFIG',
+        'CLAUDEX_CODEX_AUTH_DIR', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
+        'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_VERTEX_BASE_URL',
+        'ANTHROPIC_FOUNDRY_BASE_URL'
+    )) {
+        $chromeBoundaryEnvironment[$chromeName] = [Environment]::GetEnvironmentVariable($chromeName, 'Process')
+    }
+    try {
+        $env:BUN_OPTIONS = ''
+        $env:CLAUDEX_PROXY_TOKEN = 'chrome-proxy-secret'
+        $env:CLAUDEX_PROXY_URL = 'http://127.0.0.1:9999'
+        $env:CLAUDEX_PROXY_CONFIG = 'C:\managed\proxy.yaml'
+        $env:CLAUDEX_CODEX_AUTH_DIR = 'C:\managed\auth'
+        $env:CLAUDE_CODE_USE_BEDROCK = '1'
+        $env:CLAUDE_CODE_USE_VERTEX = '1'
+        $env:CLAUDE_CODE_USE_FOUNDRY = '1'
+        $env:ANTHROPIC_BEDROCK_BASE_URL = 'https://bedrock.invalid'
+        $env:ANTHROPIC_VERTEX_BASE_URL = 'https://vertex.invalid'
+        $env:ANTHROPIC_FOUNDRY_BASE_URL = 'https://foundry.invalid'
+        $directChrome = (& (Join-Path $root 'claudex.ps1') --claude-chrome test-prompt | Out-String)
+        Assert-True ($env:CLAUDEX_PROXY_TOKEN -eq 'chrome-proxy-secret' -and $env:CLAUDEX_PROXY_CONFIG -eq 'C:\managed\proxy.yaml') 'direct Chrome restores caller proxy state after child exit'
+        Assert-True ($env:CLAUDE_CODE_USE_BEDROCK -eq '1' -and $env:ANTHROPIC_FOUNDRY_BASE_URL -eq 'https://foundry.invalid') 'direct Chrome restores caller provider selectors after child exit'
+    } finally {
+        foreach ($chromeName in $chromeBoundaryEnvironment.Keys) {
+            $chromeValue = $chromeBoundaryEnvironment[$chromeName]
+            if ($null -eq $chromeValue) { Remove-Item -LiteralPath "Env:$chromeName" -ErrorAction SilentlyContinue }
+            else { [Environment]::SetEnvironmentVariable($chromeName, $chromeValue, 'Process') }
+        }
+    }
     Assert-True ($directChrome.Contains('ARGS=--chrome test-prompt')) 'direct Chrome arguments'
     Assert-True ($directChrome.Contains('BUN=')) 'direct Chrome BUN output'
     Assert-True (-not $directChrome.Contains('BUN=--preload')) 'direct Chrome preload isolation'
     Assert-True (-not $directChrome.Contains('BASE=http')) 'direct Chrome proxy isolation'
+    Assert-True ($directChrome.Contains('PROXY_TOKEN=') -and -not $directChrome.Contains('PROXY_TOKEN=chrome-proxy-secret')) 'direct Chrome never exposes the Claudex proxy token'
+    Assert-True ($directChrome.Contains('PROXY_URL=') -and -not $directChrome.Contains('PROXY_URL=http://127.0.0.1:9999')) 'direct Chrome clears the raw Claudex proxy URL'
+    Assert-True ($directChrome.Contains('PROXY_CONFIG=') -and -not $directChrome.Contains('C:\managed\proxy.yaml') -and $directChrome.Contains('CODEX_AUTH_DIR=') -and -not $directChrome.Contains('C:\managed\auth')) 'direct Chrome clears proxy config and Codex auth paths'
+    Assert-True ($directChrome.Contains('PROVIDERS=|||||')) 'direct Chrome clears alternate provider selectors and base URLs'
 
     $flagPrompt = (& (Join-Path $root 'claudex.ps1') --print --terra | Out-String)
     Assert-True ($flagPrompt.Contains('--print --terra')) 'flag-shaped prompt preserved'
@@ -629,7 +1020,7 @@ process.stdout.write(JSON.stringify({
     $solplan = (& (Join-Path $root 'claudex.ps1') --solplan test-prompt | Out-String)
     Assert-True ($solplan.Contains('--model opusplan')) 'Solplan built-in selector'
     Assert-True ($solplan.Contains('OPUS=gpt-5.6-sol')) 'Solplan planning model'
-    Assert-True ($solplan.Contains('SUBAGENT=gpt-5.6-terra')) 'Solplan implementation family'
+    Assert-True ($solplan.Contains('SUBAGENT=') -and -not $solplan.Contains('SUBAGENT=gpt-5.6-terra')) 'Solplan leaves native implementation-family routing available'
 
     $env:FAKE_CLAUDE_RESUME = '1'
     $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
@@ -645,23 +1036,58 @@ process.stdout.write(JSON.stringify({
     $windowsLauncher = [IO.File]::ReadAllText((Join-Path $root 'claudex.ps1'))
     Assert-True ($windowsLauncher.Contains('if ($rewriteResumeFooter) { Update-ResumeFooter $resumeMarker }')) 'resume footer is rewritten independently of exit status'
     Assert-True ($windowsLauncher.Contains("Join-Path `$configDir 'auto-mode-defaults.json'")) 'Windows uses the shared auto-mode defaults snapshot schema'
-    Assert-True ($windowsLauncher.Contains('try { Ensure-ProxyForLaunch $startModel }')) 'foreground startup owns interactive Codex login recovery'
+    Assert-True ($windowsLauncher.Contains('try { Ensure-ProxyForLaunch $requiredProxyModels }')) 'foreground startup owns interactive Codex login recovery for primary and fallback models'
     Assert-True ($windowsLauncher.Contains('if ($env:CI -and $env:CI -notin')) 'CI startup suppresses interactive Codex login'
     Assert-True ($windowsLauncher.Contains('Codex sign-in is required. Run `claudex --login` in an interactive terminal')) 'noninteractive startup gives prompt-free login guidance'
     $watchLoopStart = $windowsLauncher.IndexOf('function Invoke-ProxyWatchLoop')
     $watchLoopEnd = $windowsLauncher.IndexOf('function Start-ProxyWatcher', $watchLoopStart)
     $watchLoopSource = $windowsLauncher.Substring($watchLoopStart, $watchLoopEnd - $watchLoopStart)
     Assert-True ($watchLoopSource.Contains('Ensure-Proxy') -and -not $watchLoopSource.Contains('Ensure-ProxyForLaunch')) 'background proxy recovery remains prompt-free'
-    Assert-True ($windowsLauncher.Contains("if (`$RequiredModel -eq 'opusplan') { @('gpt-5.6-sol', 'gpt-5.6-terra') }")) 'Solplan health checks its two concrete backing models'
+    Assert-True ($windowsLauncher.Contains("if (`$routeCandidate -eq 'opusplan') { @('gpt-5.6-sol', 'gpt-5.6-terra') }")) 'Solplan health checks its two concrete backing models'
     Assert-True ($windowsLauncher.Contains('ConvertTo-WindowsCommandLineArgument')) 'Windows native argv serializer is installed'
+    Assert-True ($windowsLauncher.Contains('CopyToAsync([IO.Stream]::Null)')) 'Windows background watchers drain output without contaminating the Claude TUI'
     Assert-True ($windowsLauncher.Contains('if ($null -eq $Value -or $Value.Length -eq 0) { return ''""'' }')) 'Windows native argv serializer preserves empty arguments'
     Assert-True ($windowsLauncher.Contains('if ($character -eq ''"'')')) 'Windows native argv serializer escapes embedded quotes'
     Assert-True ($windowsLauncher.Contains("`$earlyRuntimeBypass = `$true")) 'maintenance and direct Chrome recovery bypass is installed'
+    $earlyMaintenanceSource = [regex]::Match($windowsLauncher, '(?m)^\$earlyMaintenanceCommands = .+$').Value
+    $maintenanceSource = [regex]::Match($windowsLauncher, '(?m)^\$maintenanceCommands = .+$').Value
+    foreach ($maintenanceCommand in @('doctor', 'attach', 'respawn', 'stop', 'kill', 'rm', 'logs')) {
+        Assert-True ($earlyMaintenanceSource.Contains("'$maintenanceCommand'")) "Windows $maintenanceCommand bypasses configuration validation"
+        Assert-True ($maintenanceSource.Contains("'$maintenanceCommand'")) "Windows $maintenanceCommand suppresses managed launch injection"
+    }
+    $nativeRouteStart = $windowsLauncher.IndexOf('$nativeHarness = ''''')
+    $configImportStart = $windowsLauncher.IndexOf('if (Test-Path -LiteralPath $configFile -PathType Leaf)')
+    Assert-True ($nativeRouteStart -ge 0 -and $nativeRouteStart -lt $configImportStart) 'native and hosted routes are selected before Claudex config import'
+    Assert-True ($windowsLauncher.Contains('Remove-Item Env:CLAUDEX_PROXY_TOKEN -ErrorAction SilentlyContinue')) 'native children always lose the Claudex proxy bearer'
+    Assert-True ($windowsLauncher.Contains('$forceFirstPartyClaude = $true')) 'hosted Claude features force a first-party provider boundary'
+    Assert-True ($windowsLauncher.Contains("`$nativeScanOption -in @('--remote-control', '--rc')")) 'Remote Control aliases use the native hosted route'
+    Assert-True ($windowsLauncher.Contains('Protect-PrivatePath $headerFile $false')) 'proxy bearer header receives a private Windows DACL'
+    Assert-True ($windowsLauncher.Contains("Env-OrDefault 'CLAUDEX_INSTRUCTION_BRIDGE' 'on'")) 'instruction bridge defaults to on'
+    Assert-True ($windowsLauncher.Contains("CLAUDEX_INSTRUCTION_BRIDGE must be on or off")) 'instruction bridge mode is validated'
+    Assert-True ($windowsLauncher.Contains('$env:CLAUDEX_INSTRUCTION_BRIDGE = $instructionBridgeMode')) 'validated instruction bridge mode is passed to the bridge child'
+    Assert-True ($windowsLauncher.Contains("'--allowedTools', '--allowed-tools'")) 'forwarded scanner supports camel and kebab allowed-tools forms'
+    Assert-True ($windowsLauncher.Contains("'--disallowedTools', '--disallowed-tools'")) 'forwarded scanner supports camel and kebab disallowed-tools forms'
+    Assert-True ($windowsLauncher.Contains("`$scanOption -eq '--tools'")) 'tools override is evaluated against lifecycle tool availability'
+    Assert-True ($windowsLauncher.Contains("`$scanOption -in @('--disallowedTools', '--disallowed-tools')")) 'disallowed-tools suppresses lifecycle guidance only through explicit denial parsing'
+    Assert-True ($windowsLauncher.Contains("'--add-dir', '--agent', '--agents'")) 'forwarded scanner tracks required-value option arity'
+    Assert-True (-not $windowsLauncher.Contains('Remove-Item Env:CLAUDE_CODE_SUBAGENT_MODEL -ErrorAction SilentlyContinue')) 'managed launch preserves an explicit subagent model'
+    Assert-True ($windowsLauncher.Contains("'--bg', '--background'")) 'background launches suppress synchronous resume footer attribution'
+    Assert-True ($windowsLauncher.Contains('Ensure-ProxyForLaunch $requiredProxyModels')) 'primary and fallback model routes share preflight'
+    Assert-True ($windowsLauncher.Contains('$earlyOption -in $claudeRequiredValueOptions')) 'early maintenance recognition uses the shared option arity table'
+    Assert-True ($windowsLauncher.Contains('$maintenanceCommandDetected = $true')) 'maintenance commands can follow documented global options'
+    Assert-True ($windowsLauncher.Contains("'CLAUDEX_PROXY_TOKEN', 'CLAUDEX_PROXY_URL', 'CLAUDEX_PROXY_CONFIG', 'CLAUDEX_PROXY_BIN'")) 'first-party Chrome route scrubs raw Claudex proxy state'
+    Assert-True ($windowsLauncher.Contains("'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'")) 'first-party routes scrub alternate provider selectors'
     Assert-True ($windowsLauncher.Contains("CLAUDEX_ALLOW_REMOTE_PROXY=1")) 'Windows launcher documents the explicit trusted HTTPS proxy opt-in'
     Assert-True ($windowsLauncher.Contains('Stop-RecordedManagedProxy')) 'Windows launcher limits authentication recovery to recorded managed proxies'
     Assert-True ($windowsLauncher.Contains('Stop-NewlySpawnedProxy')) 'Windows launcher cleans up a proxy that never becomes ready'
 
     Remove-Item -LiteralPath $resumeCapture -Force
+    $env:FAKE_CLAUDE_RESUME = '1'
+    $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
+    $env:CLAUDEX_TEST_RESUME_CAPTURE_FILE = $resumeCapture
+    & (Join-Path $root 'claudex.ps1') --bg background-resume-test | Out-Null
+    Assert-True (-not (Test-Path -LiteralPath $resumeCapture -PathType Leaf)) 'background launch does not claim a synchronous resume footer'
+
     $env:FAKE_CLAUDE_RESUME = '1'
     $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
     $env:CLAUDEX_TEST_RESUME_CAPTURE_FILE = $resumeCapture
@@ -718,12 +1144,12 @@ process.stdout.write(JSON.stringify({
     $doctor = (& (Join-Path $root 'claudex.ps1') --doctor | Out-String)
     Assert-True ($doctor.Contains('CLIProxyAPI: CLIProxyAPI test')) 'proxy version first line'
     Assert-True (-not $doctor.Contains('extra version detail')) 'proxy version extra lines hidden'
-    Assert-True ($doctor.Contains('Auto-compact window: 280000 tokens')) 'doctor compaction'
-    Assert-True ($doctor.Contains('Task lifecycle: Sol-owned with final-response reconciliation')) 'doctor task lifecycle'
+    Assert-True ($doctor.Contains('Automatic compaction window: 280000 tokens')) 'doctor compaction'
+    Assert-True ($doctor.Contains('Task lifecycle: owned by Sol with final response reconciliation')) 'doctor task lifecycle'
     Assert-True ($doctor.Contains('Managed agents: Terra (high), Luna (medium)')) 'doctor managed agent efforts'
-    Assert-True ($doctor.Contains('Context status: session-stabilized')) 'doctor context stabilization'
-    Assert-True ($doctor.Contains('Codex usage: status-line refresh every 300s')) 'doctor usage refresh'
-    Assert-True ($doctor.Contains('Rendering: no-flicker mode with native terminal cursor')) 'doctor rendering hardening'
+    Assert-True ($doctor.Contains('Context status: stable session')) 'doctor context stabilization'
+    Assert-True ($doctor.Contains('Codex usage: status line refresh every 300s')) 'doctor usage refresh'
+    Assert-True ($doctor.Contains('Rendering: stable mode with native terminal cursor')) 'doctor rendering hardening'
     Assert-True ($doctor.Contains('Codex authentication: ready (shared ChatGPT session)')) 'doctor shared Codex auth'
     Assert-True ($doctor.Contains('Claude Code updates: on')) 'doctor auto updates'
     Assert-True ($doctor.Contains('Claudex updates: on')) 'doctor Claudex self-updates'
@@ -770,6 +1196,14 @@ process.stdout.write(JSON.stringify({
     [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T03:00:00Z","tokens":{"access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"codex-source-id","account_id":"account-test"}}', $utf8)
     & (Join-Path $root 'codex-session.ps1') sync
 
+    [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","tokens":{"access_token":123,"refresh_token":"codex-source-refresh","account_id":"account-test"}}', $utf8)
+    $strictAuthError = Join-Path $temporary 'strict-auth-error.log'
+    $strictAuthProcess = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedSessionHelper, 'sync') -RedirectStandardError $strictAuthError -Wait -PassThru
+    Assert-True ($strictAuthProcess.ExitCode -eq 14) 'non-string Codex credential JSON is rejected'
+    Assert-True (-not (Test-Path -LiteralPath $bridgeAuthFile -PathType Leaf)) 'invalid typed Codex credentials clear the managed bridge session'
+    [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T03:00:00Z","tokens":{"access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"codex-source-id","account_id":"account-test"}}', $utf8)
+    & (Join-Path $root 'codex-session.ps1') sync
+
     [IO.File]::WriteAllText($bridgeAuthFile, '{"type":"codex","access_token":"disabled-access","refresh_token":"disabled-refresh","account_id":"account-test","last_refresh":"2099-01-01T00:00:00Z","disabled":true,"expired":true}', $utf8)
     & (Join-Path $root 'codex-session.ps1') status | Out-Null
     $repairedBridge = Get-Content -LiteralPath $bridgeAuthFile -Raw | ConvertFrom-Json
@@ -790,6 +1224,51 @@ process.stdout.write(JSON.stringify({
     Assert-True ($logoutExit -eq 9) 'failed Codex logout exit propagated'
     Assert-True (-not (Test-Path -LiteralPath $bridgeAuthFile)) 'failed Codex logout clears bridge credential'
     Assert-True (($logoutOutput | Out-String).Contains('Codex logout failed, but the local Claudex bridge session was cleared.')) 'failed logout diagnostic'
+
+    if ($isWindowsPlatform) {
+        $usageHelper = Join-Path $testConfig 'usage-limit.ps1'
+        $blockedCurlLog = Join-Path $temporary 'blocked-usage-url-curl.log'
+        $usageUrlRejected = $false
+        $env:CLAUDEX_USAGE_SOURCE = 'auto'
+        $env:CLAUDEX_USAGE_URL = 'http://127.0.0.1:8123/backend-api/wham/usage'
+        $env:FAKE_CURL_CALL_LOG = $blockedCurlLog
+        try {
+            & $usageHelper -RefreshCache | Out-Null
+        } catch {
+            $usageUrlRejected = $_.Exception.Message.Contains('CLAUDEX_USAGE_URL must remain https://chatgpt.com/backend-api/wham/usage')
+        } finally {
+            Remove-Item Env:CLAUDEX_USAGE_URL -ErrorAction SilentlyContinue
+            Remove-Item Env:FAKE_CURL_CALL_LOG -ErrorAction SilentlyContinue
+        }
+        Assert-True $usageUrlRejected 'non-official production usage URL rejected'
+        Assert-True (-not (Test-Path -LiteralPath $blockedCurlLog)) 'rejected usage URL never invokes curl'
+
+        $env:CLAUDEX_USAGE_SOURCE = 'web'
+        $env:CLAUDEX_INSECURE_TEST_ALLOW_USAGE_URL = '1'
+        $env:CLAUDEX_USAGE_URL = 'https://example.com/backend-api/wham/usage'
+        $nonLoopbackRejected = $false
+        try {
+            & $usageHelper -RefreshCache | Out-Null
+        } catch {
+            $nonLoopbackRejected = $_.Exception.Message.Contains('permits only loopback HTTP(S) usage endpoints')
+        }
+        Assert-True $nonLoopbackRejected 'test usage URL remains loopback-only'
+
+        $loopbackUsageUrl = 'http://127.0.0.1:8123/backend-api/wham/usage'
+        $loopbackCurlLog = Join-Path $temporary 'loopback-usage-url-curl.log'
+        $env:CLAUDEX_USAGE_URL = $loopbackUsageUrl
+        $env:FAKE_CURL_CALL_LOG = $loopbackCurlLog
+        try {
+            & $usageHelper -RefreshCache | Out-Null
+        } finally {
+            Remove-Item Env:CLAUDEX_USAGE_SOURCE -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDEX_USAGE_URL -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDEX_INSECURE_TEST_ALLOW_USAGE_URL -ErrorAction SilentlyContinue
+            Remove-Item Env:FAKE_CURL_CALL_LOG -ErrorAction SilentlyContinue
+        }
+        $loopbackCurlArguments = Get-Content -LiteralPath $loopbackCurlLog -Raw
+        Assert-True ($loopbackCurlArguments.Contains("-- $loopbackUsageUrl")) 'loopback test usage URL follows curl argument terminator'
+    }
 
     $usage = (& (Join-Path $root 'claudex.ps1') --usage-limit | Out-String)
     Assert-True ($usage.Contains('Codex usage limits (Pro plan)')) 'usage plan'

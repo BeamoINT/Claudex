@@ -22,6 +22,48 @@ cmp "$temporary/first.tar.gz" "$root/dist/claudex-$version.tar.gz"
 cmp "$temporary/first-windows.zip" "$root/dist/claudex-$version-windows.zip"
 cmp "$temporary/first-SHA256SUMS" "$root/dist/SHA256SUMS"
 
+# Exercise the bytes users actually download. This installation is isolated,
+# account-free, and network-free: dependencies and service startup are skipped,
+# while fake upstream CLIs prove that both native harness routes survive archive
+# construction and installation.
+archive_smoke="$temporary/archive-smoke"
+archive_home="$temporary/archive-home"
+archive_bin="$temporary/archive-bin"
+archive_install_bin="$temporary/archive-install-bin"
+archive_config="$temporary/archive-config"
+mkdir -p "$archive_smoke" "$archive_home" "$archive_bin"
+tar -xzf "$root/dist/claudex-$version.tar.gz" -C "$archive_smoke"
+cat > "$archive_bin/codex" <<'EOF'
+#!/usr/bin/env bash
+printf 'artifact-codex'
+for argument in "$@"; do printf '|%s' "$argument"; done
+printf '\n'
+EOF
+cat > "$archive_bin/claude" <<'EOF'
+#!/usr/bin/env bash
+printf 'artifact-claude'
+for argument in "$@"; do printf '|%s' "$argument"; done
+printf '\n'
+EOF
+chmod +x "$archive_bin/codex" "$archive_bin/claude"
+
+extracted="$archive_smoke/claudex-$version"
+HOME="$archive_home" PATH="$archive_bin:$PATH" \
+  CLAUDEX_BIN_DIR="$archive_install_bin" CLAUDEX_CONFIG_DIR="$archive_config" \
+  CLAUDEX_PROXY_TOKEN=artifact-test-token CLAUDEX_INSTALL_METHOD=archive \
+  CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 CLAUDEX_SKIP_SERVICE_START=1 \
+  "$extracted/install.sh" >"$temporary/archive-install.stdout" 2>"$temporary/archive-install.stderr"
+test "$(jq -r '.version // empty' "$archive_config/install.json")" = "$version"
+test "$(jq -r '.method // empty' "$archive_config/install.json")" = archive
+test -f "$archive_config/skill-bridge.cjs"
+node --check "$archive_config/skill-bridge.cjs"
+test "$(HOME="$archive_home" PATH="$archive_bin:$PATH" CLAUDEX_CONFIG_DIR="$archive_config" \
+  "$archive_install_bin/claudex" codex --version 'argument with spaces')" = \
+  'artifact-codex|--version|argument with spaces'
+test "$(HOME="$archive_home" PATH="$archive_bin:$PATH" CLAUDEX_CONFIG_DIR="$archive_config" \
+  "$archive_install_bin/claudex" claude --version 'argument with spaces')" = \
+  'artifact-claude|--version|argument with spaces'
+
 make_fixture() {
   fixture_root=$1
   mkdir -p "$fixture_root"
@@ -87,4 +129,4 @@ for untracked in "${untracked_files[@]}"; do
   ! grep -F "/$untracked" <<<"$zip_listing" >/dev/null
 done
 
-printf '%s\n' 'release reproducibility and file-type checks passed'
+printf '%s\n' 'release reproducibility, file-type, and extracted-install checks passed'

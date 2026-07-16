@@ -28,6 +28,9 @@ const requiredFiles = [
   '.github/workflows/codeql.yml',
   '.github/workflows/dependency-review.yml',
   '.github/workflows/labeler.yml',
+  '.github/workflows/release-assets.yml',
+  '.github/workflows/test.yml',
+  '.github/workflows/verify-installers.yml',
 ];
 
 const failures = [];
@@ -77,6 +80,64 @@ if (!changelog.includes(`## [${manifest.version}] - `)) {
   failures.push(`CHANGELOG is missing package version ${manifest.version}`);
 }
 
+const releaseHeadings = [...changelog.matchAll(/^## \[((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\] - \d{4}-\d{2}-\d{2}\s*$/gm)]
+  .map((match) => match[1]);
+const releaseLinks = new Map();
+for (const match of changelog.matchAll(/^\[([^\]]+)\]:\s+(\S+)\s*$/gm)) {
+  if (releaseLinks.has(match[1])) failures.push(`CHANGELOG has duplicate link definition: ${match[1]}`);
+  releaseLinks.set(match[1], match[2]);
+}
+
+const uniqueReleaseHeadings = new Set(releaseHeadings);
+if (uniqueReleaseHeadings.size !== releaseHeadings.length) {
+  failures.push('CHANGELOG has duplicate released version headings');
+}
+if (releaseHeadings.length === 0) {
+  failures.push('CHANGELOG has no released version headings');
+} else {
+  const compareVersions = (left, right) => {
+    const leftParts = left.split('.').map(Number);
+    const rightParts = right.split('.').map(Number);
+    for (let index = 0; index < 3; index += 1) {
+      if (leftParts[index] !== rightParts[index]) return leftParts[index] - rightParts[index];
+    }
+    return 0;
+  };
+
+  for (let index = 1; index < releaseHeadings.length; index += 1) {
+    if (compareVersions(releaseHeadings[index - 1], releaseHeadings[index]) <= 0) {
+      failures.push('CHANGELOG released version headings are not in descending SemVer order');
+      break;
+    }
+  }
+
+  const latestVersion = releaseHeadings[0];
+  if (latestVersion !== manifest.version) {
+    failures.push(`CHANGELOG latest released version ${latestVersion} does not match package version ${manifest.version}`);
+  }
+  const expectedUnreleased = `https://github.com/BeamoINT/Claudex/compare/v${latestVersion}...HEAD`;
+  if (releaseLinks.get('Unreleased') !== expectedUnreleased) {
+    failures.push(`CHANGELOG Unreleased link must compare v${latestVersion} to HEAD`);
+  }
+
+  for (let index = 0; index < releaseHeadings.length; index += 1) {
+    const version = releaseHeadings[index];
+    const previousVersion = releaseHeadings[index + 1];
+    const expected = previousVersion
+      ? `https://github.com/BeamoINT/Claudex/compare/v${previousVersion}...v${version}`
+      : `https://github.com/BeamoINT/Claudex/releases/tag/v${version}`;
+    if (releaseLinks.get(version) !== expected) {
+      failures.push(`CHANGELOG link for ${version} must be ${expected}`);
+    }
+  }
+
+  for (const label of releaseLinks.keys()) {
+    if (/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(label) && !uniqueReleaseHeadings.has(label)) {
+      failures.push(`CHANGELOG has a released version link without a heading: ${label}`);
+    }
+  }
+}
+
 function collectMarkdown(directory) {
   const files = [];
   for (const entry of readdirSync(directory)) {
@@ -99,9 +160,40 @@ function cleanTarget(rawTarget) {
   return target.split('#', 1)[0].split('?', 1)[0];
 }
 
+function proseSegments(source, relativePath) {
+  const segments = [];
+  let fenced = false;
+  let frontmatter = /(?:^|\/)SKILL(?:\.windows)?\.md$/.test(relativePath);
+  for (const [index, line] of source.split('\n').entries()) {
+    if (frontmatter) {
+      if (index > 0 && /^---\s*$/.test(line)) frontmatter = false;
+      continue;
+    }
+    if (/^\s*```/.test(line)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const parts = line.split(/(`[^`\n]*`|\]\([^\n)]*\)|https?:\/\/[^\s)>]+)/g);
+    for (let partIndex = 0; partIndex < parts.length; partIndex += 2) {
+      segments.push({ line: index + 1, text: parts[partIndex] });
+    }
+  }
+  return segments;
+}
+
 for (const path of collectMarkdown(root)) {
   const source = readFileSync(path, 'utf8');
   const relativePath = relative(root, path);
+  for (const segment of proseSegments(source, relativePath)) {
+    if (/[—–‑‒―]/.test(segment.text)) {
+      failures.push(`${relativePath}:${segment.line} contains a long dash in prose`);
+    }
+    const compound = segment.text.match(/\b[A-Za-z][A-Za-z']*-[A-Za-z][A-Za-z']*\b/);
+    if (compound) {
+      failures.push(`${relativePath}:${segment.line} contains a hyphenated prose word: ${compound[0]}`);
+    }
+  }
   const linkPattern = /!?\[[^\]]*\]\(([^)]+)\)/g;
   for (const match of source.matchAll(linkPattern)) {
     const rawTarget = match[1];

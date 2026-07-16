@@ -3,9 +3,9 @@
 ## Our pledge
 
 We as members, contributors, and leaders pledge to make participation in our
-community a harassment-free experience for everyone, regardless of age, body
+community a harassment free experience for everyone, regardless of age, body
 size, visible or invisible disability, ethnicity, sex characteristics, gender
-identity and expression, level of experience, education, socio-economic
+identity and expression, level of experience, education, socio economic
 status, nationality, personal appearance, race, caste, color, religion, or
 sexual identity and orientation.
 
@@ -53,7 +53,7 @@ officially representing the project in public spaces.
 Report abusive, harassing, or otherwise unacceptable behavior privately to a
 repository maintainer using the contact method on the maintainer's GitHub
 profile. If the behavior occurs on GitHub and no private maintainer contact is
-available, use [GitHub's private abuse-reporting process](https://support.github.com/contact/report-abuse).
+available, use [GitHub's private abuse reporting process](https://support.github.com/contact/report-abuse).
 Do not open a public issue containing sensitive conduct details.
 
 All reports will be reviewed promptly and fairly. Community leaders will
@@ -64,14 +64,14 @@ respect the privacy and security of reporters.
 Community leaders will use these Community Impact Guidelines when determining
 consequences:
 
-1. **Correction** — A private written warning for inappropriate language or
+1. **Correction**: A private written warning for inappropriate language or
    other unprofessional behavior, with an explanation of why it was
    inappropriate. A public apology may be requested.
-2. **Warning** — A warning with consequences for continued behavior and a
+2. **Warning**: A warning with consequences for continued behavior and a
    defined period with no interaction with the people involved.
-3. **Temporary ban** — A temporary ban from project interaction for a serious
+3. **Temporary ban**: A temporary ban from project interaction for a serious
    violation or sustained inappropriate behavior.
-4. **Permanent ban** — A permanent ban for a pattern of violations,
+4. **Permanent ban**: A permanent ban for a pattern of violations,
    harassment, aggression, or disparagement of classes of people.
 
 ## Attribution

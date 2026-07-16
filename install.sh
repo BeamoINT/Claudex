@@ -42,6 +42,7 @@ install_lock_nonce=""
 claude_installer=""
 settings_tmp=""
 proxy_config_tmp=""
+env_tmp=""
 proxy_temp_dir=""
 transaction_dir=""
 transaction_active=0
@@ -331,6 +332,7 @@ cleanup() {
   [[ -z "$claude_installer" ]] || rm -f "$claude_installer"
   [[ -z "$settings_tmp" ]] || rm -f "$settings_tmp"
   [[ -z "$proxy_config_tmp" ]] || rm -f "$proxy_config_tmp"
+  [[ -z "$env_tmp" ]] || rm -f "$env_tmp"
   [[ -z "$proxy_temp_dir" ]] || rm -rf "$proxy_temp_dir"
   [[ -z "$transaction_dir" ]] || rm -rf "$transaction_dir" 2>/dev/null || true
   release_install_lock
@@ -509,10 +511,14 @@ env_tmp=$(mktemp "$config_dir/.env.tmp.XXXXXX")
   printf 'CLAUDEX_CODEX_AUTH_DIR=%q\n' "$runtime_auth_dir"
   [[ ! -x "$managed_node_dir/bin/node" ]] || printf 'CLAUDEX_NODE_BIN=%q\n' "$managed_node_dir/bin"
   if [[ -r "$env_file" ]]; then
-    awk '!/^(CLAUDEX_PROXY_TOKEN|CLAUDEX_PROXY_URL|CLAUDEX_PROXY_CONFIG|CLAUDEX_PROXY_BIN|CLAUDEX_CODEX_AUTH_DIR|CLAUDEX_NODE_BIN)=/' "$env_file"
+    awk '
+      /^[[:space:]]*(export[[:space:]]+)?(CLAUDEX_PROXY_TOKEN|CLAUDEX_PROXY_URL|CLAUDEX_PROXY_CONFIG|CLAUDEX_PROXY_BIN|CLAUDEX_CODEX_AUTH_DIR|CLAUDEX_NODE_BIN)[[:space:]]*=/ { next }
+      { print }
+    ' "$env_file"
   fi
 } > "$env_tmp"
 mv -f "$env_tmp" "$env_file"
+env_tmp=""
 chmod 600 "$env_file"
 
 install -m 755 "$root/claudex" "$launcher_target"

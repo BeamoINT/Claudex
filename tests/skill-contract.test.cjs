@@ -106,6 +106,8 @@ try {
   // Codex identity comes from required frontmatter, not necessarily the folder.
   writeSkill(path.join(home, '.agents', 'skills', 'folder-identity'), 'frontmatter-identity');
   writeSkill(path.join(home, '.agents', 'skills', 'reserved-folder'), 'con');
+  writeSkill(path.join(codexHome, 'skills', '.system', 'bundled-tool'), 'bundled-tool',
+    'Run the bundled Codex workflow.');
   writeSkill(path.join(claudeHome, 'skills', 'override-disabled'), 'override-disabled');
   write(path.join(claudeHome, 'skills', 'override-name-only', 'SKILL.md'), [
     '---',
@@ -120,16 +122,21 @@ try {
     '',
   ].join('\n'));
   writeSkill(path.join(claudeHome, 'skills', 'override-user-only'), 'override-user-only', 'USER_ONLY_BODY');
+  writeSkill(path.join(claudeHome, 'skills', 'local-precedence'), 'local-precedence', 'LOCAL_PRECEDENCE_BODY');
 
   const skillsDirectoryPlugin = path.join(claudeHome, 'skills', 'skills-directory-plugin');
   write(path.join(skillsDirectoryPlugin, '.claude-plugin', 'plugin.json'), JSON.stringify({
     name: 'skills-directory', defaultEnabled: true,
-    commands: ['./custom/deploy.md'],
+    commands: ['./custom/deploy.md', './custom/release'],
   }));
   writeSkill(skillsDirectoryPlugin, 'root-tool', 'ROOT_PLUGIN_BODY');
   writeSkill(path.join(skillsDirectoryPlugin, 'skills', 'nested'), 'nested', 'NESTED_PLUGIN_BODY');
   write(path.join(skillsDirectoryPlugin, 'custom', 'deploy.md'), '---\ndescription: Deploy directly\n---\n\nDIRECT_COMMAND_BODY\n');
+  writeSkill(path.join(skillsDirectoryPlugin, 'custom', 'release'), 'release-command', 'NESTED_COMMAND_BODY');
   write(path.join(skillsDirectoryPlugin, 'Hooks', 'dangerous.js'), 'throw new Error("must not activate");\n');
+  const rootFallbackPlugin = path.join(claudeHome, 'skills', 'root-fallback-plugin');
+  write(path.join(rootFallbackPlugin, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'root-fallback' }));
+  writeSkill(rootFallbackPlugin, 'root-fallback-tool', 'ROOT_FALLBACK_BODY');
 
   // CRLF is common in Windows-authored skills and must remain valid when adapted.
   const crlfRoot = path.join(home, '.agents', 'skills', 'crlf-manual');
@@ -139,7 +146,7 @@ try {
   // Valid compact YAML must carry the same manual-only policy.
   const inlinePolicyRoot = path.join(home, '.agents', 'skills', 'inline-policy');
   writeSkill(inlinePolicyRoot, 'inline-policy');
-  write(path.join(inlinePolicyRoot, 'agents', 'openai.yaml'), 'policy: { allow_implicit_invocation: false }\n');
+  write(path.join(inlinePolicyRoot, 'agents', 'openai.yaml'), '"policy": { "allow_implicit_invocation": false }\n');
 
   // Adapted support files participate in generation freshness when links are unavailable.
   const supportRoot = path.join(home, '.agents', 'skills', 'support-refresh');
@@ -212,13 +219,19 @@ try {
       'override-user-only': 'user-invocable-only',
     },
   }));
+  write(path.join(project, '.claude', 'settings.local.json'), JSON.stringify({
+    skillOverrides: { 'local-precedence': 'off' },
+  }));
+  write(path.join(repo, '.claude', 'settings.local.json'), JSON.stringify({
+    skillOverrides: { 'local-precedence': 'on' },
+  }));
 
   const projectDisabled = path.join(repo, '.agents', 'skills', 'project-disabled');
   writeSkill(projectDisabled, 'project-disabled');
   write(path.join(repo, '.codex', 'config.toml'), [
-    '[[skills.config]]',
-    'path = "../.agents/skills/project-disabled"',
-    'enabled = false',
+    '[["skills"."config"]]',
+    '"path" = "../.agents/skills/project-disabled"',
+    '"enabled" = false',
     '',
   ].join('\n'));
 
@@ -260,8 +273,16 @@ try {
     expect(aliases(first).has('skill-con'), 'reserved identity con was not mapped to skill-con');
   });
 
+  check('Codex bundled system skills are available in Claudex', () => {
+    const system = first.skills.find((entry) => entry.alias === 'bundled-tool');
+    expect(system && system.kind === 'codex-system', 'CODEX_HOME/skills/.system was not discovered');
+    expect(fs.readFileSync(overlaySkillFile(first, 'bundled-tool'), 'utf8').includes('bundled Codex workflow'),
+      'bundled Codex skill instructions were not snapshotted');
+  });
+
   check('Claude personal skillOverrides stay disabled in Claudex', () => {
     expect(!aliases(first).has('override-disabled'), 'disabled Claude personal skill was imported');
+    expect(aliases(first).has('local-precedence'), 'repository-root settings.local.json must override a legacy nested local file');
   });
 
   check('Claude visibility overrides preserve name-only and user-only states', () => {
@@ -276,15 +297,17 @@ try {
   });
 
   check('skills-directory plugins and direct command files are namespaced', () => {
-    expect(pluginSkillExists(first, 'skills-directory', 'root-tool'), 'plugin-root SKILL.md was omitted');
+    expect(!pluginSkillExists(first, 'skills-directory', 'root-tool'),
+      'plugin-root SKILL.md must be ignored when the default skills directory exists');
     expect(pluginSkillExists(first, 'skills-directory', 'nested'), 'nested plugin skill was omitted');
     expect(pluginSkillExists(first, 'skills-directory', 'deploy'), 'direct-file plugin command was omitted');
+    expect(pluginSkillExists(first, 'skills-directory', 'release-command'), 'nested command SKILL.md was omitted');
+    expect(pluginSkillExists(first, 'root-fallback', 'root-fallback-tool'),
+      'plugin-root SKILL.md fallback was omitted when no skills directory exists');
     const pluginDirectory = first.pluginDirs.find((directory) => pluginName(directory) === 'skills-directory');
     expect(pluginDirectory, 'skills-directory compatibility plugin was not generated');
-    expect(!fs.existsSync(path.join(pluginDirectory, 'skills', 'root-tool', '.claude-plugin')),
-      'source plugin manifest was copied into the generated skill');
-    expect(!fs.existsSync(path.join(pluginDirectory, 'skills', 'root-tool', 'Hooks')),
-      'source plugin hooks were copied into the generated skill');
+    expect(!fs.existsSync(path.join(pluginDirectory, 'skills', 'nested', '.claude-plugin')),
+      'source plugin manifest was copied into a generated skill');
   });
 
   check('default-disabled Claude plugins remain unavailable', () => {

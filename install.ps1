@@ -22,6 +22,8 @@ $skillBridgeTarget = Join-Path $configDir 'skill-bridge.cjs'
 $selfUpdateTarget = Join-Path $configDir 'self-update.ps1'
 $installReceiptTarget = Join-Path $configDir 'install.json'
 $proxyConfigTarget = Join-Path $configDir 'cliproxyapi.yaml'
+$runDir = Join-Path $configDir 'run'
+$usageCacheDir = Join-Path $configDir 'usage-cache'
 $launcherTarget = Join-Path $binDir 'claudex.ps1'
 $cmdTarget = Join-Path $binDir 'claudex.cmd'
 $proxyPortText = if ($env:CLAUDEX_PROXY_PORT) { $env:CLAUDEX_PROXY_PORT } else { '8318' }
@@ -39,14 +41,42 @@ $claudeInstalledBinDir = ''
 $packageManagedInstall = $env:CLAUDEX_PACKAGE_ROOT -or $env:CLAUDEX_INSTALL_METHOD -in @('homebrew', 'scoop', 'winget')
 $installTransaction = $null
 $userPathBeforeInstall = [Environment]::GetEnvironmentVariable('Path', 'User')
-
-if (Test-Path -LiteralPath (Join-Path $managedNodeDir 'node.exe') -PathType Leaf) {
-    $env:PATH = "$managedNodeDir$([IO.Path]::PathSeparator)$env:PATH"
-}
+$isWindowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 
 function Fail([string] $Message) {
     [Console]::Error.WriteLine("install.ps1: $Message")
     exit 1
+}
+
+function Protect-PrivatePath([string] $Path, [bool] $Directory) {
+    if (-not $isWindowsPlatform) { return }
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $security = if ($Directory) { New-Object Security.AccessControl.DirectorySecurity } else { New-Object Security.AccessControl.FileSecurity }
+    $security.SetOwner($currentSid)
+    # A caller may deliberately place CLAUDEX_CONFIG_DIR below a directory with
+    # broad inherited access. Do not carry any of those inherited entries into
+    # secret state or executable/interpreted files managed by Claudex.
+    $security.SetAccessRuleProtection($true, $false)
+    $inheritance = if ($Directory) {
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else { [Security.AccessControl.InheritanceFlags]::None }
+    foreach ($sidValue in @($currentSid.Value, 'S-1-5-18', 'S-1-5-32-544')) {
+        $sid = New-Object Security.Principal.SecurityIdentifier($sidValue)
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void] $security.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $security
+}
+
+function Ensure-PrivateDirectory([string] $Path) {
+    [IO.Directory]::CreateDirectory($Path) | Out-Null
+    Protect-PrivatePath $Path $true
 }
 
 function Test-TransientDownloadFailure($ErrorRecord) {
@@ -79,6 +109,7 @@ function Receive-FileWithRetry([string] $Uri, [string] $Destination, [int] $Time
         Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
         try {
             Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination -TimeoutSec $TimeoutSeconds
+            Protect-PrivatePath $Destination $false
             return
         } catch {
             $lastError = $_
@@ -91,16 +122,18 @@ function Receive-FileWithRetry([string] $Uri, [string] $Destination, [int] $Time
 
 function Write-TextAtomic([string] $Path, [string] $Value) {
     $parent = Split-Path $Path -Parent
-    [IO.Directory]::CreateDirectory($parent) | Out-Null
+    Ensure-PrivateDirectory $parent
     $temporary = Join-Path $parent ('.' + (Split-Path $Path -Leaf) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
     $replacementBackup = Join-Path $parent ('.' + (Split-Path $Path -Leaf) + '.' + [guid]::NewGuid().ToString('N') + '.bak')
     try {
         [IO.File]::WriteAllText($temporary, $Value, $utf8)
+        Protect-PrivatePath $temporary $false
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
             [IO.File]::Replace($temporary, $Path, $replacementBackup)
         } else {
             [IO.File]::Move($temporary, $Path)
         }
+        Protect-PrivatePath $Path $false
     } finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $replacementBackup -Force -ErrorAction SilentlyContinue
@@ -148,7 +181,7 @@ function Install-ManagedNode {
         default { Fail "Node.js 18 or newer is unavailable for Windows/$architecture" }
     }
     $temporary = Join-Path $configDir ('.node-install-' + [guid]::NewGuid().ToString('N'))
-    [IO.Directory]::CreateDirectory($temporary) | Out-Null
+    Ensure-PrivateDirectory $temporary
     try {
         if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_MANAGED_NODE_DIR) {
             $source = $env:CLAUDEX_TEST_MANAGED_NODE_DIR
@@ -186,6 +219,7 @@ function Install-ManagedNode {
         if ($hadExisting) { Move-Item -LiteralPath $managedNodeDir -Destination $backup }
         try {
             Move-Item -LiteralPath $extracted -Destination $managedNodeDir
+            Protect-PrivatePath $managedNodeDir $true
         } catch {
             if ($hadExisting -and -not (Test-Path -LiteralPath $managedNodeDir)) { Move-Item -LiteralPath $backup -Destination $managedNodeDir }
             throw
@@ -274,11 +308,12 @@ function Read-InstallLockOwner([string] $LockPath) {
 
 function Acquire-InstallLock {
     $lockPath = Join-Path $configDir 'run\install.lock'
-    [IO.Directory]::CreateDirectory((Split-Path $lockPath -Parent)) | Out-Null
+    Ensure-PrivateDirectory (Split-Path $lockPath -Parent)
     $deadline = [DateTime]::UtcNow.AddMinutes(5)
     while ([DateTime]::UtcNow -lt $deadline) {
         try {
             [IO.Directory]::CreateDirectory($lockPath) | Out-Null
+            Protect-PrivatePath $lockPath $true
             # CreateDirectory succeeds for an existing directory, so ownership is
             # acquired only when owner.json can be created atomically.
             $ownerPath = Join-Path $lockPath 'owner.json'
@@ -288,6 +323,7 @@ function Acquire-InstallLock {
                 $bytes = $utf8.GetBytes((@{ pid = $PID; nonce = $script:installLockNonce; startedAt = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress) + "`n")
                 $stream.Write($bytes, 0, $bytes.Length)
             } finally { $stream.Dispose() }
+            Protect-PrivatePath $ownerPath $false
             $script:installLockOwned = $true
             return
         } catch [IO.IOException] { }
@@ -323,7 +359,8 @@ function Start-InstallTransaction([string[]] $ManagedPaths) {
     }
     $rootPath = Join-Path $configDir ('.install-transaction-' + [guid]::NewGuid().ToString('N'))
     $backupPath = Join-Path $rootPath 'backup'
-    [IO.Directory]::CreateDirectory($backupPath) | Out-Null
+    Ensure-PrivateDirectory $rootPath
+    Ensure-PrivateDirectory $backupPath
     $entries = @()
     $index = 0
     $hasFiles = $false
@@ -333,6 +370,7 @@ function Start-InstallTransaction([string[]] $ManagedPaths) {
             $backup = Join-Path $backupPath ([string] $index)
             if ($existed) {
                 Copy-Item -LiteralPath $managedPath -Destination $backup -Force
+                Protect-PrivatePath $backup $false
                 $hasFiles = $true
             }
             $entries += [pscustomobject]@{ Path = $managedPath; Backup = $backup; Existed = $existed }
@@ -366,6 +404,7 @@ function Restore-InstallTransactionEntries([string] $RootPath, $Entries, [string
                 $temporary = Join-Path $parent ('.rollback-' + [guid]::NewGuid().ToString('N') + '.tmp')
                 try {
                     [IO.File]::WriteAllBytes($temporary, $bytes)
+                    Protect-PrivatePath $temporary $false
                     if (Test-Path -LiteralPath $entry.Path -PathType Leaf) {
                         $replacementBackup = Join-Path $parent ('.rollback-' + [guid]::NewGuid().ToString('N') + '.bak')
                         try { [IO.File]::Replace($temporary, $entry.Path, $replacementBackup) }
@@ -373,6 +412,7 @@ function Restore-InstallTransactionEntries([string] $RootPath, $Entries, [string
                     } else {
                         [IO.File]::Move($temporary, $entry.Path)
                     }
+                    Protect-PrivatePath $entry.Path $false
                 } finally { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
             } else {
                 Remove-Item -LiteralPath $entry.Path -Force -ErrorAction SilentlyContinue
@@ -397,6 +437,7 @@ function Restore-InstallTransaction([string[]] $ManagedPaths) {
 function Recover-IncompleteInstallTransactions([string[]] $ManagedPaths) {
     $recovered = $false
     foreach ($directory in @(Get-ChildItem -LiteralPath $configDir -Directory -Filter '.install-transaction-*' -ErrorAction SilentlyContinue)) {
+        Protect-PrivatePath $directory.FullName $true
         $statePath = Join-Path $directory.FullName 'state'
         if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
             Remove-Item -LiteralPath $directory.FullName -Recurse -Force -ErrorAction SilentlyContinue
@@ -426,8 +467,9 @@ function Complete-InstallTransaction {
     $transaction = $script:installTransaction
     if ($transaction.HasFiles) {
         $backupDir = Join-Path $configDir ("backups\install-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + "-$PID")
-        [IO.Directory]::CreateDirectory((Split-Path $backupDir -Parent)) | Out-Null
+        Ensure-PrivateDirectory (Split-Path $backupDir -Parent)
         Move-Item -LiteralPath $transaction.Root -Destination $backupDir
+        Protect-PrivatePath $backupDir $true
         [Console]::WriteLine("Backed up the previous managed files to $backupDir")
     } else {
         Remove-Item -LiteralPath $transaction.Root -Recurse -Force -ErrorAction SilentlyContinue
@@ -473,7 +515,7 @@ function Install-Proxy {
     $asset = "CLIProxyAPI_${proxyVersion}_windows_${arch}.zip"
     $url = "https://github.com/router-for-me/CLIProxyAPI/releases/download/v${proxyVersion}/$asset"
     $temporary = Join-Path ([IO.Path]::GetTempPath()) ('claudex-proxy-' + [guid]::NewGuid().ToString('N'))
-    [IO.Directory]::CreateDirectory($temporary) | Out-Null
+    Ensure-PrivateDirectory $temporary
     try {
         $archive = Join-Path $temporary $asset
         [Console]::WriteLine("Downloading verified internal compatibility service v$proxyVersion for Windows/$arch...")
@@ -482,15 +524,39 @@ function Install-Proxy {
         if ($actual -ne $expected) { Fail "compatibility service checksum mismatch for $asset" }
         Expand-Archive -LiteralPath $archive -DestinationPath $temporary -Force
         Copy-Item -LiteralPath (Join-Path $temporary 'cli-proxy-api.exe') -Destination $managedProxy -Force
+        Protect-PrivatePath $managedProxy $false
     } finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
     }
 }
 
-[IO.Directory]::CreateDirectory($binDir) | Out-Null
-[IO.Directory]::CreateDirectory($configDir) | Out-Null
-[IO.Directory]::CreateDirectory($managedBinDir) | Out-Null
-[IO.Directory]::CreateDirectory($authDir) | Out-Null
+if ($packageManagedInstall) {
+    # Scoop/WinGet/Homebrew own their shim or package directories. Keep that
+    # directory policy intact so their atomic upgrade/link management continues
+    # to work; the installed Claudex files still receive explicit file ACLs.
+    [IO.Directory]::CreateDirectory($binDir) | Out-Null
+} else {
+    # A file ACL alone cannot defend a launcher when a broadly writable parent
+    # grants DeleteChild. Direct, git, and archive installs own their bin
+    # directory, so make the directory private before publishing launchers.
+    try { Ensure-PrivateDirectory $binDir }
+    catch {
+        Fail "direct/archive installs require a private launcher directory; could not protect ${binDir}: $($_.Exception.Message)"
+    }
+}
+Ensure-PrivateDirectory $configDir
+Ensure-PrivateDirectory $managedBinDir
+Ensure-PrivateDirectory $authDir
+# The launcher writes transient bearer headers below run\health-* and the usage
+# helper writes them below usage-cache. Protect their inherited ACLs before any
+# process can create the short-lived credential-bearing files.
+Ensure-PrivateDirectory $runDir
+Ensure-PrivateDirectory $usageCacheDir
+if (Test-Path -LiteralPath $managedNodeDir -PathType Container) { Protect-PrivatePath $managedNodeDir $true }
+if (Test-Path -LiteralPath $managedProxy -PathType Leaf) { Protect-PrivatePath $managedProxy $false }
+if (Test-Path -LiteralPath (Join-Path $managedNodeDir 'node.exe') -PathType Leaf) {
+    $env:PATH = "$managedNodeDir$([IO.Path]::PathSeparator)$env:PATH"
+}
 $separator = [IO.Path]::PathSeparator
 if ($binDir -notin @($env:PATH -split [regex]::Escape([string] $separator))) { $env:PATH = "$binDir$separator$env:PATH" }
 
@@ -510,6 +576,14 @@ $installManagedPaths = @(
     $usageSkillTarget,
     $installReceiptTarget
 )
+# Repair ACLs from older installs before copying or reading any managed state.
+# This matters when a custom config directory was originally created beneath a
+# parent that granted broad inherited access.
+foreach ($existingPrivateManagedPath in $installManagedPaths) {
+    if (Test-Path -LiteralPath $existingPrivateManagedPath -PathType Leaf) {
+        Protect-PrivatePath $existingPrivateManagedPath $false
+    }
+}
 Acquire-InstallLock
 try {
 Recover-IncompleteInstallTransactions $installManagedPaths
@@ -520,12 +594,14 @@ if (-not $skipDependencies) {
     if (-not (Get-Command codex -ErrorAction SilentlyContinue)) { Install-CodexCli }
     if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
         [Console]::WriteLine("Installing Claude Code with Anthropic's native installer...")
-        $installer = Join-Path ([IO.Path]::GetTempPath()) ('claude-install-' + [guid]::NewGuid().ToString('N') + '.ps1')
+        $installerDirectory = Join-Path ([IO.Path]::GetTempPath()) ('claudex-claude-install-' + [guid]::NewGuid().ToString('N'))
+        Ensure-PrivateDirectory $installerDirectory
+        $installer = Join-Path $installerDirectory 'install.ps1'
         try {
             Receive-FileWithRetry 'https://claude.ai/install.ps1' $installer 180
             & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $installer
             if ($LASTEXITCODE -ne 0) { Fail "Claude Code's native installer failed with exit code $LASTEXITCODE" }
-        } finally { Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue }
+        } finally { Remove-Item -LiteralPath $installerDirectory -Recurse -Force -ErrorAction SilentlyContinue }
         $claudeInstalledBinDir = Join-Path $env:USERPROFILE '.local\bin'
         if ((Test-Path -LiteralPath $claudeInstalledBinDir -PathType Container) -and
             $claudeInstalledBinDir -notin @($env:PATH -split [regex]::Escape([string] $separator))) {
@@ -559,14 +635,18 @@ if (-not $skipDependencies -and $env:CLAUDEX_SKIP_CLAUDE_UPDATE -ne '1') {
         # the documented best-effort update behavior.
         $ErrorActionPreference = 'Continue'
         & $claudeCommand.Source update *> (Join-Path $configDir 'claude-update-install.log')
+        if (Test-Path -LiteralPath (Join-Path $configDir 'claude-update-install.log') -PathType Leaf) {
+            Protect-PrivatePath (Join-Path $configDir 'claude-update-install.log') $false
+        }
         $updateExitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $savedErrorPreference
     }
     if ($updateExitCode -eq 0) {
         $updateDir = Join-Path $configDir 'update'
-        [IO.Directory]::CreateDirectory($updateDir) | Out-Null
+        Ensure-PrivateDirectory $updateDir
         [IO.File]::WriteAllText((Join-Path $updateDir 'last-success'), ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString() + "`n"), $utf8)
+        Protect-PrivatePath (Join-Path $updateDir 'last-success') $false
     } else { [Console]::Error.WriteLine('install.ps1: Claude Code update check failed; continuing with the installed version.') }
 }
 
@@ -593,7 +673,7 @@ if ($proxyToken.Contains("`r") -or $proxyToken.Contains("`n")) { Fail 'local com
 
 $jsonToken = $proxyToken | ConvertTo-Json -Compress
 $runtimeAuthDir = if ($env:CLAUDEX_CODEX_AUTH_DIR) { $env:CLAUDEX_CODEX_AUTH_DIR } elseif ($existingVariables['CLAUDEX_CODEX_AUTH_DIR']) { $existingVariables['CLAUDEX_CODEX_AUTH_DIR'] } else { $authDir }
-[IO.Directory]::CreateDirectory($runtimeAuthDir) | Out-Null
+Ensure-PrivateDirectory $runtimeAuthDir
 $authPath = $runtimeAuthDir.Replace('\', '/')
 $proxyConfig = @"
 host: "127.0.0.1"
@@ -647,8 +727,22 @@ Copy-Item -LiteralPath (Join-Path $root 'codex-session.ps1') -Destination $codex
 Copy-Item -LiteralPath (Join-Path $root 'preload.cjs') -Destination $preloadTarget -Force
 Copy-Item -LiteralPath (Join-Path $root 'skill-bridge.cjs') -Destination $skillBridgeTarget -Force
 Copy-Item -LiteralPath (Join-Path $root 'self-update.ps1') -Destination $selfUpdateTarget -Force
-[IO.Directory]::CreateDirectory((Split-Path $usageSkillTarget -Parent)) | Out-Null
+Ensure-PrivateDirectory (Split-Path $usageSkillTarget -Parent)
 Copy-Item -LiteralPath (Join-Path $root 'skills\usage-limit\SKILL.windows.md') -Destination $usageSkillTarget -Force
+
+foreach ($privateInstalledFile in @(
+    $launcherTarget,
+    $cmdTarget,
+    $statuslineTarget,
+    $usageLimitTarget,
+    $codexSessionTarget,
+    $preloadTarget,
+    $skillBridgeTarget,
+    $selfUpdateTarget,
+    $usageSkillTarget
+)) {
+    Protect-PrivatePath $privateInstalledFile $false
+}
 
 $settings = Get-Content -LiteralPath (Join-Path $root 'settings.json') -Raw | ConvertFrom-Json
 $settings.statusLine.command = 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $statuslineTarget + '"'
@@ -660,9 +754,7 @@ if ($installVersion -notmatch '^\d+\.\d+\.\d+$') { Fail 'package.json contains a
 $installMethod = if ($env:CLAUDEX_INSTALL_METHOD) { $env:CLAUDEX_INSTALL_METHOD } elseif (Test-Path -LiteralPath (Join-Path $root '.git') -PathType Container) { 'git' } else { 'archive' }
 if ($installMethod -notin @('homebrew', 'scoop', 'winget', 'archive', 'git')) { Fail "unsupported CLAUDEX_INSTALL_METHOD: $installMethod" }
 $receipt = [ordered]@{ schema = 1; version = $installVersion; method = $installMethod; binDir = $binDir; repository = 'BeamoINT/Claudex' }
-$receiptTemporary = Join-Path $configDir ('install-' + [guid]::NewGuid().ToString('N') + '.tmp')
-[IO.File]::WriteAllText($receiptTemporary, (($receipt | ConvertTo-Json -Compress) + "`n"), $utf8)
-Move-Item -LiteralPath $receiptTemporary -Destination $installReceiptTarget -Force
+Write-TextAtomic $installReceiptTarget (($receipt | ConvertTo-Json -Compress) + "`n")
 
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $userEntries = if ($userPath) { @($userPath -split [regex]::Escape([string] $separator)) } else { @() }

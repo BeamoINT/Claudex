@@ -19,6 +19,7 @@ $sessionId = ''
 $totalInputTokens = 0
 $contextWindowSize = 0
 $inputColumns = 0
+$sessionPersistenceEnabled = $env:CLAUDEX_NO_SESSION_PERSISTENCE -ne '1'
 
 function Remove-StaleStatuslineCache([string] $CacheDirectory, [string] $ProtectedFile) {
     if (-not (Test-Path -LiteralPath $CacheDirectory -PathType Container)) { return }
@@ -85,7 +86,7 @@ if (-not $contextPercent -or $contextPercent -eq '0') {
     }
 }
 
-if ($sessionId -match '^[A-Za-z0-9._-]+$') {
+if ($sessionPersistenceEnabled -and $sessionId -match '^[A-Za-z0-9._-]+$') {
     $cacheDir = Join-Path $configDir 'statusline-cache'
     $cacheFile = Join-Path $cacheDir $sessionId
     if ($contextPercent) {
@@ -159,7 +160,14 @@ if ($usageDisplay -ne 'off' -and (Test-Path -LiteralPath $usageHelper -PathType 
                 [IO.File]::WriteAllText($lastAttemptPath, "$now`n", $utf8)
                 $powershell = (Get-Process -Id $PID).Path
                 $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $usageHelper + '"'), '-RefreshCache', '-LockHeld', '-LockToken', $refreshToken)
-                $refreshProcess = Start-Process -FilePath $powershell -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                # Start-Process otherwise lets the refresh helper inherit the
+                # status-line protocol streams. Fixed per-lock files are
+                # truncated on each refresh; the helper's own response/error
+                # caps keep both files bounded.
+                $refreshStdout = Join-Path $usageCacheDir '.status-refresh.stdout.log'
+                $refreshStderr = Join-Path $usageCacheDir '.status-refresh.stderr.log'
+                $refreshProcess = Start-Process -FilePath $powershell -ArgumentList $arguments -WindowStyle Hidden -PassThru `
+                    -RedirectStandardOutput $refreshStdout -RedirectStandardError $refreshStderr
                 $ownerTemporary = Join-Path $refreshLock ('.owner.' + [guid]::NewGuid().ToString('N'))
                 [IO.File]::WriteAllText($ownerTemporary, "$($refreshProcess.Id) $refreshToken`n", $utf8)
                 $currentRecord = [IO.File]::ReadAllText($refreshOwnerPath).Trim()

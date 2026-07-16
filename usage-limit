@@ -12,7 +12,8 @@ readonly refresh_owner_file="$refresh_lock/owner-pid"
 readonly account_selection_file="$config_dir/codex-usage-account"
 readonly usage_generation_file="$config_dir/usage-generation"
 readonly curl_bin="${CLAUDEX_CURL_BIN:-curl}"
-readonly usage_url="${CLAUDEX_USAGE_URL:-https://chatgpt.com/backend-api/wham/usage}"
+readonly official_usage_url="https://chatgpt.com/backend-api/wham/usage"
+readonly usage_url="${CLAUDEX_USAGE_URL:-$official_usage_url}"
 readonly refresh_seconds="${CLAUDEX_USAGE_REFRESH_SECONDS:-300}"
 readonly timeout_seconds="${CLAUDEX_USAGE_TIMEOUT_SECONDS:-8}"
 readonly max_stale_seconds="${CLAUDEX_USAGE_MAX_STALE_SECONDS:-86400}"
@@ -38,6 +39,18 @@ appserver_input_open=0
 fail() {
   printf 'usage-limit: %s\n' "$*" >&2
   return 1
+}
+
+validate_usage_url() {
+  [[ "$usage_url" == "$official_usage_url" ]] && return 0
+  if [[ "${CLAUDEX_INSECURE_TEST_ALLOW_USAGE_URL:-0}" != 1 ]]; then
+    fail "CLAUDEX_USAGE_URL must remain $official_usage_url; only tests may enable a loopback override with CLAUDEX_INSECURE_TEST_ALLOW_USAGE_URL=1."
+    return 1
+  fi
+  if [[ ! "$usage_url" =~ ^https?://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]{1,5})?([/?#]|$) ]]; then
+    fail 'CLAUDEX_INSECURE_TEST_ALLOW_USAGE_URL permits only loopback HTTP(S) usage endpoints.'
+    return 1
+  fi
 }
 
 invalidate_usage_cache() {
@@ -164,6 +177,13 @@ if (( lock_held )) && [[ ! "$lock_token" =~ ^[A-Za-z0-9._-]{8,128}$ ]]; then
   fail '--lock-held requires a valid --lock-token generation.'
   exit 2
 fi
+if (( lock_held )); then
+  inherited_lock_record=$(read_refresh_owner)
+  if [[ -z "$inherited_lock_record" || "${inherited_lock_record#* }" != "$lock_token" ]]; then
+    fail 'the inherited usage refresh lock is no longer owned by this generation.'
+    exit 1
+  fi
+fi
 
 if [[ ! "$refresh_seconds" =~ ^[0-9]+$ ]] || (( refresh_seconds < 60 || refresh_seconds > 3600 )); then
   fail 'CLAUDEX_USAGE_REFRESH_SECONDS must be an integer from 60 to 3600.'
@@ -281,14 +301,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-file_mtime() {
-  if stat -f '%m' "$1" >/dev/null 2>&1; then
-    stat -f '%m' "$1"
-  else
-    stat -c '%Y' "$1"
-  fi
-}
-
 proxy_auth_dir() {
   local proxy_config="${CLAUDEX_PROXY_CONFIG:-$config_dir/cliproxyapi.yaml}"
   local configured=""
@@ -311,8 +323,53 @@ proxy_auth_dir() {
   printf '%s\n' "$configured"
 }
 
+ordered_auth_files() {
+  local auth_dir="$1" candidate refresh_key name count position previous
+  local LC_ALL=C
+  local -a paths refresh_keys names
+  paths=()
+  refresh_keys=()
+  names=()
+  while IFS= read -r -d '' candidate; do
+    jq -e '.type == "codex" and (.access_token | type == "string" and length > 0)' \
+      "$candidate" >/dev/null 2>&1 || continue
+    refresh_key=$(jq -r '
+      (.last_refresh // "") as $value
+      | if ($value | type) == "number" then $value
+        elif (($value | type) == "string" and ($value | length) > 0) then
+          (try ($value | fromdateiso8601) catch 0)
+        else 0 end
+      | floor | tostring
+    ' "$candidate" 2>/dev/null || printf 0)
+    [[ "$refresh_key" =~ ^[0-9]+$ ]] || refresh_key=0
+    name="${candidate##*/}"
+    count=${#paths[@]}
+    paths[count]="$candidate"
+    refresh_keys[count]="$refresh_key"
+    names[count]="$name"
+    position=$count
+    while (( position > 0 )); do
+      previous=$(( position - 1 ))
+      if (( refresh_keys[position] > refresh_keys[previous] )) || {
+          (( refresh_keys[position] == refresh_keys[previous] )) &&
+          [[ "${names[position]}" < "${names[previous]}" ]];
+        }; then
+        candidate="${paths[previous]}"; paths[previous]="${paths[position]}"; paths[position]="$candidate"
+        refresh_key="${refresh_keys[previous]}"; refresh_keys[previous]="${refresh_keys[position]}"; refresh_keys[position]="$refresh_key"
+        name="${names[previous]}"; names[previous]="${names[position]}"; names[position]="$name"
+        position=$previous
+      else
+        break
+      fi
+    done
+  done < <(find "$auth_dir" -maxdepth 1 -type f -name 'codex*.json' -print0 2>/dev/null)
+  for (( position = 0; position < ${#paths[@]}; position++ )); do
+    printf '%s\0' "${paths[position]}"
+  done
+}
+
 find_auth_file() {
-  local candidate newest="" newest_mtime=-1 candidate_mtime
+  local candidate
   if [[ -n "${CLAUDEX_CODEX_AUTH_FILE:-}" ]]; then
     [[ -r "$CLAUDEX_CODEX_AUTH_FILE" ]] || return 1
     jq -e '.type == "codex"
@@ -348,14 +405,10 @@ find_auth_file() {
       and ((.disabled // false) != true)
       and ((.expired // false) != true)' \
       "$candidate" >/dev/null 2>&1 || continue
-    candidate_mtime=$(file_mtime "$candidate" 2>/dev/null || printf 0)
-    if (( candidate_mtime > newest_mtime )); then
-      newest="$candidate"
-      newest_mtime=$candidate_mtime
-    fi
-  done < <(find "$auth_dir" -maxdepth 1 -type f -name 'codex*.json' -print0 2>/dev/null)
-  [[ -n "$newest" ]] || return 1
-  printf '%s\n' "$newest"
+    printf '%s\n' "$candidate"
+    return 0
+  done < <(ordered_auth_files "$auth_dir")
+  return 1
 }
 
 usage_auth_binding() {
@@ -388,7 +441,7 @@ list_accounts() {
     [[ "$disabled" != true ]] || suffix=" (disabled)"
     [[ "$expired" != true ]] || suffix=" (expired)"
     printf '[%s] %d. %s%s\n' "$marker" "$index" "$email" "$suffix"
-  done < <(find "$auth_dir" -maxdepth 1 -type f -name 'codex*.json' -print0 2>/dev/null)
+  done < <(ordered_auth_files "$auth_dir")
   (( index > 0 )) || { fail 'no CLIProxyAPI Codex OAuth credentials were found.'; return 1; }
   printf '%s\n' 'Select one with: claudex --account <number|email|filename>; use auto to follow the newest credential.'
 }
@@ -415,7 +468,7 @@ select_account() {
       selected="$candidate"
       break
     fi
-  done < <(find "$auth_dir" -maxdepth 1 -type f -name 'codex*.json' -print0 2>/dev/null)
+  done < <(ordered_auth_files "$auth_dir")
   [[ -n "$selected" ]] || { fail "no Codex account matched '$selector'. Run: claudex --accounts"; return 1; }
   umask 077
   printf '%s\n' "$(basename "$selected")" > "$account_selection_file"
@@ -431,6 +484,7 @@ esac
 
 fetch_web_usage() {
   local auth_file token account raw
+  validate_usage_url || return 1
   auth_file=$(find_auth_file) || {
     fail 'no CLIProxyAPI Codex OAuth credential was found; run the installer with --login.'
     return 1
@@ -449,7 +503,7 @@ fetch_web_usage() {
     printf '%s\n' 'header = "Accept: application/json"'
   } > "$temporary_curl_config" || return 1
   raw=$("$curl_bin" --silent --show-error --fail --connect-timeout 3 \
-    --max-time "$timeout_seconds" --config "$temporary_curl_config" "$usage_url") || {
+    --max-time "$timeout_seconds" --config "$temporary_curl_config" -- "$usage_url") || {
       rm -f "$temporary_curl_config"
       temporary_curl_config=""
       fail 'OpenAI usage refresh failed.'
@@ -717,6 +771,9 @@ refresh_cache() {
     fail "cannot create the private cache directory: $cache_dir"
     return 1
   }
+  if [[ "$usage_source" != app-server ]]; then
+    validate_usage_url || return 1
+  fi
   chmod 700 "$cache_dir" 2>/dev/null || true
   generation_at_start=$(read_usage_generation)
   auth_binding_at_start=$(usage_auth_binding 2>/dev/null || true)

@@ -14,7 +14,7 @@ confirm it still exists on the latest release when it is safe to do so.
 Do not open a public issue for a suspected vulnerability and do not include
 real credentials in a reproduction.
 
-Use GitHub's private vulnerability-reporting form:
+Use GitHub's private vulnerability reporting form:
 
 <https://github.com/BeamoINT/Claudex/security/advisories/new>
 
@@ -32,7 +32,7 @@ and session IDs with placeholders. Maintainers will acknowledge the report,
 investigate it, coordinate a fix, and credit the reporter unless anonymity is
 requested.
 
-Claudex is volunteer-maintained. The project targets acknowledgement within
+Claudex is volunteer maintained. The project targets acknowledgement within
 three business days, an initial impact assessment within seven days, and a
 status update at least weekly while a validated report remains unresolved.
 These are response targets rather than a support SLA. Disclosure timing is
@@ -41,7 +41,7 @@ ship fixes across every supported platform.
 
 ## Safe testing and disclosure
 
-Good-faith research is welcome when it:
+Good faith research is welcome when it:
 
 - uses only accounts, machines, and data you own or are authorized to test;
 - avoids privacy violations, service disruption, persistence, and accessing
@@ -51,15 +51,15 @@ Good-faith research is welcome when it:
 - follows applicable law and upstream provider terms.
 
 The project will not pursue action against research that follows these rules
-and makes a reasonable effort to avoid harm. This safe-harbor statement cannot
-authorize testing against third-party systems or override their policies.
+and makes a reasonable effort to avoid harm. This safe harbor statement cannot
+authorize testing against third party systems or override their policies.
 
 ## Security boundary
 
 Claudex:
 
-- reads the standard local Codex file-backed session;
-- writes a minimal bridge credential into a mode-restricted private directory;
+- reads the standard local Codex file backed session;
+- writes a minimal bridge credential into a mode restricted private directory;
 - binds its compatibility service to `127.0.0.1` by default;
 - generates a local 256-bit proxy key;
 - downloads a pinned CLIProxyAPI archive over HTTPS and verifies its SHA-256
@@ -68,7 +68,7 @@ Claudex:
 
 Claudex does not commit credentials, upload local session files, or print OAuth
 tokens. It cannot secure a compromised machine, an unsafe fork, a manually
-exposed proxy port, or third-party software outside this repository.
+exposed proxy port, or third party software outside this repository.
 
 See [docs/architecture.md](docs/architecture.md) for the data flow and trust
 boundaries.

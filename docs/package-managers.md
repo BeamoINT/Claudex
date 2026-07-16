@@ -1,19 +1,19 @@
-# Package-manager installation
+# Package manager installation
 
 Claudex is currently distributed through the BeamoINT Homebrew tap and Scoop
 bucket. It is not currently available from WinGet: the initial community
 submission has not passed validation or been merged. The
-checksum-verified source installer remains available on every supported
+checksum verified source installer remains available on every supported
 platform; npm distribution is deliberately disabled.
 
-Package-manager installs expose the same `claudex` command as the source
-installer. On first launch, a small cross-platform bootstrap installs the
-managed files into `~/.config/claudex`, downloads the checksum-verified local
+Package manager installs expose the same `claudex` command as the source
+installer. On first launch, a small cross platform bootstrap installs the
+managed files into `~/.config/claudex`, downloads the checksum verified local
 compatibility service, and then hands off to the normal launcher.
 
-Codex and Claude Code are required at runtime, but the first-run bootstrap now
+Codex and Claude Code are required at runtime, but the first run bootstrap now
 installs either missing CLI. In an interactive terminal it opens Codex's
-official browser sign-in automatically when the standard file-backed session is
+official browser sign in automatically when the standard file backed session is
 not ready. `claudex --login` remains available to retry or switch accounts.
 
 ## Homebrew
@@ -42,7 +42,7 @@ with `scoop update claudex`.
 ## WinGet
 
 The Windows Package Manager community repository requires external validation
-and review for every new listing. The current portable-package submission is
+and review for every new listing. The current portable package submission is
 not installable because it has not passed that validation. Once a corrected
 `BeamoINT.Claudex` submission is accepted, install it with:
 

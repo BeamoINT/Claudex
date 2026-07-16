@@ -15,10 +15,217 @@ fi
 readonly claudex_config_dir="${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}"
 readonly config_file="$claudex_config_dir/env"
 readonly curl_bin="${CLAUDEX_CURL_BIN:-curl}"
+readonly inherited_managed_session="${CLAUDEX_MANAGED_SESSION:-0}"
+caller_subagent_model_set=0
+caller_subagent_model=""
+if [[ -n "${CLAUDE_CODE_SUBAGENT_MODEL+x}" ]]; then
+  caller_subagent_model_set=1
+  caller_subagent_model="$CLAUDE_CODE_SUBAGENT_MODEL"
+fi
 
-if [[ -x "$claudex_config_dir/node/bin/node" ]]; then export PATH="$claudex_config_dir/node/bin:$PATH"; fi
+claudex_is_maintenance_command() {
+  case "$1" in
+    --help|-h|--version|-v|agents|attach|auth|auto-mode|doctor|gateway|install|kill|logs|mcp|plugin|plugins|project|respawn|rm|self-update|setup-token|skills|stop|ultrareview|update|upgrade) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+tool_value_mentions_lifecycle() {
+  local normalized=" ${1//,/ } "
+  [[ "$normalized" == *' Agent '* || "$normalized" == *' TaskList '* ]]
+}
+
+tool_value_allows_lifecycle() {
+  local normalized=" ${1//,/ } "
+  [[ "$normalized" == *' default '* ]] && return 0
+  [[ "$normalized" == *' Agent '* && "$normalized" == *' TaskList '* ]]
+}
+
+# Parse only Claude Code's documented global option grammar. Required option
+# values are skipped even when they begin with "--"; this is what keeps prompt,
+# settings, model, and agent values from being reinterpreted as wrapper flags.
+# Unknown options stop semantic inspection rather than risking a false match.
+classify_claude_argv() {
+  claude_maintenance_command=""
+  claude_first_party_route=0
+  parsed_agent_option=0
+  parsed_agents_option=0
+  parsed_lifecycle_tools_restricted=0
+  parsed_permission_option=0
+  parsed_effort_option=0
+  parsed_settings_option=0
+  parsed_model_option=0
+  parsed_model_value=""
+  parsed_fallback_model_option=0
+  parsed_fallback_model_value=""
+  parsed_no_session_persistence=0
+  parsed_safe_mode=0
+  parsed_background=0
+
+  local argv=("$@") index=0 count=$# token tool_values
+  while (( index < count )); do
+    token="${argv[$index]}"
+    [[ "$token" != -- ]] || return 0
+    case "$token" in
+      --sol|--terra|--luna|--solplan|--manual|--auto|--accept-edits|--ultracode|--max-effort|--claude-chrome)
+        index=$((index + 1)); continue ;;
+      --help|-h|--version|-v)
+        claude_maintenance_command="$token"; return 0 ;;
+      --agent|--agents|--append-system-prompt|--append-system-prompt-file|--debug-file|--effort|--fallback-model|--input-format|--json-schema|--max-budget-usd|--model|-n|--name|--output-format|--permission-mode|--plugin-dir|--plugin-url|--remote-control-session-name-prefix|--session-id|--setting-sources|--settings|--system-prompt|--system-prompt-file)
+        case "$token" in
+          --agent) parsed_agent_option=1 ;;
+          --agents) parsed_agents_option=1 ;;
+          --effort) parsed_effort_option=1 ;;
+          --fallback-model) parsed_fallback_model_option=1 ;;
+          --model) parsed_model_option=1 ;;
+          --permission-mode) parsed_permission_option=1 ;;
+          --settings) parsed_settings_option=1 ;;
+        esac
+        index=$((index + 1))
+        if (( index < count )); then
+          case "$token" in
+            --model) parsed_model_value="${argv[$index]}" ;;
+            --fallback-model) parsed_fallback_model_value="${argv[$index]}" ;;
+          esac
+          index=$((index + 1))
+        fi
+        continue
+        ;;
+      --agent=*|--agents=*|--append-system-prompt=*|--append-system-prompt-file=*|--debug-file=*|--effort=*|--fallback-model=*|--input-format=*|--json-schema=*|--max-budget-usd=*|--model=*|--name=*|--output-format=*|--permission-mode=*|--plugin-dir=*|--plugin-url=*|--remote-control-session-name-prefix=*|--session-id=*|--setting-sources=*|--settings=*|--system-prompt=*|--system-prompt-file=*)
+        case "$token" in
+          --agent=*) parsed_agent_option=1 ;;
+          --agents=*) parsed_agents_option=1 ;;
+          --effort=*) parsed_effort_option=1 ;;
+          --fallback-model=*) parsed_fallback_model_option=1; parsed_fallback_model_value="${token#*=}" ;;
+          --model=*) parsed_model_option=1; parsed_model_value="${token#*=}" ;;
+          --permission-mode=*) parsed_permission_option=1 ;;
+          --settings=*) parsed_settings_option=1 ;;
+        esac
+        index=$((index + 1)); continue
+        ;;
+      --add-dir|--allowedTools|--allowed-tools|--betas|--disallowedTools|--disallowed-tools|--file|--mcp-config|--tools)
+        tool_values=""
+        index=$((index + 1))
+        while (( index < count )) && [[ "${argv[$index]}" != -* ]]; do
+          tool_values="${tool_values}${tool_values:+ }${argv[$index]}"
+          index=$((index + 1))
+        done
+        case "$token" in
+          --tools) tool_value_allows_lifecycle "$tool_values" || parsed_lifecycle_tools_restricted=1 ;;
+          --disallowedTools|--disallowed-tools)
+            if tool_value_mentions_lifecycle "$tool_values"; then parsed_lifecycle_tools_restricted=1; fi
+            ;;
+        esac
+        continue
+        ;;
+      --add-dir=*|--allowedTools=*|--allowed-tools=*|--betas=*|--disallowedTools=*|--disallowed-tools=*|--file=*|--mcp-config=*|--tools=*)
+        case "$token" in
+          --tools=*) tool_value_allows_lifecycle "${token#*=}" || parsed_lifecycle_tools_restricted=1 ;;
+          --disallowedTools=*|--disallowed-tools=*)
+            if tool_value_mentions_lifecycle "${token#*=}"; then parsed_lifecycle_tools_restricted=1; fi
+            ;;
+        esac
+        index=$((index + 1)); continue
+        ;;
+      --remote-control|--rc|-r|--resume|--from-pr|--prompt-suggestions|-w|--worktree)
+        case "$token" in --remote-control|--rc) claude_first_party_route=1 ;; esac
+        index=$((index + 1))
+        if (( index < count )) && [[ "${argv[$index]}" != -* ]]; then index=$((index + 1)); fi
+        continue
+        ;;
+      --remote-control=*|--rc=*)
+        claude_first_party_route=1; index=$((index + 1)); continue ;;
+      --safe-mode|--bare)
+        parsed_safe_mode=1; index=$((index + 1)); continue ;;
+      --no-session-persistence)
+        parsed_no_session_persistence=1; index=$((index + 1)); continue ;;
+      --allow-dangerously-skip-permissions|--dangerously-skip-permissions)
+        parsed_permission_option=1; index=$((index + 1)); continue ;;
+      --ax-screen-reader|--background|--bg|--brief|--chrome|-c|--continue|--disable-slash-commands|--exclude-dynamic-system-prompt-sections|--fork-session|--forward-subagent-text|--ide|--include-hook-events|--include-partial-messages|--no-chrome|-p|--print|--replay-user-messages|--strict-mcp-config|--tmux|--verbose)
+        case "$token" in --background|--bg) parsed_background=1 ;; esac
+        index=$((index + 1)); continue ;;
+      --tmux=*) index=$((index + 1)); continue ;;
+      -*) return 0 ;;
+      *)
+        if claudex_is_maintenance_command "$token"; then
+          claude_maintenance_command="$token"
+          [[ "$token" != ultrareview ]] || claude_first_party_route=1
+        fi
+        return 0
+        ;;
+    esac
+  done
+}
+
+strip_managed_bun_preload() {
+  local options="${BUN_OPTIONS:-}" preload="--preload ${claudex_config_dir// /\\ }/preload.cjs"
+  while [[ "$options" == "$preload" || "$options" == "$preload "* ]]; do
+    options="${options#"$preload"}"
+    options="${options# }"
+  done
+  if [[ -n "$options" ]]; then export BUN_OPTIONS="$options"; else unset BUN_OPTIONS; fi
+}
+
+scrub_managed_session_environment() {
+  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDEX_CHATGPT_PLAN_LABEL CLAUDEX_MANAGED_SESSION
+  unset CLAUDEX_PROXY_URL CLAUDEX_PROXY_CONFIG CLAUDEX_PROXY_BIN CLAUDEX_CODEX_AUTH_DIR CLAUDEX_CODEX_AUTH_FILE CLAUDEX_CODEX_SOURCE_AUTH_FILE
+  unset CLAUDE_CONFIG_DIR
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_FABLE_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL_NAME ANTHROPIC_DEFAULT_FABLE_MODEL_NAME ANTHROPIC_DEFAULT_SONNET_MODEL_NAME ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES
+  unset ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES
+  unset CLAUDE_CODE_AUTO_MODE_MODEL CLAUDE_CODE_BG_CLASSIFIER_MODEL CLAUDE_CODE_ALWAYS_ENABLE_EFFORT
+  unset CLAUDE_CODE_SUBAGENT_MODEL
+  unset CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY CLAUDE_CODE_MAX_RETRIES CLAUDE_CODE_MAX_CONTEXT_TOKENS CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  unset CLAUDE_CODE_DISABLE_1M_CONTEXT CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD CLAUDEX_NO_SESSION_PERSISTENCE
+  unset CLAUDEX_MODEL_MODE CLAUDEX_SESSION_MODE CLAUDEX_INTERACTIVE_TUI CLAUDE_CODE_EFFORT_LEVEL CLAUDE_CODE_NO_FLICKER CLAUDE_CODE_ACCESSIBILITY
+  strip_managed_bun_preload
+  if (( caller_subagent_model_set )); then export CLAUDE_CODE_SUBAGENT_MODEL="$caller_subagent_model"; fi
+}
+
+scrub_third_party_claude_routing() {
+  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
+  unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY
+  unset ANTHROPIC_BEDROCK_BASE_URL ANTHROPIC_VERTEX_BASE_URL ANTHROPIC_FOUNDRY_BASE_URL
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_FABLE_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL_NAME ANTHROPIC_DEFAULT_FABLE_MODEL_NAME ANTHROPIC_DEFAULT_SONNET_MODEL_NAME ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME
+}
+
+exec_native_codex() {
+  unset CLAUDEX_PROXY_TOKEN
+  if [[ "$inherited_managed_session" == 1 ]]; then scrub_managed_session_environment; fi
+  local native_codex
+  native_codex=$(command -v codex 2>/dev/null || true)
+  [[ -n "$native_codex" ]] || { printf '%s\n' 'claudex: Codex CLI was not found. Install Codex and retry.' >&2; exit 1; }
+  exec "$native_codex" "$@"
+}
+
+exec_native_claude() {
+  local boundary_mode="$1"
+  shift
+  unset CLAUDEX_PROXY_TOKEN
+  if [[ "$inherited_managed_session" == 1 ]]; then scrub_managed_session_environment; fi
+  if [[ "$boundary_mode" == first-party ]]; then scrub_third_party_claude_routing; fi
+  if [[ -n "${CLAUDEX_CLAUDE_CONFIG_DIR:-}" ]]; then export CLAUDE_CONFIG_DIR="$CLAUDEX_CLAUDE_CONFIG_DIR"; fi
+  local native_claude
+  native_claude=$(command -v claude 2>/dev/null || true)
+  [[ -n "$native_claude" ]] || { printf '%s\n' 'claudex: Claude Code was not found. Install Claude Code and retry.' >&2; exit 1; }
+  exec "$native_claude" "$@"
+}
+
+# Native harness routes are a hard environment boundary. In particular, never
+# source the managed env file or prepend Claudex's bundled runtime first.
+case "${1:-}" in
+  codex) shift; exec_native_codex "$@" ;;
+  claude) shift; exec_native_claude preserve "$@" ;;
+esac
+
+classify_claude_argv "$@"
+if (( claude_first_party_route )); then exec_native_claude first-party "$@"; fi
 
 early_runtime_bypass=0
+if [[ -n "$claude_maintenance_command" ]]; then early_runtime_bypass=1; fi
 for early_argument in "$@"; do
   case "$early_argument" in
     --claude-chrome) early_runtime_bypass=1; break ;;
@@ -26,11 +233,6 @@ for early_argument in "$@"; do
     *) break ;;
   esac
 done
-case "${1:-}" in
-  --help|-h|--version|-v|agents|auth|doctor|gateway|install|mcp|plugin|plugins|project|self-update|setup-token|skills|ultrareview|update|upgrade)
-    early_runtime_bypass=1
-    ;;
-esac
 
 if [[ ! -r "$config_file" ]] && (( ! early_runtime_bypass )); then
   printf '%s\n' "claudex: missing $config_file; reinstall or restore the Claudex configuration." >&2
@@ -38,7 +240,10 @@ if [[ ! -r "$config_file" ]] && (( ! early_runtime_bypass )); then
 fi
 
 if [[ -r "$config_file" ]]; then source "$config_file"; fi
-if [[ -n "${CLAUDEX_NODE_BIN:-}" ]]; then
+if [[ -x "$claudex_config_dir/node/bin/node" ]]; then export PATH="$claudex_config_dir/node/bin:$PATH"; fi
+
+activate_managed_node() {
+  [[ -n "${CLAUDEX_NODE_BIN:-}" ]] || return 0
   case "$CLAUDEX_NODE_BIN" in
     /*) ;;
     *) printf '%s\n' 'claudex: CLAUDEX_NODE_BIN must be an absolute directory containing Node.js 18 or newer.' >&2; exit 2 ;;
@@ -53,7 +258,7 @@ if [[ -n "${CLAUDEX_NODE_BIN:-}" ]]; then
     exit 2
   fi
   export PATH="$CLAUDEX_NODE_BIN:$PATH"
-fi
+}
 readonly settings_file="${CLAUDEX_SETTINGS_FILE:-$claudex_config_dir/settings.json}"
 readonly codex_session_helper="${CLAUDEX_CODEX_SESSION_HELPER:-$claudex_config_dir/codex-session}"
 readonly self_update_helper="${CLAUDEX_SELF_UPDATE_HELPER:-$claudex_config_dir/self-update}"
@@ -99,7 +304,6 @@ fi
 : "${CLAUDEX_PERMISSION_MODE:=auto}"
 : "${CLAUDEX_AUTO_MODE_MODEL:=gpt-5.6-terra}"
 : "${CLAUDEX_BACKGROUND_MODEL:=gpt-5.6-luna}"
-: "${CLAUDEX_SUBAGENT_MODEL:=gpt-5.6-terra}"
 : "${CLAUDEX_MAX_TOOL_USE_CONCURRENCY:=3}"
 : "${CLAUDEX_MAX_AGENT_CONCURRENCY:=3}"
 : "${CLAUDEX_MAX_RETRIES:=15}"
@@ -118,6 +322,7 @@ fi
 : "${CLAUDEX_UPDATE_INTERVAL_SECONDS:=86400}"
 : "${CLAUDEX_PLAN_MODE_POLICY:=conservative}"
 : "${CLAUDEX_SKILL_BRIDGE:=on}"
+: "${CLAUDEX_INSTRUCTION_BRIDGE:=on}"
 : "${CLAUDEX_SKILL_PLUGINS:=on}"
 : "${CLAUDEX_SKILL_DOLLAR_REFERENCES:=on}"
 
@@ -187,7 +392,7 @@ if (( ! early_runtime_bypass )); then case "$CLAUDEX_PERMISSION_MODE" in
     ;;
 esac; fi
 
-if (( ! early_runtime_bypass )); then for codex_model_setting in CLAUDEX_AUTO_MODE_MODEL CLAUDEX_BACKGROUND_MODEL CLAUDEX_SUBAGENT_MODEL; do
+if (( ! early_runtime_bypass )); then for codex_model_setting in CLAUDEX_AUTO_MODE_MODEL CLAUDEX_BACKGROUND_MODEL; do
   codex_model_value="${!codex_model_setting}"
   case "$codex_model_value" in
     gpt-5.6-sol|gpt-5.6-terra|gpt-5.6-luna) ;;
@@ -281,6 +486,9 @@ esac
 case "$CLAUDEX_SKILL_BRIDGE" in on|off) ;;
   *) printf '%s\n' 'claudex: CLAUDEX_SKILL_BRIDGE must be on or off.' >&2; exit 2 ;;
 esac
+case "$CLAUDEX_INSTRUCTION_BRIDGE" in on|off) ;;
+  *) printf '%s\n' 'claudex: CLAUDEX_INSTRUCTION_BRIDGE must be on or off.' >&2; exit 2 ;;
+esac
 case "$CLAUDEX_SKILL_PLUGINS" in on|off) ;;
   *) printf '%s\n' 'claudex: CLAUDEX_SKILL_PLUGINS must be on or off.' >&2; exit 2 ;;
 esac
@@ -291,7 +499,7 @@ fi
 
 export CLAUDEX_USAGE_DISPLAY CLAUDEX_USAGE_REFRESH_SECONDS CLAUDEX_USAGE_TIMEOUT_SECONDS CLAUDEX_USAGE_MAX_STALE_SECONDS
 export CLAUDEX_USAGE_SOURCE CLAUDEX_USAGE_ALERT_PERCENT
-export CLAUDEX_SKILL_BRIDGE CLAUDEX_SKILL_PLUGINS CLAUDEX_SKILL_DOLLAR_REFERENCES
+export CLAUDEX_SKILL_BRIDGE CLAUDEX_INSTRUCTION_BRIDGE CLAUDEX_SKILL_PLUGINS CLAUDEX_SKILL_DOLLAR_REFERENCES
 export CLAUDEX_CLAUDE_CONFIG_DIR CLAUDEX_CLAUDE_MANAGED_SETTINGS_FILE CLAUDEX_SKILL_EXTRA_DIRS CLAUDEX_CODEX_ADMIN_SKILLS_DIR CODEX_HOME
 
 # Keep Claudex model choices, sessions, and preferences isolated from normal Claude Code.
@@ -304,6 +512,7 @@ node_supports_skill_bridge() {
 }
 
 if [[ "${1:-}" == skills ]]; then
+  activate_managed_node
   node_supports_skill_bridge || { printf '%s\n' 'claudex: Node.js 18 or newer is required for skill compatibility.' >&2; exit 1; }
   [[ -r "$skill_bridge_helper" ]] || { printf '%s\n' 'claudex: skill bridge helper is missing; reinstall Claudex.' >&2; exit 1; }
   shift
@@ -451,21 +660,44 @@ proxy_ready() {
   printf '%s\n' "$models" | models_are_valid || return 43
 }
 
-selected_model_is_available() {
-  local selected_model="$1" models required_models fetch_status=0
+model_is_advertised() {
+  local selected_model="$1" models="$2" required_models
   case "$selected_model" in
     opusplan) required_models='["gpt-5.6-sol", "gpt-5.6-terra"]' ;;
     *) required_models=$(printf '["%s"]' "$selected_model") ;;
   esac
-  models=$(fetch_models 2) || fetch_status=$?
-  (( fetch_status == 0 )) || return "$fetch_status"
-  if ! printf '%s\n' "$models" | jq -e --argjson required "$required_models" '
+  printf '%s\n' "$models" | jq -e --argjson required "$required_models" '
     [.data[]?.id] as $ids
     | [$required[] as $model | select(($ids | index($model)) == null)]
     | length == 0
-  ' >/dev/null 2>&1; then
-    return 44
-  fi
+  ' >/dev/null 2>&1
+}
+
+normalize_managed_model() {
+  case "$1" in
+    gpt-5.6-sol|opus|fable) printf '%s\n' gpt-5.6-sol ;;
+    gpt-5.6-terra|sonnet) printf '%s\n' gpt-5.6-terra ;;
+    gpt-5.6-luna|haiku) printf '%s\n' gpt-5.6-luna ;;
+    opusplan) printf '%s\n' opusplan ;;
+    *) return 1 ;;
+  esac
+}
+
+launch_model_is_available() {
+  local selected_model="$1" fallback_models="${2:-}" models fetch_status=0 candidate normalized
+  local fallback_candidates=()
+  models=$(fetch_models 2) || fetch_status=$?
+  (( fetch_status == 0 )) || return "$fetch_status"
+  if model_is_advertised "$selected_model" "$models"; then return 0; fi
+  IFS=',' read -r -a fallback_candidates <<< "$fallback_models"
+  for candidate in ${fallback_candidates[@]+"${fallback_candidates[@]}"}; do
+    candidate="${candidate#"${candidate%%[![:space:]]*}"}"
+    candidate="${candidate%"${candidate##*[![:space:]]}"}"
+    normalized=$(normalize_managed_model "$candidate" 2>/dev/null || true)
+    [[ -n "$normalized" ]] || continue
+    if model_is_advertised "$normalized" "$models"; then return 0; fi
+  done
+  return 44
 }
 
 proxy_reachable() {
@@ -1010,7 +1242,7 @@ ensure_auto_mode_rules() {
       def managed_allow:
         startswith("Explicit Action Approval:") or startswith("Requested Agent Configuration:");
       def managed_environment:
-        startswith("User-designated task boundary:") or startswith("Explicitly approved development transfer:");
+        startswith("User designated task boundary:") or startswith("Explicitly approved development transfer:");
       (.autoMode // {}) as $auto
       | if all($auto.allow[]?; managed_allow)
           and all($auto.environment[]?; managed_environment)
@@ -1018,7 +1250,7 @@ ensure_auto_mode_rules() {
           and (($auto.hard_deny // []) | length) == 0
         then del(.autoMode.allow, .autoMode.environment)
           | if ((.autoMode // {}) | length) == 0 then del(.autoMode) else . end
-        else error("auto-mode defaults unavailable with non-managed custom rules")
+        else error("auto mode defaults unavailable with non-managed custom rules")
         end
     ' "$settings_file" > "$tmp_file" 2>/dev/null; then
       chmod 600 "$tmp_file" 2>/dev/null || true
@@ -1027,8 +1259,8 @@ ensure_auto_mode_rules() {
       return 0
     fi
     rm -f "$tmp_file"
-    printf '%s\n' 'claudex: Claude Code auto-mode defaults are unavailable; preserving custom rules and refusing an unsafe partial composition.' >&2
-    printf '%s\n' 'claudex: update Claude Code or restore the auto-mode defaults snapshot, then retry.' >&2
+    printf '%s\n' 'claudex: Claude Code auto mode defaults are unavailable; preserving custom rules and refusing an unsafe partial composition.' >&2
+    printf '%s\n' 'claudex: update Claude Code or restore the auto mode defaults snapshot, then retry.' >&2
     release_state_lock "$lock_dir"
     return 1
   fi
@@ -1036,12 +1268,12 @@ ensure_auto_mode_rules() {
   tmp_file=$(mktemp "$claudex_config_dir/settings.json.tmp.XXXXXX")
   if jq --argjson defaults "$defaults_json" \
       --argjson previous "$previous_defaults" \
-      --arg approval 'Explicit Action Approval: A user message that explicitly approves a specific action and target, including reissuing it after a denial or unambiguously referring to the immediately preceding blocked action with language such as approve that, go ahead, or proceed, satisfies named-and-specific consent for matching SOFT BLOCK rules. Do not force the user to restate the command, ask for duplicate confirmation, or treat the prior denial as permanent. This does not override HARD BLOCK rules or authorize a broader action.' \
-      --arg requested_config 'Requested Agent Configuration: Editing agent configuration is routine when the user explicitly asks for that specific configuration or permission change. Treat that edit as user-requested rather than Self-Modification; unrelated permission widening remains blocked.' \
-      --arg task_boundary 'User-designated task boundary: A repository, cloud project, host, bucket, service, or destination that the user explicitly identifies in their own message as owned or controlled infrastructure and as the intended target is trusted for the specifically requested operation and data flow only. Merely naming a target does not establish trust; do not infer trust for agent-selected destinations, unrelated resources, or broader scopes.' \
-      --arg approved_transfer 'Explicitly approved development transfer: When the user explicitly approves an exact transfer of task-required source from the current trusted repository to an explicitly named, private, user-controlled build or deployment host, treat that source and destination as inside the task trust boundary for that transfer only. Approval may unambiguously refer to the immediately preceding blocked command without repeating it. This never covers a public destination, credentials or secrets, unrelated files, a broader source tree, an agent-selected target, or a different host.' \
-      --arg transfer_soft 'Approved Private Development Transfer [named+specifics — must name the current source repository, the private user-controlled build or deployment host, and the requested transfer]: Transferring only the task-required source from the current trusted repository to that exact named private host requires the user to request or explicitly approve that transfer. Approval may unambiguously refer to the immediately preceding denied transfer. This consent never clears credentials or secrets, a public destination, unrelated files, a broader source tree, an agent-selected target, or a different host.' \
-      --arg hard_exception $'\n  - Claudex scoped private development transfer exception: Notwithstanding the bulk-scale treatment above, an exact transfer of only task-required source from the current trusted repository to an explicitly named, private, user-controlled build or deployment host is not HARD Data Exfiltration when the user requested or explicitly approved that exact source, destination, and transfer. Evaluate it under Approved Private Development Transfer as named-and-specific SOFT consent. The exception never covers credentials or secrets, a public destination, unrelated files, a broader source tree, an agent-selected target, or a different host; if any condition is missing, the HARD rule remains in force.' '
+      --arg approval 'Explicit Action Approval: A user message that explicitly approves a specific action and target, including reissuing it after a denial or unambiguously referring to the immediately preceding blocked action with language such as approve that, go ahead, or proceed, satisfies named and specific consent for matching SOFT BLOCK rules. Do not force the user to restate the command, ask for duplicate confirmation, or treat the prior denial as permanent. This does not override HARD BLOCK rules or authorize a broader action.' \
+      --arg requested_config 'Requested Agent Configuration: Editing agent configuration is routine when the user explicitly asks for that specific configuration or permission change. Treat that edit as requested by the user rather than Self Modification; unrelated permission widening remains blocked.' \
+      --arg task_boundary 'User designated task boundary: A repository, cloud project, host, bucket, service, or destination that the user explicitly identifies in their own message as owned or controlled infrastructure and as the intended target is trusted for the specifically requested operation and data flow only. Merely naming a target does not establish trust; do not infer trust for agent selected destinations, unrelated resources, or broader scopes.' \
+      --arg approved_transfer 'Explicitly approved development transfer: When the user explicitly approves an exact transfer of only the source required for the task from the current trusted repository to an explicitly named private build or deployment host controlled by the user, treat that source and destination as inside the task trust boundary for that transfer only. Approval may unambiguously refer to the immediately preceding blocked command without repeating it. This never covers a public destination, credentials or secrets, unrelated files, a broader source tree, an agent selected target, or a different host.' \
+      --arg transfer_soft 'Approved Private Development Transfer [named+specifics: must name the current source repository, the private build or deployment host controlled by the user, and the requested transfer]: Transferring only the source required for the task from the current trusted repository to that exact named private host requires the user to request or explicitly approve that transfer. Approval may unambiguously refer to the immediately preceding denied transfer. This consent never clears credentials or secrets, a public destination, unrelated files, a broader source tree, an agent selected target, or a different host.' \
+      --arg hard_exception $'\n  - Claudex scoped private development transfer exception: Notwithstanding the bulk scale treatment above, an exact transfer of only the source required for the task from the current trusted repository to an explicitly named private build or deployment host controlled by the user is not HARD Data Exfiltration when the user requested or explicitly approved that exact source, destination, and transfer. Evaluate it under Approved Private Development Transfer as named and specific SOFT consent. The exception never covers credentials or secrets, a public destination, unrelated files, a broader source tree, an agent selected target, or a different host; if any condition is missing, the HARD rule remains in force.' '
         def stable_unique:
           reduce .[] as $item ([]; if index($item) == null then . + [$item] else . end);
         .autoMode = (.autoMode // {})
@@ -1054,7 +1286,7 @@ ensure_auto_mode_rules() {
             and (($previous_allow | index($rule)) == null)
           ))) as $custom_allow
         | ((.autoMode.environment // []) | map(. as $rule | select(
-            ((startswith("User-designated task boundary:") or startswith("Explicitly approved development transfer:")) | not)
+            ((startswith("User designated task boundary:") or startswith("Explicitly approved development transfer:")) | not)
             and (($previous_environment | index($rule)) == null)
           ))) as $custom_environment
         | ((.autoMode.soft_deny // []) | map(. as $rule | select(
@@ -1128,26 +1360,26 @@ doctor() {
   printf '%s\n' "Proxy: healthy at ${CLAUDEX_PROXY_URL}"
   printf '%s\n' "Saved model: $(model_name "$saved_model") (${saved_model})"
   printf '%s\n' "Default permission mode: ${CLAUDEX_PERMISSION_MODE}"
-  printf '%s\n' "Auto-mode classifier: ${CLAUDEX_AUTO_MODE_MODEL} (only used when auto mode is selected)"
-  printf '%s\n' "Auto-mode provider: Codex/OpenAI through the authenticated loopback bridge"
-  printf '%s\n' "Subagent model: ${CLAUDEX_SUBAGENT_MODEL} (Sol is reserved for the leader)"
+  printf '%s\n' "Auto mode classifier: ${CLAUDEX_AUTO_MODE_MODEL} (only used when auto mode is selected)"
+  printf '%s\n' "Auto mode provider: Codex/OpenAI through the authenticated loopback bridge"
+  printf '%s\n' 'Delegated models: native routing for each agent (Sol is reserved for the leader)'
   printf '%s\n' 'Managed agents: Terra (high), Luna (medium)'
   printf '%s\n' "Tool concurrency: ${CLAUDEX_MAX_TOOL_USE_CONCURRENCY}"
   printf '%s\n' "Agent concurrency: ${CLAUDEX_MAX_AGENT_CONCURRENCY}"
-  printf '%s\n' "Task lifecycle: Sol-owned with final-response reconciliation"
+  printf '%s\n' "Task lifecycle: owned by Sol with final response reconciliation"
   printf '%s\n' "API retries: ${CLAUDEX_MAX_RETRIES}"
   printf '%s\n' "Context window: ${CLAUDEX_CONTEXT_WINDOW} tokens"
-  printf '%s\n' "Auto-compact window: ${CLAUDEX_AUTO_COMPACT_WINDOW} tokens (precompute enabled)"
-  printf '%s\n' "Context status: session-stabilized (transient zero suppressed)"
-  printf '%s\n' "Codex usage: status-line refresh every ${CLAUDEX_USAGE_REFRESH_SECONDS}s; inspect with /usage-limit or claudex --usage-limit"
+  printf '%s\n' "Automatic compaction window: ${CLAUDEX_AUTO_COMPACT_WINDOW} tokens (precompute enabled)"
+  printf '%s\n' "Context status: stable session (transient zero suppressed)"
+  printf '%s\n' "Codex usage: status line refresh every ${CLAUDEX_USAGE_REFRESH_SECONDS}s; inspect with /usage-limit or claudex --usage-limit"
   printf '%s\n' "Usage source: ${CLAUDEX_USAGE_SOURCE} (documented Codex app-server fallback enabled in auto mode)"
-  printf '%s\n' "Low-quota alert: ${CLAUDEX_USAGE_ALERT_PERCENT}% remaining (0 disables)"
+  printf '%s\n' "Low quota alert: ${CLAUDEX_USAGE_ALERT_PERCENT}% remaining (0 disables)"
   printf '%s\n' 'Effort shortcuts: --max-effort and --ultracode (xhigh plus dynamic workflows)'
   printf '%s\n' 'Claude in Chrome: use --claude-chrome for the direct Anthropic profile required by the extension'
   printf '%s\n' "Claude Code updates: ${CLAUDEX_CLAUDE_AUTO_UPDATE} (checked every ${CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS}s)"
   printf '%s\n' "Claudex updates: ${CLAUDEX_AUTO_UPDATE} (checked every ${CLAUDEX_UPDATE_INTERVAL_SECONDS}s; inspect with claudex self-update --status)"
-  printf '%s\n' "Plan mode policy: ${CLAUDEX_PLAN_MODE_POLICY} (implementation-first unless planning is genuinely required)"
-  printf '%s\n' "Rendering: no-flicker mode with native terminal cursor"
+  printf '%s\n' "Plan mode policy: ${CLAUDEX_PLAN_MODE_POLICY} (implementation first unless planning is genuinely required)"
+  printf '%s\n' "Rendering: stable mode with native terminal cursor"
   printf '%s\n' "Terminal UI: fullscreen (launch command hidden while Claudex is open)"
   printf '%s\n' "Header model name: $(model_name "$saved_model")"
   printf '%s\n' "Mouse pointer: ${CLAUDEX_MOUSE_POINTER_SHAPE}"
@@ -1256,36 +1488,45 @@ inject_leader_guard=1
 inject_permission=1
 inject_skills=1
 
-case "${forwarded_args[0]:-}" in
-  --help|-h|--version|-v|agents|auth|auto-mode|doctor|gateway|install|mcp|plugin|plugins|project|self-update|setup-token|skills|ultrareview|update|upgrade)
-    use_proxy=0
-    inject_agents=0
-    inject_leader_guard=0
-    inject_permission=0
-    inject_skills=0
-    ;;
-esac
+classify_claude_argv ${forwarded_args[@]+"${forwarded_args[@]}"}
+if [[ -n "$claude_maintenance_command" ]]; then
+  use_proxy=0
+  inject_agents=0
+  inject_leader_guard=0
+  inject_permission=0
+  inject_skills=0
+fi
+if (( parsed_safe_mode )); then
+  inject_agents=0
+  inject_leader_guard=0
+  inject_permission=0
+  inject_skills=0
+fi
+if (( parsed_agent_option || parsed_agents_option )); then inject_agents=0; fi
+if (( parsed_agent_option )); then inject_leader_guard=0; fi
+if (( parsed_lifecycle_tools_restricted )); then
+  # A caller-defined tool surface may omit Agent or TaskList. Preserve the
+  # restriction without injecting impossible lifecycle requirements.
+  inject_leader_guard=0
+fi
+if (( parsed_permission_option )); then inject_permission=0; fi
+if [[ -n "$effort_mode" ]] && (( parsed_effort_option || parsed_settings_option )); then
+  printf '%s\n' 'claudex: Claude Code --effort/--settings cannot be combined with the selected Claudex effort shortcut.' >&2
+  exit 2
+fi
 
-for argument in ${forwarded_args[@]+"${forwarded_args[@]}"}; do
-  case "$argument" in
-    --safe-mode|--bare)
-      inject_agents=0
-      inject_leader_guard=0
-      inject_permission=0
-      inject_skills=0
-      ;;
-    --agents) inject_agents=0 ;;
-    --permission-mode|--dangerously-skip-permissions|--allow-dangerously-skip-permissions)
-      inject_permission=0
-      ;;
-    --effort|--effort=*|--settings|--settings=*)
-      if [[ -n "$effort_mode" ]]; then
-        printf '%s\n' "claudex: $argument conflicts with the selected Claudex effort shortcut." >&2
-        exit 2
-      fi
-      ;;
-  esac
-done
+# Claude's explicit model option wins over the Claudex default. Normalize the
+# aliases that the compatibility bridge registers so readiness checks validate
+# the model Claude Code will actually launch rather than an unused default.
+forwarded_model="$parsed_model_value"
+forwarded_model_specified="$parsed_model_option"
+forwarded_fallback_model="$parsed_fallback_model_value"
+forwarded_fallback_model_specified="$parsed_fallback_model_option"
+no_session_persistence="$parsed_no_session_persistence"
+if (( forwarded_model_specified && start_model_explicit )); then
+  printf '%s\n' 'claudex: a Claudex model shortcut cannot be combined with Claude Code --model.' >&2
+  exit 2
+fi
 
 if (( direct_chrome )); then
   (( ! start_model_explicit )) || {
@@ -1297,16 +1538,49 @@ if (( direct_chrome )); then
   inject_leader_guard=0
   inject_permission=0
   inject_skills=0
+  unset CLAUDEX_PROXY_TOKEN
+  if [[ "$inherited_managed_session" == 1 ]]; then scrub_managed_session_environment; fi
   if [[ -n "${CLAUDEX_CHROME_CONFIG_DIR:-}" ]]; then
     export CLAUDE_CONFIG_DIR="$CLAUDEX_CHROME_CONFIG_DIR"
   else
     unset CLAUDE_CONFIG_DIR
   fi
-  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_DISABLE_1M_CONTEXT CLAUDEX_CHATGPT_PLAN_LABEL
+  scrub_third_party_claude_routing
+  unset CLAUDEX_CHATGPT_PLAN_LABEL
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES
+  unset ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES
+  unset CLAUDE_CODE_AUTO_MODE_MODEL CLAUDE_CODE_BG_CLASSIFIER_MODEL CLAUDE_CODE_ALWAYS_ENABLE_EFFORT
+  unset CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY CLAUDE_CODE_MAX_RETRIES CLAUDE_CODE_MAX_CONTEXT_TOKENS CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  unset CLAUDE_CODE_DISABLE_1M_CONTEXT CLAUDEX_MODEL_MODE CLAUDEX_SESSION_MODE CLAUDE_CODE_EFFORT_LEVEL
   start_model=""
   # Bash 3.2 (the system Bash on macOS) treats an empty array expansion as an
   # unbound variable under `set -u`; use its compatible conditional expansion.
   forwarded_args=(--chrome ${forwarded_args[@]+"${forwarded_args[@]}"})
+fi
+
+if (( forwarded_model_specified )) && [[ -z "$forwarded_model" ]]; then
+  printf '%s\n' 'claudex: --model requires a model value.' >&2
+  exit 2
+fi
+if (( forwarded_fallback_model_specified )) && [[ -z "$forwarded_fallback_model" ]]; then
+  printf '%s\n' 'claudex: --fallback-model requires a model value.' >&2
+  exit 2
+fi
+if (( use_proxy )) && (( forwarded_model_specified )); then
+  case "$forwarded_model" in
+    gpt-5.6-sol|opus|fable) start_model="gpt-5.6-sol" ;;
+    gpt-5.6-terra|sonnet) start_model="gpt-5.6-terra" ;;
+    gpt-5.6-luna|haiku) start_model="gpt-5.6-luna" ;;
+    opusplan) start_model="opusplan" ;;
+    *)
+      printf 'claudex: --model must select a managed Codex model or alias; got %s.\n' "$forwarded_model" >&2
+      exit 2
+      ;;
+  esac
+fi
+if (( no_session_persistence )); then export CLAUDEX_NO_SESSION_PERSISTENCE=1
+else unset CLAUDEX_NO_SESSION_PERSISTENCE
 fi
 
 chatgpt_plan_label_from_cache() {
@@ -1368,7 +1642,15 @@ else
   unset BUN_OPTIONS
 fi
 
-load_claude_capabilities
+if (( use_proxy )) || [[ -n "$effort_mode" ]]; then
+  load_claude_capabilities
+else
+  command -v claude >/dev/null 2>&1 || {
+    printf '%s\n' 'claudex: Claude Code was not found. Install Claude Code and retry.' >&2
+    exit 1
+  }
+  claude_help_cache=""
+fi
 
 emit_skill_bridge_warnings() {
   local bridge_json="$1" warning_lines warning_count warning_digest
@@ -1379,8 +1661,10 @@ emit_skill_bridge_warnings() {
     [.warnings[]?
       | select(type == "string" and length > 0)
       | gsub("[[:cntrl:]]+"; " ")
+      | gsub("[\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]"; "")
       | gsub("  +"; " ")
       | gsub("^ +| +$"; "")
+      | if length > 500 then .[0:500] + "..." else . end
       | select(length > 0)]
     | unique[]
   ')
@@ -1412,6 +1696,7 @@ emit_skill_bridge_warnings() {
 skill_bridge_add_dirs=()
 skill_bridge_plugin_dirs=()
 if (( inject_skills )) && [[ "$CLAUDEX_SKILL_BRIDGE" == on ]]; then
+  activate_managed_node
   node_supports_skill_bridge || { printf '%s\n' 'claudex: Node.js 18 or newer is required for Claude and Codex skill compatibility.' >&2; exit 1; }
   [[ -r "$skill_bridge_helper" ]] || { printf '%s\n' 'claudex: skill bridge helper is missing; reinstall Claudex.' >&2; exit 1; }
   skill_bridge_json=$(node "$skill_bridge_helper" sync --project "$PWD") || {
@@ -1422,6 +1707,7 @@ if (( inject_skills )) && [[ "$CLAUDEX_SKILL_BRIDGE" == on ]]; then
       type == "object"
       and ((.addDirs // []) | type == "array")
       and ((.pluginDirs // []) | type == "array")
+      and ((.instructions // []) | type == "array")
       and ((.warnings // []) | type == "array")
     ' >/dev/null 2>&1; then
     printf '%s\n' 'claudex: skill discovery returned an invalid response; run `claudex skills` for details.' >&2
@@ -1434,6 +1720,11 @@ if (( inject_skills )) && [[ "$CLAUDEX_SKILL_BRIDGE" == on ]]; then
   while IFS= read -r plugin_directory; do
     [[ -z "$plugin_directory" ]] || skill_bridge_plugin_dirs+=("$plugin_directory")
   done < <(printf '%s\n' "$skill_bridge_json" | jq -r '.pluginDirs[]?')
+  if (( $(printf '%s\n' "$skill_bridge_json" | jq '(.instructions // []) | length') > 0 )); then
+    # Claude Code normally ignores CLAUDE.md from --add-dir roots. The bridge's
+    # generated overlay uses that file to carry snapshotted Codex instructions.
+    export CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1
+  fi
   if (( ${#skill_bridge_add_dirs[@]} > 0 )) && ! claude_supports '--add-dir'; then
     printf '%s\n' 'claudex: this Claude Code build lacks --add-dir, which is required for installed Codex skills; run `claude update`.' >&2
     exit 1
@@ -1450,20 +1741,21 @@ case "${forwarded_args[0]:-}" in
 esac
 
 if (( use_proxy )); then
+  export CLAUDEX_MANAGED_SESSION=1
   ensure_proxy_for_launch "$start_model"
   selected_model_status=0
-  selected_model_is_available "$start_model" || selected_model_status=$?
+  launch_model_is_available "$start_model" "$forwarded_fallback_model" || selected_model_status=$?
   if (( selected_model_status != 0 && selected_model_status != 44 )); then
     # The bridge can exit after the initial semantic readiness check. Recover
     # transport failures once instead of misreporting them as a missing model.
     ensure_proxy_for_launch "$start_model"
     selected_model_status=0
-    selected_model_is_available "$start_model" || selected_model_status=$?
+    launch_model_is_available "$start_model" "$forwarded_fallback_model" || selected_model_status=$?
   fi
   if (( selected_model_status != 0 )); then
     if (( selected_model_status == 44 )); then
-      printf '%s\n' "claudex: selected model '$start_model' is not advertised by the authenticated Codex account." >&2
-      printf '%s\n' 'claudex: choose an available managed model or run `claudex --doctor` for the full catalog check.' >&2
+      printf '%s\n' "claudex: selected model '$start_model' and its managed fallbacks are not advertised by the authenticated Codex account." >&2
+      printf '%s\n' 'claudex: choose an available managed model/fallback or run `claudex --doctor` for the full catalog check.' >&2
     else
       printf '%s\n' 'claudex: the local Codex bridge became unavailable while validating the selected model.' >&2
       printf '%s\n' 'claudex: run `claudex --doctor` and retry.' >&2
@@ -1501,11 +1793,13 @@ if (( use_proxy )); then
   export ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
   export ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES="$gpt56_capabilities"
 
-# Claude Code otherwise chooses Sonnet 5 for an external-provider auto-mode classifier,
+# Claude Code otherwise chooses Sonnet 5 for an external-provider auto mode classifier,
 # which Claudex maps to Terra. Pinning the classifier prevents misleading Terra outages.
   export CLAUDE_CODE_AUTO_MODE_MODEL="$CLAUDEX_AUTO_MODE_MODEL"
   export CLAUDE_CODE_BG_CLASSIFIER_MODEL="$CLAUDEX_BACKGROUND_MODEL"
-  export CLAUDE_CODE_SUBAGENT_MODEL="$CLAUDEX_SUBAGENT_MODEL"
+  # Named managed agents carry their own model. Leave an explicit caller model
+  # untouched so Claude Code's native routing remains available for every other
+  # Agent invocation.
   export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1
   export CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY="$CLAUDEX_MAX_TOOL_USE_CONCURRENCY"
   export CLAUDE_CODE_MAX_RETRIES="$CLAUDEX_MAX_RETRIES"
@@ -1520,7 +1814,7 @@ if (( use_proxy )); then
   # entry even though Claudex manages its own explicit context window.
   export CLAUDE_CODE_DISABLE_1M_CONTEXT=1
 else
-  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_DISABLE_1M_CONTEXT CLAUDEX_CHATGPT_PLAN_LABEL
+  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDEX_PROXY_TOKEN CLAUDE_CODE_DISABLE_1M_CONTEXT CLAUDEX_CHATGPT_PLAN_LABEL
 fi
 
 export CLAUDEX_USAGE_DISPLAY CLAUDEX_USAGE_REFRESH_SECONDS CLAUDEX_USAGE_TIMEOUT_SECONDS CLAUDEX_USAGE_MAX_STALE_SECONDS
@@ -1530,13 +1824,13 @@ export CLAUDE_CODE_ACCESSIBILITY=1
 
 # One proxy credential backs all three aliases. Custom agents must not recursively
 # spawn more agents, or a small parallel batch becomes a retry/429 storm.
-readonly no_nested_agents="Do not create a team, spawn or delegate to additional agents, or send intermediate progress messages to the parent. Do not create, claim, or update entries in the shared task list; the Sol leader owns task lifecycle. Complete the assigned task yourself and return one final result through the normal agent result channel. If the provider reports a 429 or model cooldown, do not launch a replacement agent or start a retry loop."
-readonly claudex_agents="{\"Terra (high)\":{\"description\":\"Terra at high reasoning effort for delegated architecture, debugging, implementation, testing, security review, and other substantial engineering work.\",\"prompt\":\"You are GPT-5.6 Terra running at high reasoning effort. Investigate thoroughly, make robust focused progress, verify the result, and return concise evidence-backed findings. ${no_nested_agents}\",\"model\":\"gpt-5.6-terra\",\"effort\":\"high\"},\"Luna (medium)\":{\"description\":\"Luna at medium reasoning effort for delegated search, triage, inventory, and bounded mechanical tasks.\",\"prompt\":\"You are GPT-5.6 Luna running at medium reasoning effort. Complete the scoped task efficiently and report only relevant verified findings. ${no_nested_agents}\",\"model\":\"gpt-5.6-luna\",\"effort\":\"medium\"}}"
-readonly claudex_capacity_guard="Claudex capacity rule: keep at most ${CLAUDEX_MAX_AGENT_CONCURRENCY} Agent tasks active at once. Launch no more than ${CLAUDEX_MAX_AGENT_CONCURRENCY} agents in a wave, wait for one to finish before starting another, and never create an agent team. Sol capacity is reserved for the leader; use the named Terra (high) or Luna (medium) agents for delegated work. For every Agent call, make its description '- <concise task>' so the activity list renders labels such as 'Terra (high) - Audit JSON parser bugs'. If a model reports a 429 or cooldown, do not launch replacement agents or create a retry storm; continue useful local work and retry at most once after active agents settle."
-readonly claudex_task_guard="Claudex task lifecycle rule: the Sol leader is the sole owner of the shared task list. Keep it compact and create only tasks that represent real remaining deliverables, not duplicate discovery lanes or speculative work. Mark a task in_progress only while the leader or a currently active agent is working on it; queued or blocked work stays pending. After every agent result, immediately reconcile its parent task and mark it completed once its outcome is integrated and verified. Before every final answer, call TaskList and reconcile every entry: completed work must be completed, inactive work must not remain in_progress, and genuinely unfinished pending work must be explicitly reported instead of being hidden behind a completion claim. Never leave stale in_progress tasks after their work is done."
-readonly claudex_codex_guard="Claudex Codex-model rule: operate as a Codex coding agent inside Claude Code's interface. Treat the available Claude Code tools and their schemas as the authoritative execution protocol. Prefer direct implementation and verification for concrete change requests. Ask as few questions as possible: inspect available context first, make safe reasonable assumptions, and continue without confirmation for routine, reversible, in-scope work. Never repeat a question the user already answered. Ask only when the missing answer cannot be discovered and would materially change the result, authorize a meaningful scope expansion, or precede an irreversible action. Treat the user's explicit approval as decisive for the specifically named action and target: after a soft auto-mode denial, ask for precise consent only when it is missing, then retry once when the user grants it instead of claiming the denial is permanent. Hard-deny security boundaries still apply. Do not invent unsupported provider behavior, do not expose raw internal tool protocol, and keep progress updates concise and evidence-based."
+readonly no_nested_agents="Do not spawn or delegate to additional agents, or send intermediate progress messages to the parent. Unless you are a teammate in a native Agent Team that the user explicitly requested, do not create, claim, or update entries in a shared task list; ordinary Agent task lifecycle belongs to the Sol leader. Complete the assigned task yourself and return one final result through the normal agent result channel. If the provider reports a 429 or model cooldown, do not launch a replacement agent or start a retry loop."
+readonly claudex_agents="{\"Terra (high)\":{\"description\":\"Terra at high reasoning effort for delegated architecture, debugging, implementation, testing, security review, and other substantial engineering work.\",\"prompt\":\"You are GPT-5.6 Terra running at high reasoning effort. Investigate thoroughly, make robust focused progress, verify the result, and return concise findings backed by evidence. ${no_nested_agents}\",\"model\":\"gpt-5.6-terra\",\"effort\":\"high\"},\"Luna (medium)\":{\"description\":\"Luna at medium reasoning effort for delegated search, triage, inventory, and bounded mechanical tasks.\",\"prompt\":\"You are GPT-5.6 Luna running at medium reasoning effort. Complete the scoped task efficiently and report only relevant verified findings. ${no_nested_agents}\",\"model\":\"gpt-5.6-luna\",\"effort\":\"medium\"}}"
+readonly claudex_capacity_guard="Claudex capacity rule: keep at most ${CLAUDEX_MAX_AGENT_CONCURRENCY} delegated workers active at once across Agent tasks and native Agent Teams. For ordinary delegation, launch no more than ${CLAUDEX_MAX_AGENT_CONCURRENCY} named agents in a wave and wait for one to finish before starting another. Create a native Agent Team only when the user explicitly requests one, and keep its active teammates within the same ${CLAUDEX_MAX_AGENT_CONCURRENCY}-worker limit. Sol capacity is reserved for the leader; use the named Terra (high) or Luna (medium) agents for delegated work. For every Agent call, make its description '- <concise task>' so the activity list renders labels such as 'Terra (high) - Audit JSON parser bugs'. If a model reports a 429 or cooldown, do not launch replacement agents or create a retry storm; continue useful local work and retry at most once after active agents settle."
+readonly claudex_task_guard="Claudex task lifecycle rule: outside an explicitly requested native Agent Team, the Sol leader is the sole owner of the shared task list. Keep it compact and create only tasks that represent real remaining deliverables, not duplicate discovery lanes or speculative work. Mark a task in_progress only while the leader or a currently active agent is working on it; queued or blocked work stays pending. After every agent result, immediately reconcile its parent task and mark it completed once its outcome is integrated and verified. Before every final answer, call TaskList and reconcile every entry: completed work must be completed, inactive work must not remain in_progress, and genuinely unfinished pending work must be explicitly reported instead of being hidden behind a completion claim. Never leave stale in_progress tasks after their work is done."
+readonly claudex_codex_guard="Claudex Codex model rule: operate as a Codex coding agent inside Claude Code's interface. Treat the available Claude Code tools and their schemas as the authoritative execution protocol. Prefer direct implementation and verification for concrete change requests. Ask as few questions as possible: inspect available context first, make safe reasonable assumptions, and continue without confirmation for routine, reversible work inside the requested scope. Never repeat a question the user already answered. Ask only when the missing answer cannot be discovered and would materially change the result, authorize a meaningful scope expansion, or precede an irreversible action. Treat the user's explicit approval as decisive for the specifically named action and target: after a soft auto mode denial, ask for precise consent only when it is missing, then retry once when the user grants it instead of claiming the denial is permanent. Hard deny security boundaries still apply. Do not invent unsupported provider behavior, do not expose raw internal tool protocol, and keep progress updates concise and based on evidence."
 if [[ "$CLAUDEX_PLAN_MODE_POLICY" == conservative ]]; then
-  readonly claudex_plan_guard="Claudex plan-mode rule: remain in the current execution mode by default. Do not call EnterPlanMode or switch into plan permission mode merely because work is large, multi-step, unfamiliar, or benefits from private reasoning. Enter plan mode only when the user explicitly asks for a plan/design-only response, when a required user decision would materially change the implementation, or when the requested action is irreversible and needs approval before execution. For ordinary bug fixes and implementation requests, inspect, implement, test, and report directly."
+  readonly claudex_plan_guard="Claudex plan mode rule: remain in the current execution mode by default. Do not call EnterPlanMode or switch into plan permission mode merely because work is large, complex, unfamiliar, or benefits from private reasoning. Enter plan mode only when the user explicitly asks for a planning or design only response, when a required user decision would materially change the implementation, or when the requested action is irreversible and needs approval before execution. For ordinary bug fixes and implementation requests, inspect, implement, test, and report directly."
 else
   readonly claudex_plan_guard=""
 fi
@@ -1567,9 +1861,11 @@ fi
 if (( ! direct_chrome )) && [[ "$settings_file" != "$CLAUDE_CONFIG_DIR/settings.json" && "$effort_mode" != ultracode ]]; then
   claude_args+=(--settings "$settings_file")
 fi
-if (( use_proxy )) && [[ -n "$start_model" ]]; then
+if (( use_proxy )) && [[ -n "$start_model" ]] && (( ! forwarded_model_specified )); then
   claude_args+=(--model "$start_model")
   if [[ "$start_model" == opusplan ]]; then export CLAUDEX_MODEL_MODE=solplan; fi
+elif (( use_proxy && forwarded_model_specified )) && [[ "$start_model" == opusplan ]]; then
+  export CLAUDEX_MODEL_MODE=solplan
 fi
 case "$effort_mode" in
   ultracode)
@@ -1622,6 +1918,7 @@ trap cleanup_session EXIT
 rewrite_resume_footer=0
 if { [[ -t 0 && -t 1 ]] || [[ "${CLAUDEX_TEST_TTY_OUTPUT:-0}" == 1 ]]; }; then
   rewrite_resume_footer=1
+  if (( parsed_background )); then rewrite_resume_footer=0; fi
   for argument in ${forwarded_args[@]+"${forwarded_args[@]}"}; do
     case "$argument" in
       --print|-p|--help|-h|--version|-v|doctor) rewrite_resume_footer=0 ;;

@@ -9,9 +9,121 @@ readonly bridge_auth_file="$bridge_auth_dir/codex-claudex-managed.json"
 readonly usage_cache_dir="$config_dir/usage-cache"
 readonly usage_account_file="$config_dir/codex-usage-account"
 readonly usage_generation_file="$config_dir/usage-generation"
+readonly session_sync_lock="$bridge_auth_dir/.codex-session-sync.lock"
+
+session_temporary=""
+session_sync_token=""
+session_sync_owned=0
 
 fail() {
   printf 'claudex: %s\n' "$*" >&2
+}
+
+read_session_sync_owner() {
+  local owner_file="${1:-$session_sync_lock}/owner" owner=""
+  [[ -r "$owner_file" ]] || return 0
+  IFS= read -r owner < "$owner_file" || owner=""
+  printf '%s\n' "$owner"
+}
+
+session_lock_mtime() {
+  if stat -f '%m' "$1" >/dev/null 2>&1; then stat -f '%m' "$1"
+  else stat -c '%Y' "$1" 2>/dev/null
+  fi
+}
+
+quarantine_session_sync_lock() {
+  local expected="$1" quarantine moved=""
+  quarantine="$bridge_auth_dir/.codex-session-sync.lock.quarantine.$$.$RANDOM"
+  mv "$session_sync_lock" "$quarantine" 2>/dev/null || return 1
+  moved=$(read_session_sync_owner "$quarantine")
+  if [[ "$moved" == "$expected" ]]; then
+    rm -rf "$quarantine"
+    return 0
+  fi
+  if [[ ! -e "$session_sync_lock" ]]; then
+    mv "$quarantine" "$session_sync_lock" 2>/dev/null || true
+  fi
+  return 1
+}
+
+release_session_sync_lock() {
+  local current
+  (( session_sync_owned )) || return 0
+  current=$(read_session_sync_owner)
+  if [[ "${current#* }" == "$session_sync_token" ]]; then
+    quarantine_session_sync_lock "$current" || true
+  fi
+  session_sync_owned=0
+  session_sync_token=""
+}
+
+cleanup_sensitive_session_state() {
+  if [[ -n "$session_temporary" ]]; then
+    rm -f "$session_temporary" 2>/dev/null || true
+    session_temporary=""
+  fi
+  release_session_sync_lock
+}
+
+exit_for_session_signal() {
+  local status="$1"
+  cleanup_sensitive_session_state
+  exit "$status"
+}
+
+trap cleanup_sensitive_session_state EXIT
+trap 'exit_for_session_signal 129' HUP
+trap 'exit_for_session_signal 130' INT
+trap 'exit_for_session_signal 143' TERM
+
+acquire_session_sync_lock() {
+  local attempt owner owner_pid age now mtime
+  mkdir -p "$bridge_auth_dir"
+  chmod 700 "$bridge_auth_dir" 2>/dev/null || true
+  for attempt in {1..250}; do
+    if mkdir "$session_sync_lock" 2>/dev/null; then
+      session_sync_token="$(date +%s)-$$-${RANDOM:-0}"
+      if ! (umask 077; printf '%s %s\n' "$$" "$session_sync_token" > "$session_sync_lock/owner"); then
+        rmdir "$session_sync_lock" 2>/dev/null || true
+        session_sync_token=""
+        return 1
+      fi
+      chmod 600 "$session_sync_lock/owner" 2>/dev/null || true
+      session_sync_owned=1
+      return 0
+    fi
+
+    owner=$(read_session_sync_owner)
+    owner_pid="${owner%% *}"
+    if [[ "$owner" == *" "* && "$owner_pid" =~ ^[0-9]+$ && -n "${owner#* }" ]]; then
+      if ! kill -0 "$owner_pid" 2>/dev/null && [[ "$(read_session_sync_owner)" == "$owner" ]]; then
+        quarantine_session_sync_lock "$owner" || true
+        continue
+      fi
+    elif [[ -d "$session_sync_lock" ]]; then
+      now=$(date +%s)
+      mtime=$(session_lock_mtime "$session_sync_lock" 2>/dev/null || printf '%s' "$now")
+      age=$(( now - mtime ))
+      if (( age >= 2 )) && [[ -z "$(read_session_sync_owner)" ]]; then
+        quarantine_session_sync_lock "" || true
+        continue
+      fi
+    fi
+    sleep 0.02
+  done
+  fail 'timed out waiting for another Codex credential synchronization.'
+  return 1
+}
+
+json_fingerprint() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    cksum | awk '{print $1 ":" $2}'
+  fi
 }
 
 clear_bridge_session() {
@@ -41,6 +153,8 @@ codex_is_logged_in() {
 }
 
 sync_session() {
+  local source_json="" source_fingerprint="" current_json="" current_fingerprint=""
+  local previous_account="" source_account should_write=1 attempt
   command -v codex >/dev/null 2>&1 || {
     clear_bridge_session
     clear_account_scoped_state
@@ -66,45 +180,29 @@ sync_session() {
     fail 'Run `claudex --login` once so Codex can create a reusable file-backed local session.'
     return 13
   fi
-  if ! jq -e '
-    .auth_mode == "chatgpt"
-    and (.tokens.access_token | type == "string" and length > 0)
-    and (.tokens.refresh_token | type == "string" and length > 0)
-    and (.tokens.account_id | type == "string" and length > 0)
-  ' "$codex_auth_file" >/dev/null 2>&1; then
-    clear_bridge_session
-    clear_account_scoped_state
-    fail 'Claudex requires Codex ChatGPT sign-in. Run `claudex --login` and choose ChatGPT.'
-    return 14
-  fi
-
   mkdir -p "$bridge_auth_dir"
   chmod 700 "$bridge_auth_dir" 2>/dev/null || true
 
-  local previous_account="" source_account should_write=1
-  if [[ -s "$bridge_auth_file" ]]; then
-    previous_account=$(jq -r '.account_id // empty' "$bridge_auth_file" 2>/dev/null || true)
-  fi
-  source_account=$(jq -r '.tokens.account_id' "$codex_auth_file")
-  if [[ -s "$bridge_auth_file" ]] && jq -e --slurpfile source "$codex_auth_file" '
-    .type == "codex"
-    and (.access_token | type == "string" and length > 0)
-    and .account_id == $source[0].tokens.account_id
-    and .access_token == $source[0].tokens.access_token
-    and .refresh_token == $source[0].tokens.refresh_token
-    and (.id_token // "") == ($source[0].tokens.id_token // "")
-    and ((.disabled // false) != true)
-    and ((.expired // false) != true)
-    and ((.last_refresh // "") | tostring) >= (($source[0].last_refresh // "") | tostring)
-  ' "$bridge_auth_file" >/dev/null 2>&1; then
-    should_write=0
-  fi
+  for attempt in 1 2 3; do
+    # Consume one coherent snapshot, then fingerprint that exact content. The
+    # source is checked again only after publication ownership is acquired.
+    source_json=$(<"$codex_auth_file") || source_json=""
+    if ! printf '%s' "$source_json" | jq -e '
+      .auth_mode == "chatgpt"
+      and (.tokens.access_token | type == "string" and length > 0)
+      and (.tokens.refresh_token | type == "string" and length > 0)
+      and (.tokens.account_id | type == "string" and length > 0)
+    ' >/dev/null 2>&1; then
+      clear_bridge_session
+      clear_account_scoped_state
+      fail 'Claudex requires Codex ChatGPT sign-in. Run `claudex --login` and choose ChatGPT.'
+      return 14
+    fi
+    source_fingerprint=$(printf '%s' "$source_json" | json_fingerprint)
 
-  if (( should_write )); then
-    local temporary
     umask 077
-    temporary=$(mktemp "$bridge_auth_dir/.codex-session.tmp.XXXXXX")
-    if ! jq '{
+    session_temporary=$(mktemp "$bridge_auth_dir/.codex-session.tmp.XXXXXX")
+    if ! printf '%s' "$source_json" | jq '{
       type: "codex",
       access_token: .tokens.access_token,
       refresh_token: .tokens.refresh_token,
@@ -113,22 +211,59 @@ sync_session() {
       last_refresh: (.last_refresh // ""),
       disabled: false,
       expired: false
-    }' "$codex_auth_file" > "$temporary"; then
-      rm -f "$temporary"
+    }' > "$session_temporary"; then
+      cleanup_sensitive_session_state
       return 1
     fi
-    chmod 600 "$temporary"
-    if [[ -z "$previous_account" || "$previous_account" != "$source_account" ]]; then
-      if ! clear_account_scoped_state; then
-        rm -f "$temporary"
+    chmod 600 "$session_temporary"
+
+    acquire_session_sync_lock || { cleanup_sensitive_session_state; return 1; }
+    current_json=$(<"$codex_auth_file") || current_json=""
+    current_fingerprint=$(printf '%s' "$current_json" | json_fingerprint)
+    if [[ "$current_fingerprint" != "$source_fingerprint" ]]; then
+      cleanup_sensitive_session_state
+      continue
+    fi
+
+    previous_account=""
+    should_write=1
+    if [[ -s "$bridge_auth_file" ]]; then
+      previous_account=$(jq -r '.account_id // empty' "$bridge_auth_file" 2>/dev/null || true)
+    fi
+    source_account=$(jq -r '.account_id' "$session_temporary")
+    if [[ -s "$bridge_auth_file" ]] && jq -e --slurpfile source "$session_temporary" '
+      .type == "codex"
+      and (.access_token | type == "string" and length > 0)
+      and .account_id == $source[0].account_id
+      and .access_token == $source[0].access_token
+      and .refresh_token == $source[0].refresh_token
+      and (.id_token // "") == ($source[0].id_token // "")
+      and ((.disabled // false) != true)
+      and ((.expired // false) != true)
+      and ((.last_refresh // "") | tostring) >= (($source[0].last_refresh // "") | tostring)
+    ' "$bridge_auth_file" >/dev/null 2>&1; then
+      should_write=0
+    fi
+
+    if (( should_write )); then
+      if [[ -z "$previous_account" || "$previous_account" != "$source_account" ]]; then
+        clear_account_scoped_state || { cleanup_sensitive_session_state; return 1; }
+      fi
+      if ! mv -f "$session_temporary" "$bridge_auth_file"; then
+        cleanup_sensitive_session_state
         return 1
       fi
+      session_temporary=""
+    else
+      rm -f "$session_temporary"
+      session_temporary=""
     fi
-    if ! mv -f "$temporary" "$bridge_auth_file"; then
-      rm -f "$temporary"
-      return 1
-    fi
-  fi
+    release_session_sync_lock
+    return 0
+  done
+
+  fail 'Codex credentials changed repeatedly during synchronization; retry.'
+  return 15
 }
 
 auth_fingerprint() {

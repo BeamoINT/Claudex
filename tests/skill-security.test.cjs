@@ -135,22 +135,32 @@ function testSensitiveFilesAndPrivateKeys() {
   const envSkill = path.join(fixture.home, '.agents', 'skills', 'contains-env');
   const keySkill = path.join(fixture.home, '.agents', 'skills', 'contains-key');
   const lateKeySkill = path.join(fixture.home, '.agents', 'skills', 'contains-late-key');
+  const gitCredentialSkill = path.join(fixture.home, '.agents', 'skills', 'contains-git-credentials');
+  const cliCredentialSkill = path.join(fixture.home, '.agents', 'skills', 'contains-cli-credentials');
   createSkill(envSkill, 'contains-env');
   write(path.join(envSkill, '.env'), 'SECRET_VALUE=do-not-copy\n');
   createSkill(keySkill, 'contains-key');
   write(path.join(keySkill, 'references', 'identity.txt'), '-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n');
   createSkill(lateKeySkill, 'contains-late-key');
   write(path.join(lateKeySkill, 'references', 'late-identity.txt'), `${'x'.repeat(1024 * 1024 + 1)}\n-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n`);
+  createSkill(gitCredentialSkill, 'contains-git-credentials');
+  write(path.join(gitCredentialSkill, '.git-credentials'), 'https://user:secret@example.invalid\n');
+  createSkill(cliCredentialSkill, 'contains-cli-credentials');
+  write(path.join(cliCredentialSkill, '.config', 'gh', 'hosts.yml'), 'github.com:\n  oauth_token: secret\n');
   createSkill(path.join(fixture.home, '.agents', 'skills', 'safe-sensitive-control'), 'safe-sensitive-control');
 
   const result = invoke(fixture.environment, fixture.project);
   const names = aliases(result);
   assert(names.has('safe-sensitive-control'));
   assert(!names.has('contains-env'), 'skills containing environment files must be rejected');
-  assert(!names.has('contains-key'), 'skills containing private-key material must be rejected');
-  assert(!names.has('contains-late-key'), 'private-key material after the first MiB must still be rejected');
+  assert(!names.has('contains-key'), 'skills containing material that resembles a private key must be rejected');
+  assert(!names.has('contains-late-key'), 'private key material after the first MiB must still be rejected');
+  assert(!names.has('contains-git-credentials'), '.git-credentials must never be copied into a snapshot');
+  assert(!names.has('contains-cli-credentials'), 'CLI credential stores must never be copied into a snapshot');
   assert(warningIncludes(result, 'skill tree contains a sensitive file: .env'));
-  assert(warningIncludes(result, 'skill tree contains private-key material: references'));
+  assert(warningIncludes(result, 'skill tree contains a sensitive file: .git-credentials'));
+  assert(warningIncludes(result, 'skill tree contains a sensitive file: .config'));
+  assert(warningIncludes(result, 'skill tree contains material that resembles a private key: references'));
   assert(!result.warnings.join('\n').includes('do-not-copy'), 'warnings must not disclose rejected secret contents');
 }
 
@@ -159,12 +169,78 @@ function testCorruptGenerationSelfHealing() {
   createSkill(path.join(fixture.home, '.agents', 'skills', 'self-healing'), 'self-healing');
   const first = invoke(fixture.environment, fixture.project);
   const published = path.join(first.overlay, '.claude', 'skills', 'self-healing', 'SKILL.md');
-  fs.unlinkSync(published);
+  write(published, '---\nname: self-healing\ndescription: tampered\n---\n\nTAMPERED_CACHE_CONTENT\n');
 
   const repaired = invoke(fixture.environment, fixture.project);
   assert.strictEqual(repaired.overlay, first.overlay, 'content-addressed repair should restore the expected generation path');
-  assert(fs.existsSync(published), 'a structurally incomplete generation must be rebuilt before reuse');
+  assert(!fs.readFileSync(published, 'utf8').includes('TAMPERED_CACHE_CONTENT'),
+    'cache content tampering must be detected and rebuilt before reuse');
   assert(aliases(repaired).has('self-healing'));
+}
+
+function testPluginInternalSymlinkAndManagedSideloadPolicy() {
+  const fixture = setup('plugin-symlink-policy');
+  const plugin = path.join(fixture.codexHome, 'plugins', 'cache', 'market', 'linked-plugin', '1.0.0');
+  write(path.join(plugin, '.codex-plugin', 'plugin.json'), '{"name":"linked-plugin","skills":["skills"]}\n');
+  createSkill(path.join(plugin, 'skills', 'linked-task'), 'linked-task', 'Read assets/shared/info.txt.');
+  write(path.join(plugin, 'shared', 'info.txt'), 'PLUGIN_INTERNAL_SYMLINK_MARKER\n');
+  if (!directorySymlink(path.join(plugin, 'shared'), path.join(plugin, 'skills', 'linked-task', 'assets', 'shared'))) {
+    skipped.push('plugin internal symlink (symlinks unavailable)');
+    return;
+  }
+  write(fixture.inventory, JSON.stringify({ installed: [{
+    pluginId: 'linked-plugin@market', name: 'linked-plugin', marketplaceName: 'market',
+    version: '1.0.0', installed: true, enabled: true,
+  }] }));
+  const bridged = invoke(fixture.environment, fixture.project);
+  const linked = bridged.pluginDirs.find((directory) => fs.existsSync(path.join(directory, 'skills', 'linked-task', 'SKILL.md')));
+  assert(linked, 'a plugin skill with an internal plugin-bounded symlink was not imported');
+  assert.strictEqual(fs.readFileSync(path.join(linked, 'skills', 'linked-task', 'assets', 'shared', 'info.txt'), 'utf8'),
+    'PLUGIN_INTERNAL_SYMLINK_MARKER\n');
+
+  const managed = path.join(fixture.root, 'managed-settings.json');
+  write(managed, '{"disableSideloadFlags":false}\n');
+  write(path.join(fixture.root, 'managed-settings.d', '99-lockdown.json'), '{"disableSideloadFlags":true}\n');
+  createSkill(path.join(fixture.home, '.agents', 'skills', 'standalone-control'), 'standalone-control');
+  const restricted = invoke({ ...fixture.environment, CLAUDEX_CLAUDE_MANAGED_SETTINGS_FILE: managed }, fixture.project);
+  assert.deepStrictEqual(restricted.pluginDirs, [], 'managed disableSideloadFlags must emit no generated --plugin-dir values');
+  assert(aliases(restricted).has('standalone-control'), 'standalone --add-dir skill compatibility should remain available');
+  assert(!aliases(restricted).has('linked-plugin:linked-task'));
+  assert(warningIncludes(restricted, 'disable --plugin-dir sideloading'));
+}
+
+function testCodexConfigTrustAndReenablePrecedence() {
+  const fixture = setup('codex-config-trust');
+  const skillRoot = path.join(fixture.repo, '.agents', 'skills', 'reenabled');
+  createSkill(skillRoot, 'reenabled');
+  write(path.join(fixture.codexHome, 'config.toml'), [
+    '[["skills"."config"]]',
+    `"path" = ${JSON.stringify(skillRoot)}`,
+    '"enabled" = false',
+    '',
+  ].join('\n'));
+  write(path.join(fixture.repo, '.codex', 'config.toml'), [
+    '[[skills.config]]',
+    `path = ${JSON.stringify(skillRoot)}`,
+    'enabled = true',
+    '',
+  ].join('\n'));
+  assert(aliases(invoke(fixture.environment, fixture.project)).has('reenabled'),
+    'the closest enabled=true entry must re-enable a lower-precedence disabled skill');
+
+  write(path.join(fixture.codexHome, 'config.toml'), [
+    `[projects.${JSON.stringify(fixture.repo)}]`,
+    'trust_level = "untrusted"',
+    '',
+  ].join('\n'));
+  write(path.join(fixture.repo, '.codex', 'config.toml'), [
+    '[[skills.config]]',
+    `path = ${JSON.stringify(skillRoot)}`,
+    'enabled = false',
+    '',
+  ].join('\n'));
+  assert(aliases(invoke(fixture.environment, fixture.project)).has('reenabled'),
+    'untrusted project .codex/config.toml must not affect bridge policy');
 }
 
 function testPolicyAwareCacheAndFallback() {
@@ -259,19 +335,46 @@ function testSpecialFileHandling() {
 function testMalformedPluginInventories() {
   const fixture = setup('malformed-inventories');
   createSkill(path.join(fixture.home, '.agents', 'skills', 'inventory-control'), 'inventory-control');
+  const malformedClaudePlugin = path.join(fixture.claudeHome, 'plugins', 'cache', 'market', 'bad-manifest', '1.0.0');
+  write(path.join(malformedClaudePlugin, '.claude-plugin', 'plugin.json'), '{ invalid json');
+  createSkill(path.join(malformedClaudePlugin, 'skills', 'must-not-load'), 'must-not-load');
+  const malformedCodexPlugin = path.join(fixture.codexHome, 'plugins', 'cache', 'market', 'bad-codex-manifest', '1.0.0');
+  write(path.join(malformedCodexPlugin, '.codex-plugin', 'plugin.json'), '[]\n');
+  createSkill(path.join(malformedCodexPlugin, 'skills', 'must-not-load-codex'), 'must-not-load-codex');
+  const bidiPlugin = path.join(fixture.claudeHome, 'plugins', 'cache', 'market', 'bidi-plugin', '1.0.0');
+  write(path.join(bidiPlugin, '.claude-plugin', 'plugin.json'), JSON.stringify({
+    name: 'bidi-plugin', skills: './\u202e/../../outside',
+  }));
   write(path.join(fixture.claudeHome, 'plugins', 'installed_plugins.json'), JSON.stringify({
     version: 2,
     plugins: {
       'broken@market': [null, 7, 'not-an-install'],
       'not-a-list@market': { installPath: fixture.root },
+      'bad-manifest@market': [{ scope: 'user', installPath: malformedClaudePlugin }],
+      'bidi-plugin@market': [{ scope: 'user', installPath: bidiPlugin }],
     },
   }));
-  write(fixture.inventory, JSON.stringify([null, 4, 'not-a-plugin', { enabled: false }]));
+  write(fixture.inventory, JSON.stringify([
+    null, 4, 'not-a-plugin', { enabled: false },
+    {
+      pluginId: 'bad-codex-manifest@market', name: 'bad-codex-manifest', marketplaceName: 'market',
+      version: '1.0.0', installed: true, enabled: true,
+    },
+  ]));
 
   const result = invoke(fixture.environment, fixture.project);
   assert(aliases(result).has('inventory-control'), 'malformed plugin records must not prevent standalone skill discovery');
-  assert(result.warnings.filter((warning) => warning.includes('Ignored malformed Claude plugin record')).length >= 3);
-  assert(result.warnings.filter((warning) => warning.includes('Ignored malformed Codex plugin record')).length >= 3);
+  assert(!aliases(result).has('bad-manifest:must-not-load'),
+    'a malformed Claude plugin manifest must not fall back to default skill roots');
+  assert(!aliases(result).has('bad-codex-manifest:must-not-load-codex'),
+    'a malformed Codex plugin manifest must not fall back to default skill roots');
+  assert.strictEqual(result.warnings.filter((warning) => warning.includes('Ignored malformed Claude plugin record')).length, 1,
+    'repeated Claude inventory warnings must be deduplicated');
+  assert.strictEqual(result.warnings.filter((warning) => warning.includes('Ignored malformed Codex plugin record')).length, 1,
+    'repeated Codex inventory warnings must be deduplicated');
+  assert(result.warnings.some((warning) => warning.includes('Ignored malformed plugin manifest')),
+    'malformed plugin manifests must produce an explicit diagnostic');
+  assert(!result.warnings.join('\n').includes('\u202e'), 'warning output must strip Unicode bidi controls');
 }
 
 function testImmutableSnapshotsAndFullTreeFingerprint() {
@@ -377,6 +480,8 @@ try {
   testMalformedPluginInventories();
   testImmutableSnapshotsAndFullTreeFingerprint();
   testCorruptGenerationSelfHealing();
+  testPluginInternalSymlinkAndManagedSideloadPolicy();
+  testCodexConfigTrustAndReenablePrecedence();
   testPolicyAwareCacheAndFallback();
   testFreshWarningsOnCacheHits();
   testBoundedGenerationAndStageRetention();

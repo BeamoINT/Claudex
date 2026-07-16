@@ -4,7 +4,7 @@ set -euo pipefail
 readonly root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-trap 'status=$?; printf "test.zsh: command failed at line %s (exit %s)\n" "$LINENO" "$status" >&2; exit "$status"' ERR
+trap 'failure_code=$?; printf "test.zsh: command failed at line %s (exit %s)\n" "$LINENO" "$failure_code" >&2; exit "$failure_code"' ERR
 
 mkdir -p "$tmp/home/.config/claudex" "$tmp/home/.cli-proxy-api" "$tmp/home/.codex" "$tmp/bin"
 : > "$tmp/home/.config/claudex/cliproxyapi.yaml"
@@ -69,6 +69,10 @@ for (( index = 0; index < ${#arguments[@]}; index++ )); do
   fi
 done
 if [[ -n "${FAKE_PROXY_READY_FILE:-}" && ! -e "$FAKE_PROXY_READY_FILE" ]]; then exit 7; fi
+if [[ -n "${FAKE_ONLY_MODEL:-}" ]]; then
+  printf '{"data":[{"id":"%s"}]}\n' "$FAKE_ONLY_MODEL"
+  exit
+fi
 printf '%s\n' '{"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna"}]}'
 EOF
 cat > "$tmp/bin/claude" <<'EOF'
@@ -78,7 +82,11 @@ if [[ "${1:-}" == "--version" ]]; then
   exit
 fi
 if [[ "${1:-}" == "--help" ]]; then
-  printf '%s\n' '--model --agents --append-system-prompt --permission-mode --settings --effort --add-dir --plugin-dir'
+  if [[ "${FAKE_CLAUDE_HELP_NO_MODEL:-0}" == 1 ]]; then
+    printf '%s\n' '--effort --settings'
+  else
+    printf '%s\n' '--model --agents --append-system-prompt --permission-mode --settings --effort --add-dir --plugin-dir'
+  fi
   exit
 fi
 if [[ "${1:-}" == "auto-mode" && "${2:-}" == "defaults" ]]; then
@@ -131,6 +139,8 @@ fi
 printf '%s\n' "AUTO=${CLAUDE_CODE_AUTO_MODE_MODEL}"
 printf '%s\n' "BG=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
 printf '%s\n' "SUBAGENT=${CLAUDE_CODE_SUBAGENT_MODEL}"
+printf '%s\n' "ADDITIONAL_CLAUDE_MD=${CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD:-}"
+printf '%s\n' "NO_SESSION_PERSISTENCE=${CLAUDEX_NO_SESSION_PERSISTENCE:-}"
 printf '%s\n' "CONCURRENCY=${CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY}"
 printf '%s\n' "RETRIES=${CLAUDE_CODE_MAX_RETRIES}"
 printf '%s\n' "CONTEXT=${CLAUDE_CODE_MAX_CONTEXT_TOKENS}"
@@ -143,12 +153,26 @@ printf '%s\n' "OPUS_NAME=${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME}"
 printf '%s\n' "FABLE=${ANTHROPIC_DEFAULT_FABLE_MODEL}"
 printf '%s\n' "FABLE_NAME=${ANTHROPIC_DEFAULT_FABLE_MODEL_NAME}"
 printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
+printf '%s\n' "MODEL_MODE=${CLAUDEX_MODEL_MODE:-}"
 printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
+printf '%s\n' "USE_BEDROCK=${CLAUDE_CODE_USE_BEDROCK:-}"
+printf '%s\n' "USE_VERTEX=${CLAUDE_CODE_USE_VERTEX:-}"
+printf '%s\n' "USE_FOUNDRY=${CLAUDE_CODE_USE_FOUNDRY:-}"
+printf '%s\n' "BEDROCK_BASE=${ANTHROPIC_BEDROCK_BASE_URL:-}"
+printf '%s\n' "VERTEX_BASE=${ANTHROPIC_VERTEX_BASE_URL:-}"
+printf '%s\n' "FOUNDRY_BASE=${ANTHROPIC_FOUNDRY_BASE_URL:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
 printf '%s\n' "BUN=${BUN_OPTIONS:-}"
 printf '%s\n' "INTERACTIVE=${CLAUDEX_INTERACTIVE_TUI:-}"
 printf '%s\n' "CHATGPT_PLAN=${CLAUDEX_CHATGPT_PLAN_LABEL:-}"
+printf '%s\n' "INSTRUCTION_BRIDGE=${CLAUDEX_INSTRUCTION_BRIDGE:-}"
+printf '%s\n' "PROXY_TOKEN_SET=${CLAUDEX_PROXY_TOKEN:+yes}"
+if [[ "${ANTHROPIC_AUTH_TOKEN:-}" == native-provider-token ]]; then printf '%s\n' 'PROVIDER_TOKEN_OK=yes'
+else printf '%s\n' 'PROVIDER_TOKEN_OK=no'
+fi
+printf '%s\n' "ARGC=$#"
 printf '%s\n' "ARGS=$*"
+exit "${FAKE_CLAUDE_EXIT:-0}"
 EOF
 cat > "$tmp/bin/codex" <<'EOF'
 #!/usr/bin/env bash
@@ -157,6 +181,15 @@ if [[ "${1:-}" == login && "${2:-}" == status ]]; then exit 0; fi
 if [[ "${1:-}" == logout ]]; then exit "${FAKE_CODEX_LOGOUT_EXIT:-0}"; fi
 if [[ "${1:-}" == -c && "${3:-}" == login ]]; then
   [[ -z "${FAKE_CODEX_LOGIN_LOG:-}" ]] || printf '%s\n' login >> "$FAKE_CODEX_LOGIN_LOG"
+  exit 0
+fi
+if [[ "${1:-}" == native-test ]]; then
+  printf '%s\n' "NATIVE_CODEX_ARGS=$*"
+  printf '%s\n' "NATIVE_CODEX_ARGC=$#"
+  printf '%s\n' "NATIVE_CODEX_ARG2=${2:-}"
+  printf '%s\n' "NATIVE_CODEX_CONFIG=${CLAUDE_CONFIG_DIR:-}"
+  printf '%s\n' "NATIVE_CODEX_HOME=${CODEX_HOME:-}"
+  printf '%s\n' "NATIVE_CODEX_PROXY_TOKEN_SET=${CLAUDEX_PROXY_TOKEN:+yes}"
   exit 0
 fi
 [[ "${1:-}" == app-server ]] || exit 2
@@ -206,6 +239,89 @@ run_wrapper() {
     CLAUDEX_SKIP_PROXY_WATCHER=1 \
     "$root/claudex" "$@"
 }
+
+# Native harness routes must bypass every compatibility-layer dependency while
+# preserving argv. A managed parent is scrubbed; an ordinary native Claude
+# route retains caller-owned provider settings.
+native_codex_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_NODE_BIN=/missing/node \
+  CLAUDEX_PROXY_TOKEN=must-not-leak CODEX_HOME=/native/codex/home \
+  CLAUDE_CONFIG_DIR=/native/codex/profile "$root/claudex" codex native-test 'arg with spaces')
+[[ "$native_codex_output" == *'NATIVE_CODEX_ARGS=native-test arg with spaces'* ]]
+[[ "$native_codex_output" == *'NATIVE_CODEX_ARGC=2'* ]]
+[[ "$native_codex_output" == *'NATIVE_CODEX_ARG2=arg with spaces'* ]]
+[[ "$native_codex_output" == *'NATIVE_CODEX_HOME=/native/codex/home'* ]]
+[[ "$native_codex_output" == *'NATIVE_CODEX_PROXY_TOKEN_SET='* ]]
+[[ "$native_codex_output" != *'NATIVE_CODEX_PROXY_TOKEN_SET=yes'* ]]
+
+native_claude_profile="$tmp/native-claude-profile"
+managed_preload="--preload $tmp/home/.config/claudex/preload.cjs"
+native_claude_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_NODE_BIN=/missing/node \
+  CLAUDEX_CLAUDE_CONFIG_DIR="$native_claude_profile" CLAUDE_CONFIG_DIR=/managed/profile \
+  ANTHROPIC_BASE_URL=https://managed.invalid ANTHROPIC_AUTH_TOKEN=managed-secret \
+  ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-5.6-sol CLAUDE_CODE_AUTO_MODE_MODEL=gpt-5.6-terra \
+  CLAUDEX_INTERACTIVE_TUI=1 CLAUDEX_MANAGED_SESSION=1 BUN_OPTIONS="$managed_preload --preload /user/preload.cjs" \
+  "$root/claudex" claude native-test 'arg with spaces')
+[[ "$native_claude_output" == *'ARGC=2'* && "$native_claude_output" == *'ARGS=native-test arg with spaces'* ]]
+[[ "$native_claude_output" == *$'BASE=\n'* ]]
+[[ "$native_claude_output" == *"CONFIG=$native_claude_profile"* ]]
+[[ "$native_claude_output" == *'BUN=--preload /user/preload.cjs'* ]]
+[[ "$native_claude_output" == *$'OPUS=\n'* && "$native_claude_output" == *$'AUTO=\n'* ]]
+[[ "$native_claude_output" == *$'INTERACTIVE=\n'* ]]
+[[ "$native_claude_output" == *$'PROXY_TOKEN_SET=\n'* ]]
+
+native_user_claude_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_NODE_BIN=/missing/node \
+  CLAUDE_CONFIG_DIR=/user/claude-profile ANTHROPIC_BASE_URL=https://custom-provider.invalid \
+  ANTHROPIC_AUTH_TOKEN=native-provider-token CLAUDEX_PROXY_TOKEN=must-not-leak \
+  CLAUDE_CODE_USE_BEDROCK=1 CLAUDE_CODE_USE_VERTEX=1 CLAUDE_CODE_USE_FOUNDRY=1 \
+  ANTHROPIC_BEDROCK_BASE_URL=https://bedrock.invalid ANTHROPIC_VERTEX_BASE_URL=https://vertex.invalid \
+  ANTHROPIC_FOUNDRY_BASE_URL=https://foundry.invalid \
+  ANTHROPIC_DEFAULT_OPUS_MODEL=claude-custom CLAUDE_CODE_AUTO_MODE_MODEL=custom-auto \
+  CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 BUN_OPTIONS='--preload /user/native-preload.cjs' \
+  "$root/claudex" claude native-user-settings)
+[[ "$native_user_claude_output" == *'CONFIG=/user/claude-profile'* ]]
+[[ "$native_user_claude_output" == *'OPUS=claude-custom'* && "$native_user_claude_output" == *'AUTO=custom-auto'* ]]
+[[ "$native_user_claude_output" == *'ADDITIONAL_CLAUDE_MD=1'* ]]
+[[ "$native_user_claude_output" == *'BUN=--preload /user/native-preload.cjs'* ]]
+[[ "$native_user_claude_output" == *'BASE=https://custom-provider.invalid'* ]]
+[[ "$native_user_claude_output" == *'PROVIDER_TOKEN_OK=yes'* ]]
+[[ "$native_user_claude_output" == *'USE_BEDROCK=1'* && "$native_user_claude_output" == *'USE_VERTEX=1'* ]]
+[[ "$native_user_claude_output" == *'USE_FOUNDRY=1'* && "$native_user_claude_output" == *'BEDROCK_BASE=https://bedrock.invalid'* ]]
+[[ "$native_user_claude_output" == *'VERTEX_BASE=https://vertex.invalid'* && "$native_user_claude_output" == *'FOUNDRY_BASE=https://foundry.invalid'* ]]
+[[ "$native_user_claude_output" == *$'PROXY_TOKEN_SET=\n'* ]]
+
+native_broken_env_home="$tmp/native-broken-env-home"
+mkdir -p "$native_broken_env_home/.config/claudex"
+printf '%s\n' 'return 77' > "$native_broken_env_home/.config/claudex/env"
+native_broken_env=$(HOME="$native_broken_env_home" PATH="$tmp/bin:$PATH" \
+  "$root/claudex" claude native-broken-env)
+[[ "$native_broken_env" == *'ARGS=native-broken-env'* ]]
+if HOME="$tmp/home" PATH="$tmp/bin:$PATH" FAKE_CLAUDE_EXIT=37 \
+    "$root/claudex" claude native-exit >/dev/null 2>&1; then
+  native_exit_status=0
+else
+  native_exit_status=$?
+fi
+[[ "$native_exit_status" == 37 ]]
+
+hosted_remote_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" \
+  CLAUDE_CONFIG_DIR=/user/claude-profile ANTHROPIC_BASE_URL=https://custom-provider.invalid \
+  ANTHROPIC_AUTH_TOKEN=native-provider-token CLAUDEX_PROXY_TOKEN=must-not-leak \
+  "$root/claudex" --remote-control=pairing-name)
+[[ "$hosted_remote_output" == *'ARGS=--remote-control=pairing-name'* ]]
+[[ "$hosted_remote_output" == *'CONFIG=/user/claude-profile'* ]]
+[[ "$hosted_remote_output" == *$'BASE=\n'* && "$hosted_remote_output" == *'PROVIDER_TOKEN_OK=no'* ]]
+[[ "$hosted_remote_output" == *$'PROXY_TOKEN_SET=\n'* ]]
+hosted_rc_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" "$root/claudex" --rc pair-name)
+[[ "$hosted_rc_output" == *'ARGC=2'* && "$hosted_rc_output" == *'ARGS=--rc pair-name'* ]]
+hosted_review_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" "$root/claudex" ultrareview --help)
+[[ "$hosted_review_output" == *'ARGS=ultrareview --help'* ]]
+if HOME="$tmp/home" PATH="$tmp/bin:$PATH" FAKE_CLAUDE_EXIT=41 \
+    "$root/claudex" --remote-control >/dev/null 2>&1; then
+  hosted_exit_status=0
+else
+  hosted_exit_status=$?
+fi
+[[ "$hosted_exit_status" == 41 ]]
 
 auth_recovery_helper="$tmp/auth-recovery-helper"
 cat > "$auth_recovery_helper" <<'EOF'
@@ -353,7 +469,7 @@ mkdir -p "$legacy_auto_config"
 cp "$tmp/home/.config/claudex/env" "$legacy_auto_config/env"
 jq '.autoMode = {
     allow: ["Explicit Action Approval: legacy managed seed"],
-    environment: ["User-designated task boundary: legacy managed seed"]
+    environment: ["User designated task boundary: legacy managed seed"]
   }' "$root/settings.json" > "$legacy_auto_config/settings.json"
 HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CONFIG_DIR="$legacy_auto_config" \
   CLAUDEX_SKIP_AUTO_UPDATE=1 FAKE_AUTO_MODE_DEFAULTS_FAIL=1 \
@@ -400,7 +516,9 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
   "$state_file" >/dev/null
 [[ "$default_output" == *'AUTO=gpt-5.6-terra'* ]]
 [[ "$default_output" == *'BG=gpt-5.6-luna'* ]]
-[[ "$default_output" == *'SUBAGENT=gpt-5.6-terra'* ]]
+[[ "$default_output" == *$'SUBAGENT=\n'* ]]
+[[ "$default_output" == *'ADDITIONAL_CLAUDE_MD=1'* ]]
+[[ "$default_output" == *'INSTRUCTION_BRIDGE=on'* ]]
 [[ "$default_output" == *'CONCURRENCY=3'* ]]
 [[ "$default_output" == *'RETRIES=15'* ]]
 [[ "$default_output" == *'CONTEXT=400000'* ]]
@@ -419,9 +537,9 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" == *'--model gpt-5.6-terra'* ]]
 [[ "$default_output" == *'--add-dir '*'/skill-bridge/generations/'* ]]
 [[ "$default_output" == *'--plugin-dir '*'/claudex-codex-skill-references'* ]]
-[[ "$default_output" == *'Do not create a team, spawn or delegate to additional agents'* ]]
-[[ "$default_output" == *'Do not create, claim, or update entries in the shared task list'* ]]
-[[ "$default_output" == *'keep at most 3 Agent tasks active at once'* ]]
+[[ "$default_output" == *'Do not spawn or delegate to additional agents'* ]]
+[[ "$default_output" == *'Unless you are a teammate in a native Agent Team that the user explicitly requested'* ]]
+[[ "$default_output" == *'keep at most 3 delegated workers active at once'* ]]
 [[ "$default_output" == *'Before every final answer, call TaskList and reconcile every entry'* ]]
 [[ "$default_output" == *'Never leave stale in_progress tasks after their work is done'* ]]
 [[ "$default_output" == *'operate as a Codex coding agent inside Claude Code'* ]]
@@ -435,7 +553,18 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" != *'"claudex-builder"'* ]]
 [[ "$default_output" != *'"claudex-fast"'* ]]
 [[ "$default_output" == *'Sol capacity is reserved for the leader'* ]]
+[[ "$default_output" == *'Create a native Agent Team only when the user explicitly requests one'* ]]
+[[ "$default_output" == *'outside an explicitly requested native Agent Team'* ]]
 [[ "$default_output" != *'"model":"gpt-5.6-sol"'* ]]
+
+explicit_subagent_output=$(CLAUDE_CODE_SUBAGENT_MODEL=user-selected-subagent run_wrapper subagent-model-test)
+[[ "$explicit_subagent_output" == *'SUBAGENT=user-selected-subagent'* ]]
+instruction_bridge_off=$(CLAUDEX_INSTRUCTION_BRIDGE=off run_wrapper instruction-bridge-off)
+[[ "$instruction_bridge_off" == *'INSTRUCTION_BRIDGE=off'* ]]
+if CLAUDEX_INSTRUCTION_BRIDGE=invalid run_wrapper instruction-bridge-invalid >/dev/null 2>&1; then
+  printf '%s\n' 'expected an invalid instruction bridge mode to fail' >&2
+  exit 1
+fi
 
 if CLAUDEX_PROXY_URL=https://proxy.example.test run_wrapper remote-proxy-test \
     >"$tmp/remote-without-optin.stdout" 2>"$tmp/remote-without-optin.stderr"; then
@@ -465,14 +594,21 @@ cat > "$warning_bridge" <<'EOF'
 #!/usr/bin/env node
 process.stdout.write(JSON.stringify({
   addDirs: [], pluginDirs: [],
-  warnings: ['Unsafe skill ignored', 'Unsafe skill ignored', 'Plugin fallback\nusing last known good snapshot'],
+  warnings: ['Unsafe skill ignored', 'Unsafe skill ignored', 'Plugin fallback\nusing last known good snapshot', 'Bidi \u202E safe', 'x'.repeat(700)],
 }));
 EOF
 rm -f "$tmp/home/.config/claudex/run/skill-warning-state"
-CLAUDEX_SKILL_BRIDGE_HELPER="$warning_bridge" run_wrapper warning-test \
+CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=inherited CLAUDEX_SKILL_BRIDGE_HELPER="$warning_bridge" run_wrapper warning-test \
   >"$tmp/warning-first.stdout" 2>"$tmp/warning-first.stderr"
 [[ "$(grep -c 'Unsafe skill ignored' "$tmp/warning-first.stderr")" == 1 ]]
 grep -F 'Plugin fallback using last known good snapshot' "$tmp/warning-first.stderr" >/dev/null
+grep -F 'Bidi safe' "$tmp/warning-first.stderr" >/dev/null
+if LC_ALL=C grep -q $'\u202E' "$tmp/warning-first.stderr"; then
+  printf '%s\n' 'skill warning retained a Unicode bidi control' >&2
+  exit 1
+fi
+awk 'length($0) > 540 { exit 1 }' "$tmp/warning-first.stderr"
+grep -F 'ADDITIONAL_CLAUDE_MD=inherited' "$tmp/warning-first.stdout" >/dev/null
 CLAUDEX_SKILL_BRIDGE_HELPER="$warning_bridge" run_wrapper warning-test \
   >"$tmp/warning-second.stdout" 2>"$tmp/warning-second.stderr"
 [[ ! -s "$tmp/warning-second.stderr" ]]
@@ -482,7 +618,7 @@ jq -e '
   and (.autoMode.allow | any(startswith("Explicit Action Approval:")))
   and (.autoMode.environment | index("Default environment rule") != null)
   and ([.autoMode.environment[] | select(. == "User custom environment rule")] | length == 1)
-  and (.autoMode.environment | any(startswith("User-designated task boundary:")))
+  and (.autoMode.environment | any(startswith("User designated task boundary:")))
   and (.autoMode.environment | any(startswith("Explicitly approved development transfer:")))
   and ([.autoMode.soft_deny[] | select(. == "Default soft deny")] | length == 1)
   and ([.autoMode.soft_deny[] | select(. == "User custom soft deny rule")] | length == 1)
@@ -657,14 +793,70 @@ max_output=$(run_wrapper --max-effort test-prompt)
 [[ "$max_output" == *'MODE=max'* ]]
 [[ "$max_output" == *'--effort max'* ]]
 
+explicit_forwarded_model=$(run_wrapper --model gpt-5.6-luna test-prompt)
+[[ "$explicit_forwarded_model" == *'--model gpt-5.6-luna test-prompt'* ]]
+[[ "$explicit_forwarded_model" != *'--model gpt-5.6-luna --model gpt-5.6-luna'* ]]
+explicit_forwarded_alias=$(run_wrapper --model sonnet test-prompt)
+[[ "$explicit_forwarded_alias" == *'--model sonnet test-prompt'* ]]
+[[ "$explicit_forwarded_alias" != *'--model gpt-5.6-terra --model sonnet'* ]]
+explicit_forwarded_solplan=$(run_wrapper --model opusplan test-prompt)
+[[ "$explicit_forwarded_solplan" == *'--model opusplan test-prompt'* ]]
+[[ "$explicit_forwarded_solplan" == *'MODEL_MODE=solplan'* ]]
+fallback_launch=$(FAKE_ONLY_MODEL=gpt-5.6-luna run_wrapper --model gpt-5.6-sol --fallback-model haiku fallback-test)
+[[ "$fallback_launch" == *'--model gpt-5.6-sol --fallback-model haiku fallback-test'* ]]
+fallback_equals=$(FAKE_ONLY_MODEL=gpt-5.6-terra run_wrapper --model=gpt-5.6-sol --fallback-model=sonnet fallback-equals)
+[[ "$fallback_equals" == *'--model=gpt-5.6-sol --fallback-model=sonnet fallback-equals'* ]]
+if run_wrapper --model= >/dev/null 2>&1; then
+  printf '%s\n' 'empty explicit model unexpectedly launched' >&2
+  exit 1
+fi
+if run_wrapper --model solplan >/dev/null 2>&1; then
+  printf '%s\n' 'unsupported CLI solplan alias unexpectedly launched' >&2
+  exit 1
+fi
+if run_wrapper --terra --model gpt-5.6-luna >/dev/null 2>&1; then
+  printf '%s\n' 'conflicting model selectors unexpectedly launched' >&2
+  exit 1
+fi
+
+delimiter_prompt=$(run_wrapper --max-effort -- --settings)
+[[ "$delimiter_prompt" == *'--effort max -- --settings'* ]]
+delimiter_permission=$(run_wrapper -- --permission-mode)
+[[ "$delimiter_permission" == *'--permission-mode auto'* ]]
+[[ "$delimiter_permission" == *'-- --permission-mode'* ]]
+
+model_shaped_prompt_value=$(run_wrapper --append-system-prompt --model literal-prompt-value)
+[[ "$model_shaped_prompt_value" == *'--append-system-prompt --model literal-prompt-value'* ]]
+[[ "$model_shaped_prompt_value" == *'--model gpt-5.6-sol'* ]]
+settings_shaped_prompt_value=$(run_wrapper --max-effort --append-system-prompt --settings literal-prompt)
+[[ "$settings_shaped_prompt_value" == *'--effort max'* ]]
+[[ "$settings_shaped_prompt_value" == *'--append-system-prompt --settings literal-prompt'* ]]
+agent_shaped_value=$(run_wrapper --agent --permission-mode agent-value-test)
+[[ "$agent_shaped_value" == *'--permission-mode auto'* ]]
+[[ "$agent_shaped_value" == *'--agent --permission-mode agent-value-test'* ]]
+
+restricted_tools=$(run_wrapper --tools '' --print restricted-tools-test)
+[[ "$restricted_tools" != *'Before every final answer, call TaskList'* ]]
+complete_tools=$(run_wrapper --tools 'Bash Agent TaskList' --print complete-tools-test)
+[[ "$complete_tools" == *'Before every final answer, call TaskList'* ]]
+disallowed_lifecycle_tools=$(run_wrapper --disallowedTools 'TaskList Agent' restricted-tools-test)
+[[ "$disallowed_lifecycle_tools" != *'Before every final answer, call TaskList'* ]]
+disallowed_unrelated_tools=$(run_wrapper --disallowed-tools 'Bash WebFetch' unrelated-tools-test)
+[[ "$disallowed_unrelated_tools" == *'Before every final answer, call TaskList'* ]]
+
+no_persistence_launch=$(run_wrapper --no-session-persistence --print test-prompt)
+[[ "$no_persistence_launch" == *'NO_SESSION_PERSISTENCE=1'* ]]
+
 solplan_output=$(run_wrapper --solplan test-prompt)
 [[ "$solplan_output" == *'--model opusplan'* ]]
 [[ "$solplan_output" == *'OPUS=gpt-5.6-sol'* ]]
-[[ "$solplan_output" == *'SUBAGENT=gpt-5.6-terra'* ]]
+[[ "$solplan_output" == *$'SUBAGENT=\n'* ]]
 
 resume_footer_output=$(FAKE_CLAUDE_RESUME=1 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper)
 [[ "$resume_footer_output" != *$'\033[2A'* ]]
 [[ "$resume_footer_output" == *$'Resume this session with Claudex:\nclaudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
+background_footer_output=$(FAKE_CLAUDE_RESUME=1 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper --bg)
+[[ "$background_footer_output" != *'Resume this session with Claudex:'* ]]
 
 if interrupted_resume_output=$(FAKE_CLAUDE_RESUME=1 FAKE_CLAUDE_RESUME_EXIT=130 CLAUDEX_TEST_TTY_OUTPUT=1 run_wrapper); then
   interrupted_resume_exit=0
@@ -687,13 +879,16 @@ maintenance_output=$(CLAUDE_CODE_DISABLE_1M_CONTEXT=inherited run_wrapper mcp li
 [[ "$maintenance_output" == *$'DISABLE_1M=\n'* ]]
 [[ "$maintenance_output" != *'--agents'* ]]
 
-for maintenance_command in agents auth auto-mode doctor gateway install mcp plugin plugins project setup-token ultrareview update upgrade; do
+for maintenance_command in agents attach auth auto-mode doctor gateway install kill logs mcp plugin plugins project respawn rm setup-token stop update upgrade; do
   command_output=$(run_wrapper "$maintenance_command" --help)
   [[ "$command_output" != *'--agents'* ]]
   [[ "$command_output" != *'--append-system-prompt'* ]]
   [[ "$command_output" != *'--permission-mode'* ]]
   [[ "$command_output" != *'BASE=http'* ]]
 done
+prefixed_maintenance=$(CLAUDEX_NODE_BIN=relative/node run_wrapper --verbose mcp list)
+[[ "$prefixed_maintenance" == *'ARGS=--verbose mcp list'* ]]
+[[ "$prefixed_maintenance" != *'--agents'* && "$prefixed_maintenance" != *'BASE=http'* ]]
 
 passthrough_output=$(run_wrapper --continue --resume session-123 --fork-session --from-pr 42 \
   --worktree audit-tree --tmux --ide --remote-control --plugin-dir /tmp/plugin \
@@ -718,14 +913,64 @@ explicit_agents_output=$(run_wrapper --agents '{}' test-prompt)
 [[ "$explicit_agents_output" == *'Ask as few questions as possible'* ]]
 [[ "$explicit_agents_output" == *'Never repeat a question the user already answered'* ]]
 [[ "$explicit_agents_output" == *'Treat the user'"'"'s explicit approval as decisive'* ]]
+explicit_agent_output=$(run_wrapper --agent reviewer test-prompt)
+[[ "$explicit_agent_output" == *'--agent reviewer test-prompt'* ]]
+[[ "$explicit_agent_output" != *'"Terra (high)"'* ]]
+[[ "$explicit_agent_output" != *'Before every final answer, call TaskList'* ]]
+explicit_permission_equals=$(run_wrapper --permission-mode=plan test-prompt)
+[[ "$explicit_permission_equals" == *'--permission-mode=plan test-prompt'* ]]
+[[ "$explicit_permission_equals" != *'--permission-mode auto'* ]]
+kebab_allowed_tools=$(run_wrapper --allowed-tools 'Read Edit' tools-alias-test)
+[[ "$kebab_allowed_tools" == *'--allowed-tools Read Edit tools-alias-test'* ]]
+[[ "$kebab_allowed_tools" == *'Before every final answer, call TaskList'* ]]
 
 chrome_output=$(CLAUDE_CODE_DISABLE_1M_CONTEXT=inherited run_wrapper --claude-chrome --print chrome-test)
 [[ "$chrome_output" == *'ARGS=--chrome --print chrome-test'* ]]
 [[ "$chrome_output" == *$'CONFIG=\n'* ]]
 [[ "$chrome_output" == *$'BUN=\n'* ]]
 [[ "$chrome_output" == *$'DISABLE_1M=\n'* ]]
+[[ "$chrome_output" == *$'AUTO=\n'* ]]
+[[ "$chrome_output" == *$'BG=\n'* ]]
+[[ "$chrome_output" == *$'SUBAGENT=\n'* ]]
+[[ "$chrome_output" == *$'OPUS=\n'* ]]
+[[ "$chrome_output" == *$'FABLE=\n'* ]]
+[[ "$chrome_output" == *$'ADDITIONAL_CLAUDE_MD=\n'* ]]
+[[ "$chrome_output" == *$'PROXY_TOKEN_SET=\n'* ]]
 chrome_configured_model=$(CLAUDEX_MODEL=gpt-5.6-luna run_wrapper --claude-chrome --print chrome-test)
 [[ "$chrome_configured_model" != *'--model gpt-5.6-luna'* ]]
+
+inherited_chrome=$(ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-5.6-sol \
+  ANTHROPIC_DEFAULT_FABLE_MODEL=gpt-5.6-sol CLAUDE_CODE_AUTO_MODE_MODEL=gpt-5.6-terra \
+  CLAUDE_CODE_BG_CLASSIFIER_MODEL=gpt-5.6-luna CLAUDE_CODE_SUBAGENT_MODEL=gpt-5.6-terra \
+  CLAUDE_CODE_USE_BEDROCK=1 CLAUDE_CODE_USE_VERTEX=1 CLAUDE_CODE_USE_FOUNDRY=1 \
+  ANTHROPIC_BEDROCK_BASE_URL=https://bedrock.invalid ANTHROPIC_VERTEX_BASE_URL=https://vertex.invalid \
+  ANTHROPIC_FOUNDRY_BASE_URL=https://foundry.invalid \
+  CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 run_wrapper --claude-chrome --print chrome-test)
+[[ "$inherited_chrome" == *$'AUTO=\n'* && "$inherited_chrome" == *$'BG=\n'* ]]
+[[ "$inherited_chrome" == *'SUBAGENT=gpt-5.6-terra'* && "$inherited_chrome" == *$'OPUS=\n'* ]]
+[[ "$inherited_chrome" == *$'FABLE=\n'* && "$inherited_chrome" == *'ADDITIONAL_CLAUDE_MD=1'* ]]
+[[ "$inherited_chrome" == *$'USE_BEDROCK=\n'* && "$inherited_chrome" == *$'USE_VERTEX=\n'* ]]
+[[ "$inherited_chrome" == *$'USE_FOUNDRY=\n'* && "$inherited_chrome" == *$'BEDROCK_BASE=\n'* ]]
+[[ "$inherited_chrome" == *$'VERTEX_BASE=\n'* && "$inherited_chrome" == *$'FOUNDRY_BASE=\n'* ]]
+managed_inherited_chrome=$(CLAUDEX_MANAGED_SESSION=1 CLAUDEX_PROXY_TOKEN=must-not-leak \
+  CLAUDE_CODE_SUBAGENT_MODEL=user-selected-subagent CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 \
+  run_wrapper --claude-chrome --print chrome-test)
+[[ "$managed_inherited_chrome" == *'SUBAGENT=user-selected-subagent'* ]]
+[[ "$managed_inherited_chrome" == *$'ADDITIONAL_CLAUDE_MD=\n'* ]]
+[[ "$managed_inherited_chrome" == *$'PROXY_TOKEN_SET=\n'* ]]
+
+FAKE_CLAUDE_HELP_NO_MODEL=1 run_wrapper --version >/dev/null
+FAKE_CLAUDE_HELP_NO_MODEL=1 run_wrapper update >/dev/null
+CLAUDEX_NODE_BIN=relative/node run_wrapper --version >/dev/null
+CLAUDEX_NODE_BIN=relative/node run_wrapper update >/dev/null
+if self_update_status=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_NODE_BIN=relative/node \
+    CLAUDEX_SELF_UPDATE_HELPER="$root/self-update" "$root/claudex" self-update --status 2>&1); then
+  self_update_status_code=0
+else
+  self_update_status_code=$?
+fi
+[[ "$self_update_status_code" == 1 ]]
+[[ "$self_update_status" != *'CLAUDEX_NODE_BIN'* ]]
 
 prompt_flag_output=$(run_wrapper --print --terra)
 [[ "$prompt_flag_output" == *' --print --terra'* ]]
@@ -736,18 +981,18 @@ option_value_output=$(run_wrapper --append-system-prompt --manual --print test-p
 doctor_output=$(run_wrapper --doctor)
 [[ "$doctor_output" == *'CLIProxyAPI: CLIProxyAPI test'* ]]
 [[ "$doctor_output" == *'Default permission mode: auto'* ]]
-[[ "$doctor_output" == *'Auto-mode classifier: gpt-5.6-terra'* ]]
-[[ "$doctor_output" == *'Auto-mode provider: Codex/OpenAI through the authenticated loopback bridge'* ]]
-[[ "$doctor_output" == *'Subagent model: gpt-5.6-terra (Sol is reserved for the leader)'* ]]
+[[ "$doctor_output" == *'Auto mode classifier: gpt-5.6-terra'* ]]
+[[ "$doctor_output" == *'Auto mode provider: Codex/OpenAI through the authenticated loopback bridge'* ]]
+[[ "$doctor_output" == *'Delegated models: native routing for each agent (Sol is reserved for the leader)'* ]]
 [[ "$doctor_output" == *'Managed agents: Terra (high), Luna (medium)'* ]]
 [[ "$doctor_output" == *'Agent concurrency: 3'* ]]
-[[ "$doctor_output" == *'Task lifecycle: Sol-owned with final-response reconciliation'* ]]
+[[ "$doctor_output" == *'Task lifecycle: owned by Sol with final response reconciliation'* ]]
 [[ "$doctor_output" == *'API retries: 15'* ]]
 [[ "$doctor_output" == *'Context window: 400000 tokens'* ]]
-[[ "$doctor_output" == *'Auto-compact window: 280000 tokens (precompute enabled)'* ]]
-[[ "$doctor_output" == *'Context status: session-stabilized (transient zero suppressed)'* ]]
-[[ "$doctor_output" == *'Codex usage: status-line refresh every 300s'* ]]
-[[ "$doctor_output" == *'Rendering: no-flicker mode with native terminal cursor'* ]]
+[[ "$doctor_output" == *'Automatic compaction window: 280000 tokens (precompute enabled)'* ]]
+[[ "$doctor_output" == *'Context status: stable session (transient zero suppressed)'* ]]
+[[ "$doctor_output" == *'Codex usage: status line refresh every 300s'* ]]
+[[ "$doctor_output" == *'Rendering: stable mode with native terminal cursor'* ]]
 [[ "$doctor_output" == *'Codex authentication: ready (shared ChatGPT session)'* ]]
 [[ "$doctor_output" == *'Claude Code updates: on'* ]]
 [[ "$doctor_output" == *'Plan mode policy: conservative'* ]]
@@ -904,6 +1149,13 @@ transient_status=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"
   CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
 [[ "$transient_status" == *'42% context'* ]]
 [[ "$transient_status" != *'0% context'* ]]
+
+nonpersistent_status=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":0,"total_input_tokens":0,"context_window_size":400000,"current_usage":null}}' | \
+  CLAUDEX_NO_SESSION_PERSISTENCE=1 CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+[[ "$nonpersistent_status" != *'% context'* ]]
+printf '%s\n' '{"session_id":"ephemeral-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":25}}' | \
+  CLAUDEX_NO_SESSION_PERSISTENCE=1 CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline" >/dev/null
+[[ ! -e "$tmp/home/.config/claudex/statusline-cache/ephemeral-session" ]]
 
 fresh_status=$(printf '%s\n' '{"session_id":"fresh-session","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":0,"total_input_tokens":0,"context_window_size":400000,"current_usage":null}}' | \
   CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")

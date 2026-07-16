@@ -19,9 +19,9 @@
 - [ ] `./test.sh` passes on macOS or Linux, when applicable.
 - [ ] `.\test.ps1` passes on Windows, when applicable.
 - [ ] New or changed behavior has regression coverage.
-- [ ] User-facing behavior and configuration are documented.
+- [ ] User facing behavior and configuration are documented.
 - [ ] No credentials, account details, prompts, sessions, or private paths are included.
-- [ ] The change preserves macOS, Linux, WSL, and Windows parity or documents why it is platform-specific.
+- [ ] The change preserves macOS, Linux, WSL, and Windows parity or documents why it is platform specific.
 
 ## Screenshots or terminal output
 
@@ -32,4 +32,4 @@
 - [ ] I have read `CONTRIBUTING.md` and followed the Code of Conduct.
 - [ ] This pull request contains one coherent change.
 - [ ] I reviewed the diff for accidental secrets and unrelated files.
-- [ ] I reviewed and can explain all submitted code, including generated or AI-assisted changes.
+- [ ] I reviewed and can explain all submitted code, including generated or AI assisted changes.

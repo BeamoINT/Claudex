@@ -100,7 +100,7 @@ stabilize_context_percent() {
     fi
   fi
 
-  if [[ "$session_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  if [[ "${CLAUDEX_NO_SESSION_PERSISTENCE:-0}" != 1 && "$session_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
     cache_dir="$config_dir/statusline-cache"
     cache_file="$cache_dir/$session_id"
     if [[ -n "$candidate" ]]; then

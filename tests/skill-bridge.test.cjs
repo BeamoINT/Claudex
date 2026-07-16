@@ -42,6 +42,15 @@ try {
   fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
   fs.mkdirSync(project, { recursive: true });
 
+  write(path.join(codexHome, 'AGENTS.md'), 'SHADOWED_GLOBAL_INSTRUCTIONS\n');
+  write(path.join(codexHome, 'AGENTS.override.md'), 'GLOBAL_OVERRIDE_INSTRUCTIONS\n');
+  write(path.join(repo, 'AGENTS.md'), 'SHADOWED_ROOT_INSTRUCTIONS\n');
+  write(path.join(repo, 'AGENTS.override.md'), 'ROOT_OVERRIDE_INSTRUCTIONS\n');
+  write(path.join(repo, 'packages', 'AGENTS.md'), 'PACKAGE_INSTRUCTIONS\n');
+  write(path.join(project, 'AGENTS.override.md'), '   \n');
+  write(path.join(project, 'AGENTS.md'), 'PROJECT_FALLBACK_INSTRUCTIONS\n');
+  const originalInstructionHash = digest(path.join(codexHome, 'AGENTS.override.md'));
+
   const claudeAlpha = path.join(claudeHome, 'skills', 'alpha');
   skill(claudeAlpha, 'alpha', 'Use the bundled asset.');
   write(path.join(claudeAlpha, 'assets', 'sample.txt'), 'alpha asset\n');
@@ -61,6 +70,11 @@ try {
   skill(path.join(home, '.agents', 'skills', 'disabled'), 'disabled');
   write(path.join(codexHome, 'config.toml'), `[[skills.config]]\npath = ${JSON.stringify(path.join(home, '.agents', 'skills', 'disabled'))}\nenabled = false\n`);
   skill(path.join(codexHome, 'skills', 'legacy-codex'), 'legacy-codex');
+  const systemCodex = path.join(codexHome, 'skills', '.system', 'system-codex');
+  skill(systemCodex, 'system-codex', 'Use references/system.md and scripts/system-check.sh.');
+  write(path.join(systemCodex, 'references', 'system.md'), 'SYSTEM_REFERENCE_MARKER\n');
+  write(path.join(systemCodex, 'scripts', 'system-check.sh'), '#!/bin/sh\nprintf "%s\\n" SYSTEM_SCRIPT_MARKER\n');
+  fs.chmodSync(path.join(systemCodex, 'scripts', 'system-check.sh'), 0o755);
   skill(path.join(repo, '.agents', 'skills', 'root-skill'), 'root-skill');
   skill(path.join(project, '.agents', 'skills', 'nested-skill'), 'nested-skill');
   skill(path.join(repo, '.claude', 'skills', 'alpha'), 'alpha');
@@ -98,13 +112,29 @@ try {
   const first = invoke('sync', environment, project);
   assert.strictEqual(first.enabled, true);
   assert.strictEqual(first.addDirs.length, 1);
+  assert.strictEqual(first.instructions.length, 4, 'global and root-to-project Codex instructions should be snapshotted');
+  const instructionSnapshot = fs.readFileSync(path.join(first.overlay, 'CLAUDE.md'), 'utf8');
+  const instructionMarkers = [
+    'GLOBAL_OVERRIDE_INSTRUCTIONS', 'ROOT_OVERRIDE_INSTRUCTIONS',
+    'PACKAGE_INSTRUCTIONS', 'PROJECT_FALLBACK_INSTRUCTIONS',
+  ];
+  let previousMarker = -1;
+  for (const marker of instructionMarkers) {
+    const markerIndex = instructionSnapshot.indexOf(marker);
+    assert(markerIndex > previousMarker, `Codex instruction precedence order is wrong for ${marker}`);
+    previousMarker = markerIndex;
+  }
+  assert(!instructionSnapshot.includes('SHADOWED_GLOBAL_INSTRUCTIONS'), 'global AGENTS.override.md must replace AGENTS.md');
+  assert(!instructionSnapshot.includes('SHADOWED_ROOT_INSTRUCTIONS'), 'project AGENTS.override.md must replace AGENTS.md');
+  assert.strictEqual(digest(path.join(codexHome, 'AGENTS.override.md')), originalInstructionHash,
+    'source instructions must never be rewritten');
   assert(!first.pluginDirs.includes(claudePlugin), 'source plugins must never be activated wholesale');
   assert(first.pluginDirs.some((directory) => {
     try { return JSON.parse(fs.readFileSync(path.join(directory, '.claude-plugin', 'plugin.json'), 'utf8')).name === 'claude-plugin'; }
     catch { return false; }
   }), 'enabled Claude plugin skills should be exposed through an isolated compatibility plugin');
   const aliases = new Set(first.skills.map((entry) => entry.alias));
-  for (const expected of ['claude-alpha', 'codex-alpha', 'old-command', 'root-skill', 'nested-skill', 'legacy-codex', 'claude-plugin:plugin-skill', 'codex-plugin:plugin-task']) {
+  for (const expected of ['claude-alpha', 'codex-alpha', 'old-command', 'root-skill', 'nested-skill', 'legacy-codex', 'system-codex', 'claude-plugin:plugin-skill', 'codex-plugin:plugin-task']) {
     assert(aliases.has(expected), `missing bridged alias ${expected}`);
   }
   assert(!aliases.has('alpha'), 'an imported personal skill must not claim a native project skill short alias through --add-dir');
@@ -119,6 +149,13 @@ try {
   const codexAlphaMarkdown = fs.readFileSync(path.join(overlaySkills, 'codex-alpha', 'SKILL.md'), 'utf8');
   assert(codexAlphaMarkdown.includes('disable-model-invocation: true'), 'Codex manual-only policy should translate');
   assert(fs.existsSync(path.join(overlaySkills, 'codex-alpha', 'scripts', 'run.sh')), 'support files should remain available');
+  assert.strictEqual(
+    fs.readFileSync(path.join(overlaySkills, 'system-codex', 'references', 'system.md'), 'utf8'),
+    'SYSTEM_REFERENCE_MARKER\n',
+    'Codex system-skill references should remain available',
+  );
+  assert(fs.existsSync(path.join(overlaySkills, 'system-codex', 'scripts', 'system-check.sh')),
+    'Codex system-skill scripts should remain available');
   if (process.platform !== 'win32') {
     assert.strictEqual(fs.statSync(path.join(overlaySkills, 'codex-alpha', 'scripts', 'run.sh')).mode & 0o111, 0o111, 'script executable mode should survive copy fallback');
   }
@@ -131,18 +168,25 @@ try {
   });
   assert(referencePlugin, 'Codex $skill reference compatibility plugin should be generated');
   const hook = childProcess.spawnSync(process.execPath, [path.join(referencePlugin, 'scripts', 'prompt-hook.cjs')], {
-    encoding: 'utf8', input: JSON.stringify({ prompt: 'Please use $codex-alpha now.' }),
+    encoding: 'utf8', input: JSON.stringify({ prompt: 'Please use $codex-alpha and $claude-alpha now.' }),
   });
   assert.strictEqual(hook.status, 0, hook.stderr);
   const hookOutput = JSON.parse(hook.stdout);
   assert(hookOutput.hookSpecificOutput.additionalContext.includes('Codex alpha instructions.'), '$skill hook should inject the explicitly referenced skill');
+  assert(hookOutput.hookSpecificOutput.additionalContext.includes('Use assets/sample.txt.'),
+    '$skill hook should inject an explicitly referenced installed Claude skill');
+  assert(hookOutput.hookSpecificOutput.additionalContext.includes('installed Codex skill $codex-alpha'),
+    '$skill hook should identify a Codex source accurately');
+  assert(hookOutput.hookSpecificOutput.additionalContext.includes('installed Claude Code skill $claude-alpha'),
+    '$skill hook should identify a Claude source accurately');
 
   const boundedHook = childProcess.spawnSync(process.execPath, [path.join(referencePlugin, 'scripts', 'prompt-hook.cjs')], {
     encoding: 'utf8', input: JSON.stringify({ prompt: 'Use $large-one, $large-two, and $large-three.' }),
   });
   assert.strictEqual(boundedHook.status, 0, boundedHook.stderr);
   const boundedContext = JSON.parse(boundedHook.stdout).hookSpecificOutput.additionalContext;
-  assert(boundedContext.length <= 65536, `skill hook context exceeded its aggregate bound: ${boundedContext.length}`);
+  assert(Buffer.byteLength(boundedContext, 'utf8') <= 10000,
+    `skill hook context exceeded Claude Code's direct hook-context bound: ${Buffer.byteLength(boundedContext, 'utf8')}`);
   assert(boundedContext.includes('ONE_MARKER'), 'bounded hook should preserve the first explicitly referenced skill');
   assert(boundedContext.includes('complete file'), 'truncated or omitted skills should include a complete-file recovery path');
 
@@ -151,8 +195,8 @@ try {
   });
   assert.strictEqual(unicodeHook.status, 0, unicodeHook.stderr);
   const unicodeContext = JSON.parse(unicodeHook.stdout).hookSpecificOutput.additionalContext;
-  assert(Buffer.byteLength(unicodeContext, 'utf8') <= 65536,
-    `Unicode skill hook context exceeded 64 KiB: ${Buffer.byteLength(unicodeContext, 'utf8')}`);
+  assert(Buffer.byteLength(unicodeContext, 'utf8') <= 10000,
+    `Unicode skill hook context exceeded Claude Code's direct hook-context bound: ${Buffer.byteLength(unicodeContext, 'utf8')}`);
   assert(unicodeContext.includes('UNICODE_MARKER'), 'quoted $skill reference was not recognized');
 
   const second = invoke('sync', environment, project);
@@ -160,6 +204,10 @@ try {
   fs.appendFileSync(path.join(codexAlpha, 'SKILL.md'), '\nUpdated.\n');
   const third = invoke('sync', environment, project);
   assert.notStrictEqual(third.overlay, first.overlay, 'source edits should produce a fresh generation');
+  fs.appendFileSync(path.join(project, 'AGENTS.md'), '\nUPDATED_PROJECT_INSTRUCTIONS\n');
+  const fourth = invoke('sync', environment, project);
+  assert.notStrictEqual(fourth.overlay, third.overlay, 'Codex instruction edits should produce a fresh immutable generation');
+  assert(fs.readFileSync(path.join(fourth.overlay, 'CLAUDE.md'), 'utf8').includes('UPDATED_PROJECT_INSTRUCTIONS'));
 
   const listed = invoke('list', environment, project);
   assert(listed.includes('/codex-alpha'));
@@ -168,6 +216,84 @@ try {
   const disabledBridge = invoke('sync', { ...environment, CLAUDEX_SKILL_BRIDGE: 'off' }, project);
   assert.strictEqual(disabledBridge.enabled, false);
   assert.deepStrictEqual(disabledBridge.skills, []);
+  assert.deepStrictEqual(disabledBridge.instructions, []);
+
+  const disabledInstructions = invoke('sync', { ...environment, CLAUDEX_INSTRUCTION_BRIDGE: 'off' }, project);
+  assert.deepStrictEqual(disabledInstructions.instructions, []);
+  assert(!fs.existsSync(path.join(disabledInstructions.overlay, 'CLAUDE.md')),
+    'instruction-only opt-out must not publish a CLAUDE.md compatibility file');
+
+  const boundedRepo = path.join(temporary, 'bounded-instruction-repo');
+  fs.mkdirSync(path.join(boundedRepo, '.git'), { recursive: true });
+  write(path.join(boundedRepo, 'AGENTS.md'), `UNICODE_INSTRUCTION_MARKER\n${'界'.repeat(20000)}\n`);
+  const bounded = invoke('sync', environment, boundedRepo);
+  const boundedFile = path.join(bounded.overlay, 'CLAUDE.md');
+  const boundedBytes = fs.readFileSync(boundedFile);
+  const boundedText = boundedBytes.toString('utf8');
+  assert(boundedBytes.length <= 32 * 1024, `Codex instruction snapshot exceeded 32 KiB: ${boundedBytes.length}`);
+  assert(boundedText.includes('UNICODE_INSTRUCTION_MARKER'));
+  assert(!boundedText.includes('\uFFFD'), 'UTF-8 instruction truncation split a multibyte character');
+  assert(bounded.instructions.some((entry) => entry.truncated), 'truncated instruction source was not diagnosed');
+  assert(bounded.warnings.some((warning) => warning.includes('instructions exceeded')),
+    'bounded instruction truncation warning is missing');
+
+  const precedenceCodexHome = path.join(temporary, 'precedence-codex-home');
+  const precedenceRepo = path.join(temporary, 'precedence-instruction-repo');
+  const precedenceChild = path.join(precedenceRepo, 'nested');
+  fs.mkdirSync(path.join(precedenceRepo, '.git'), { recursive: true });
+  fs.mkdirSync(precedenceChild, { recursive: true });
+  write(path.join(precedenceCodexHome, 'AGENTS.md'), `LOW_PRECEDENCE_GLOBAL\n${'g'.repeat(40000)}\n`);
+  write(path.join(precedenceRepo, 'AGENTS.md'), 'ROOT_PRECEDENCE_INSTRUCTIONS\n');
+  write(path.join(precedenceChild, 'AGENTS.md'), 'HIGHEST_PRECEDENCE_CWD_INSTRUCTIONS\n');
+  const precedence = invoke('sync', { ...environment, CODEX_HOME: precedenceCodexHome }, precedenceChild);
+  const precedenceText = fs.readFileSync(path.join(precedence.overlay, 'CLAUDE.md'), 'utf8');
+  assert(precedenceText.includes('LOW_PRECEDENCE_GLOBAL'));
+  assert(!precedenceText.includes('HIGHEST_PRECEDENCE_CWD_INSTRUCTIONS'),
+    'Codex forward budgeting must stop after the earlier global layer consumes the cap');
+  write(path.join(precedenceCodexHome, 'config.toml'), [
+    '"project_doc_max_bytes" = 65536',
+    '"project_doc_fallback_filenames" = ["TEAM_GUIDE.md"]',
+    '',
+  ].join('\n'));
+  const expandedPrecedence = invoke('sync', { ...environment, CODEX_HOME: precedenceCodexHome }, precedenceChild);
+  const expandedText = fs.readFileSync(path.join(expandedPrecedence.overlay, 'CLAUDE.md'), 'utf8');
+  assert(expandedText.endsWith('HIGHEST_PRECEDENCE_CWD_INSTRUCTIONS'),
+    'effective project_doc_max_bytes must preserve forward global-to-CWD order when the budget fits');
+
+  const fallbackRepo = path.join(temporary, 'fallback-instruction-repo');
+  fs.mkdirSync(path.join(fallbackRepo, '.git'), { recursive: true });
+  write(path.join(fallbackRepo, '.codex', 'config.toml'), 'project_doc_fallback_filenames = ["TEAM_GUIDE.md"]\n');
+  write(path.join(fallbackRepo, 'TEAM_GUIDE.md'), 'FALLBACK_INSTRUCTION_MARKER\n');
+  const fallbackInstructions = invoke('sync', environment, fallbackRepo);
+  assert(fs.readFileSync(path.join(fallbackInstructions.overlay, 'CLAUDE.md'), 'utf8').includes('FALLBACK_INSTRUCTION_MARKER'),
+    'configured Codex project instruction fallback was not bridged');
+
+  fs.unlinkSync(boundedFile);
+  const repairedInstructions = invoke('sync', environment, boundedRepo);
+  assert.strictEqual(repairedInstructions.overlay, bounded.overlay,
+    'a missing CLAUDE.md should rebuild the content-addressed generation');
+  assert(fs.existsSync(boundedFile), 'cached manifest accepted a missing CLAUDE.md');
+
+  const symlinkRepo = path.join(temporary, 'instruction-symlink-repo');
+  const outsideInstructions = path.join(temporary, 'outside-AGENTS.md');
+  fs.mkdirSync(path.join(symlinkRepo, '.git'), { recursive: true });
+  write(path.join(symlinkRepo, 'AGENTS.md'), 'SAFE_SYMLINK_FALLBACK\n');
+  write(outsideInstructions, 'ESCAPED_INSTRUCTIONS\n');
+  let instructionSymlink = false;
+  try {
+    fs.symlinkSync(outsideInstructions, path.join(symlinkRepo, 'AGENTS.override.md'), 'file');
+    instructionSymlink = true;
+  } catch (error) {
+    if (!['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) throw error;
+  }
+  if (instructionSymlink) {
+    const safeInstructions = invoke('sync', environment, symlinkRepo);
+    const safeText = fs.readFileSync(path.join(safeInstructions.overlay, 'CLAUDE.md'), 'utf8');
+    assert(safeText.includes('SAFE_SYMLINK_FALLBACK'));
+    assert(!safeText.includes('ESCAPED_INSTRUCTIONS'));
+    assert(safeInstructions.warnings.some((warning) => warning.includes('instruction symlink outside')),
+      'escaping Codex instruction symlink was not diagnosed');
+  }
 
   const api = require(helper);
   assert.strictEqual(api.safeName('CON'), 'skill-CON');
@@ -175,8 +301,40 @@ try {
   assert.strictEqual(api.skillAlias('com1'), 'skill-com1');
   assert.strictEqual(api.safeName('d\u00e9ploiement'), 'd\u00e9ploiement');
   assert(api.ensureManualOnly('---\nname: x\n---\nbody').includes('disable-model-invocation: true'));
+  const quotedIdentity = api.codexSkillIdentity('---\n"name": "quoted-name"\n\'description\': "quoted description"\n---\n');
+  assert.deepStrictEqual(quotedIdentity, { valid: true, name: 'quoted-name', description: 'quoted description' });
+  const quotedManual = api.ensureManualOnly('---\n"disable-model-invocation": false\n---\nbody');
+  assert.strictEqual((quotedManual.match(/disable-model-invocation/g) || []).length, 1,
+    'quoted YAML keys must be replaced rather than duplicated');
   assert.strictEqual(api.remapClaudeModel('---\nmodel: claude-opus-4\n---\n').mappings[0].to, 'gpt-5.6-sol');
   assert.strictEqual(api.remapClaudeModel('---\nmodel: claude-3-opus-20240229\n---\n').mappings[0].to, 'gpt-5.6-sol');
+  const nestedModelMetadata = api.remapClaudeModel([
+    '---',
+    'name: nested-model-metadata',
+    'description: Keep nested metadata exact.',
+    'metadata:',
+    '  model: opus',
+    'hooks:',
+    '  worker:',
+    '    model: sonnet',
+    '---',
+    '',
+  ].join('\n'));
+  assert.strictEqual(nestedModelMetadata.mappings.length, 0,
+    'nested frontmatter model keys must not be treated as Claude skill model pins');
+  assert(nestedModelMetadata.markdown.includes('  model: opus'));
+  assert(nestedModelMetadata.markdown.includes('    model: sonnet'));
+  const mixedModelMetadata = api.remapClaudeModel([
+    '---',
+    'model: haiku',
+    'metadata:',
+    '  model: opus',
+    '---',
+    '',
+  ].join('\n'));
+  assert(mixedModelMetadata.markdown.includes('model: gpt-5.6-luna'));
+  assert(mixedModelMetadata.markdown.includes('  model: opus'),
+    'top-level model remapping must leave nested metadata unchanged');
   for (const model of ['opus[1m]', 'sonnet[1m]', 'opusplan[1m]', 'claude-opus-4-8[1m]', 'best']) {
     const mapped = api.remapClaudeModel(`---\nmodel: ${model}\n---\n`);
     assert.strictEqual(mapped.mappings.length, 1, `${model} should map to a managed OpenAI model`);

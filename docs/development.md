@@ -1,6 +1,6 @@
 # Development guide
 
-Claudex is intentionally dependency-light. The production code is Bash,
+Claudex is intentionally dependency light. The production code is Bash,
 PowerShell, a small Node preload, and JSON; the test harness uses fake homes and
 fake provider commands so it never touches a developer's real sessions.
 
@@ -8,15 +8,15 @@ fake provider commands so it never touches a developer's real sessions.
 
 | Path | Purpose |
 | --- | --- |
-| `claudex`, `claudex.ps1`, `claudex.cmd` | Cross-platform launchers |
+| `claudex`, `claudex.ps1`, `claudex.cmd` | Cross platform launchers |
 | `install.sh`, `install.ps1`, `install.zsh` | Install and compatibility entry points |
 | `codex-session*` | Authentication bridge |
 | `usage-limit*` | Detailed and cached quota reporting |
 | `statusline*` | Stable compact footer |
-| `preload.cjs` | Byte-preserving Solplan input alias and one-shot interactive ChatGPT plan label |
+| `preload.cjs` | Byte preserving Solplan input alias and one shot interactive ChatGPT plan label |
 | `settings.json`, `env.example` | Reproducible configuration templates |
-| `test.zsh`, `test.ps1`, `test.sh` | Isolated cross-platform regressions |
-| `scripts/check-docs.mjs` | Community-file and local documentation link validation |
+| `test.zsh`, `test.ps1`, `test.sh` | Isolated cross platform regressions |
+| `scripts/check-docs.mjs` | Community file and local documentation link validation |
 | `.github` | CI and contribution templates |
 | `docs` | User and maintainer documentation |
 
@@ -40,15 +40,19 @@ CLIProxyAPI, and verifies launch arguments, state, auth, usage, rendering,
 updates, and installation.
 
 `.\test.ps1` provides the corresponding native Windows coverage. GitHub
-Actions runs both suites on macOS, Ubuntu, and Windows for every pull request.
+Actions runs both suites on macOS, Ubuntu, and x64 Windows for every pull
+request. A separate job runs the shared Node.js helpers on the minimum supported
+Node.js 18 runtime. The hosted matrix does not currently include ARM64 or WSL;
+the root README distinguishes those supported paths from configurations tested
+on hosted runners.
 
 CodeQL scans the JavaScript compatibility surface on every pull request and on
 a weekly schedule. Dependency Review blocks newly introduced high or critical
 dependency vulnerabilities, Dependabot proposes pinned dependency updates, and
-the pull-request labeler identifies affected components and platforms. All
-third-party GitHub Actions are pinned to immutable commits.
+the pull request labeler identifies affected components and platforms. All
+third party GitHub Actions are pinned to immutable commits.
 
-Documentation validation checks required community files, issue-form metadata,
+Documentation validation checks required community files, issue form metadata,
 and every relative Markdown link. Keep it part of both platform suites.
 
 Useful focused checks:
@@ -61,7 +65,7 @@ zsh -n test.zsh
 git diff --check
 ```
 
-## Cross-platform changes
+## Cross platform changes
 
 When changing shared behavior:
 
@@ -73,13 +77,13 @@ When changing shared behavior:
 6. update docs and `env.example` if the public interface changes;
 7. wait for all three hosted runners before merging.
 
-Platform-specific differences are acceptable only when the upstream platform
+Platform specific differences are acceptable only when the upstream platform
 lacks an equivalent feature. Document the boundary instead of pretending to
 emulate security or browser behavior that does not exist.
 
 ## Updating CLIProxyAPI
 
-The binary version and SHA-256 digests are security-sensitive. To update them:
+The binary version and SHA-256 digests are security sensitive. To update them:
 
 1. use the official upstream release;
 2. collect every macOS, Linux, and Windows x64/ARM64 asset used by the
@@ -93,44 +97,46 @@ Never replace a digest just to make a failed download pass.
 
 ## Releasing
 
-Maintainers release from a clean `main` branch after the post-merge matrix
+Maintainers release from a clean `main` branch after the post merge matrix
 passes:
 
 1. update `CHANGELOG.md` and move Unreleased entries into a SemVer version;
 2. run local tests and confirm hosted CI on `main`;
 3. create an annotated `vMAJOR.MINOR.PATCH` tag on the verified main commit;
-4. push the tag, which invokes the reusable full macOS, Linux, legacy-Linux,
-   Windows, and package-artifact matrix against that exact tag;
+4. push the tag, which invokes the reusable full macOS, Linux, legacy Linux,
+   Windows, and package artifact matrix against that exact tag;
 5. after the matrix passes, let the release workflow build both archives and
    `SHA256SUMS` reproducibly from the explicit payload allowlist, rejecting
-   non-regular source files and ignoring unlisted files under `bin/`, `docs/`,
-   and `skills/`;
-6. let the workflow create a private draft, attach and re-download the exact
+   non regular source files and ignoring unlisted files under `bin/`, `docs/`,
+   and `skills/`; the artifact check extracts the Unix archive, performs an
+   isolated network free installation, and executes both native harness routes
+   from the installed launcher;
+6. let the workflow create a private draft, attach and re download the exact
    three verified assets, and only then publish it and mark it latest;
-7. verify the latest-release link and the automatically triggered live website
+7. verify the latest release link and the automatically triggered live website
    installer matrix.
 
 A failed test, build, or upload leaves no public release. An interrupted upload
 may leave a private draft; manually dispatch `release-assets.yml` with the same
 annotated tag to resume it. A retry accepts only missing assets or existing
 assets with identical SHA-256 digests. It refuses unexpected or mismatched
-draft assets and never changes an already-published release.
+draft assets and never changes an already published release.
 
-For a package-manager release, also:
+For a package manager release, also:
 
 1. keep `package.json` and `CHANGELOG.md` on the same version;
 2. verify `npm test` and `./scripts/check-release-artifacts.sh`;
-3. wait for the release-assets workflow to publish both archives and
+3. wait for the release assets workflow to publish both archives and
    `SHA256SUMS` from the verified tag;
 4. update and test the BeamoINT Homebrew tap and Scoop bucket with the exact
-   release-asset hashes;
+   release asset hashes;
 5. submit the matching WinGet manifest and link its external review.
 
 Publish only archives built from the verified release tag. Do not publish
 credentials, installed state, or the downloaded CLIProxyAPI binary from a local
-machine; CLIProxyAPI remains a verified install-time dependency.
-When adding a release-time runtime or support file, add its exact path to the
-payload in `scripts/build-release.sh` and extend the required-content checks
+machine; CLIProxyAPI remains a verified install time dependency.
+When adding a release time runtime or support file, add its exact path to the
+payload in `scripts/build-release.sh` and extend the required content checks
 when installation depends on it.
 
 ## Review checklist
@@ -139,11 +145,11 @@ when installation depends on it.
 - Behavior is consistent on supported platforms.
 - Failure modes are actionable and safe.
 - Credentials and identity data remain private.
-- Tests cover success, failure, and stale-state cases.
+- Tests cover success, failure, and stale state cases.
 - Documentation matches the implemented defaults.
 - The diff contains no installed state or unrelated changes.
 
 See [MAINTAINERS.md](../MAINTAINERS.md) for triage targets, labels, ownership,
-and the merge policy. Community-facing workflow or template changes should be
-tested from a fork-compatible event and must not execute untrusted pull-request
+and the merge policy. Community facing workflow or template changes should be
+tested from a fork compatible event and must not execute untrusted pull request
 code with write permissions.

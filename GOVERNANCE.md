@@ -1,6 +1,6 @@
 # Project governance
 
-Claudex uses a lightweight maintainer-led governance model.
+Claudex uses a lightweight maintainer led governance model.
 
 ## Roles
 
@@ -16,12 +16,12 @@ responsibilities are documented in [MAINTAINERS.md](MAINTAINERS.md).
 
 Roles are based on sustained, constructive participation rather than employer
 or affiliation. Maintainers may invite contributors who demonstrate sound
-judgment, reliable follow-through, security awareness, and respectful review.
+judgment, reliable follow through, security awareness, and respectful review.
 
 ## Decisions
 
 Routine decisions happen in issues and pull requests. Maintainers seek rough
-consensus, with priority given to security, user privacy, cross-platform
+consensus, with priority given to security, user privacy, cross platform
 correctness, backward compatibility, and maintainability. When consensus is
 not possible, maintainers make the final decision and document the reasoning.
 
@@ -37,7 +37,7 @@ reasoning in an issue, discussion, or pull request.
 ## Releases
 
 Maintainers publish releases from a clean, tested `main` branch. Release tags
-follow semantic versioning, and release notes summarize user-visible changes,
+follow semantic versioning, and release notes summarize user visible changes,
 compatibility changes, and security fixes. See [CHANGELOG.md](CHANGELOG.md) and
 [docs/development.md](docs/development.md).
 

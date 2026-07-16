@@ -1,5 +1,5 @@
 # The maintainer reviews every change because Claudex touches authentication,
-# local credentials, installers, release artifacts, and cross-platform launchers.
+# local credentials, installers, release artifacts, and launchers for every platform.
 * @BeamoINT
 
 # Keep especially sensitive surfaces explicit so future ownership additions do

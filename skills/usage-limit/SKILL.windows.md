@@ -1,6 +1,6 @@
 ---
 name: usage-limit
-description: Show the current OpenAI Codex rolling usage limits, reset times, plan, and reset-credit count for the account backing Claudex.
+description: Show the current OpenAI Codex rolling usage limits, reset times, plan, and reset credit count for the account backing Claudex.
 disable-model-invocation: true
 shell: powershell
 allowed-tools: PowerShell(claudex --usage-limit *)

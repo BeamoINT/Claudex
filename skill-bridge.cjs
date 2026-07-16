@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const childProcess = require('child_process');
 
 const BRIDGE_SCHEMA = 3;
-const BRIDGE_FORMAT = 'skills-v3-snapshot-20260716';
+const BRIDGE_FORMAT = 'skills-v6-cross-harness-20260716';
 const MAX_FILES = 4096;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_TREE_BYTES = 64 * 1024 * 1024;
@@ -19,6 +19,9 @@ const MAX_STAGE_DIRECTORIES = 8;
 const STALE_STAGE_MS = 24 * 60 * 60 * 1000;
 const STALE_GC_LOCK_MS = 10 * 60 * 1000;
 const FILE_FINGERPRINT_VERSION = 2;
+const DEFAULT_MAX_INSTRUCTION_BYTES = 32 * 1024;
+const MAX_WARNING_COUNT = 128;
+const MAX_WARNING_BYTES = 2048;
 const isWindows = process.platform === 'win32';
 const home = path.resolve(isWindows
   ? (process.env.USERPROFILE || os.homedir())
@@ -34,6 +37,7 @@ const codexHome = path.resolve(expandHome(process.env.CODEX_HOME || path.join(ho
 const bridgeEnabled = (process.env.CLAUDEX_SKILL_BRIDGE || 'on') !== 'off';
 const pluginEnabled = (process.env.CLAUDEX_SKILL_PLUGINS || 'on') !== 'off';
 const dollarReferencesEnabled = (process.env.CLAUDEX_SKILL_DOLLAR_REFERENCES || 'on') !== 'off';
+const instructionBridgeEnabled = (process.env.CLAUDEX_INSTRUCTION_BRIDGE || 'on') !== 'off';
 
 class SourceChangedError extends Error { }
 
@@ -101,11 +105,34 @@ function isWithin(candidate, parent) {
 
 function safeName(value, fallback = 'skill') {
   let name = String(value || '').normalize('NFC').trim();
-  name = name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-');
+  name = name.replace(/[<>:"/\\|?*\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '-');
   name = name.replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/-+/g, '-');
   name = name.replace(/^[. -]+|[. -]+$/g, '').slice(0, 64) || fallback;
   if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) name = `skill-${name}`.slice(0, 64);
   return name;
+}
+
+function safeWarning(value) {
+  let warning = String(value || '').normalize('NFC')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
+    .replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (Buffer.byteLength(warning, 'utf8') > MAX_WARNING_BYTES) {
+    warning = Buffer.from(warning, 'utf8').subarray(0, MAX_WARNING_BYTES - 3).toString('utf8').replace(/\uFFFD$/, '') + '...';
+  }
+  return warning;
+}
+
+function boundedWarnings(values) {
+  const result = [];
+  const seen = new Set();
+  for (const value of values || []) {
+    const warning = safeWarning(value);
+    if (!warning || seen.has(warning)) continue;
+    seen.add(warning);
+    if (result.length >= MAX_WARNING_COUNT) break;
+    result.push(warning);
+  }
+  return result;
 }
 
 function skillAlias(value, fallback = 'skill') {
@@ -145,6 +172,91 @@ function ancestry(start, stop) {
   }
 }
 
+function instructionAt(directory, boundary, scope, warnings, fallbackFilenames = []) {
+  const names = scope === 'global' ? ['AGENTS.override.md', 'AGENTS.md']
+    : ['AGENTS.override.md', 'AGENTS.md', ...fallbackFilenames];
+  for (const name of names) {
+    const candidate = path.join(directory, name);
+    let linkStat;
+    try { linkStat = fs.lstatSync(candidate); }
+    catch { continue; }
+    let resolved = candidate;
+    let stat = linkStat;
+    try {
+      resolved = canonical(candidate);
+      if (!isWithin(resolved, boundary)) {
+        warnings.push(`Ignored Codex instruction symlink outside its ${scope} boundary: ${candidate}`);
+        continue;
+      }
+      if (linkStat.isSymbolicLink()) stat = fs.statSync(resolved);
+      if (!stat.isFile()) {
+        warnings.push(`Ignored unsupported Codex instruction file: ${candidate}`);
+        continue;
+      }
+      if (stat.size > MAX_FILE_BYTES) {
+        warnings.push(`Ignored Codex instruction file larger than ${MAX_FILE_BYTES} bytes: ${candidate}`);
+        continue;
+      }
+      const bytes = fs.readFileSync(resolved);
+      if (bytes.length !== stat.size) throw new SourceChangedError(`Codex instructions changed while reading: ${candidate}`);
+      if (sensitiveContent(bytes)) {
+        warnings.push(`Ignored Codex instruction file containing material that resembles a private key: ${candidate}`);
+        continue;
+      }
+      const rendered = Buffer.from(bytes.toString('utf8').trim(), 'utf8');
+      if (rendered.length === 0) continue;
+      return {
+        scope, directory: path.resolve(directory), name, source: path.resolve(candidate), realSource: resolved,
+        size: bytes.length, digest: crypto.createHash('sha256').update(bytes).digest('hex'), renderedSize: rendered.length,
+      };
+    } catch (error) {
+      if (error instanceof SourceChangedError) throw error;
+      warnings.push(`Could not read Codex instruction file ${candidate}: ${error.message}`);
+    }
+  }
+  return null;
+}
+
+function discoverInstructions(projectDir, repoRoot, warnings, config = effectiveCodexProjectConfig(projectDir, repoRoot)) {
+  if (!instructionBridgeEnabled) return { files: [], signature: 'off', renderedBytes: 0, truncated: false };
+  const files = [];
+  const global = instructionAt(codexHome, codexHome, 'global', warnings);
+  if (global) files.push(global);
+  for (const directory of ancestry(projectDir, repoRoot).reverse()) {
+    const project = instructionAt(directory, repoRoot, 'project', warnings, config.fallbackFilenames);
+    if (project) files.push(project);
+  }
+
+  let renderedBytes = 0;
+  let truncated = false;
+  let remaining = config.projectDocMaxBytes;
+  let hasContent = false;
+  // Match Codex's forward concatenation contract exactly: global first, then
+  // repository root toward the current directory, stopping at the byte cap.
+  for (const file of files) {
+    const separatorBytes = hasContent ? 2 : 0;
+    const available = Math.max(0, remaining - separatorBytes);
+    file.includedBytes = Math.min(file.renderedSize, available);
+    file.truncated = file.includedBytes < file.renderedSize;
+    if (file.includedBytes > 0) {
+      renderedBytes += separatorBytes + file.includedBytes;
+      remaining -= separatorBytes + file.includedBytes;
+      hasContent = true;
+    }
+    if (file.truncated || file.includedBytes === 0) truncated = true;
+  }
+  if (truncated) warnings.push(`Codex instructions exceeded ${config.projectDocMaxBytes} bytes and were truncated in the compatibility snapshot.`);
+  const signature = crypto.createHash('sha256').update(JSON.stringify({
+    files: files.map((file) => ({
+      scope: file.scope, source: file.realSource, size: file.size, digest: file.digest,
+      renderedSize: file.renderedSize, includedBytes: file.includedBytes,
+    })),
+    maxBytes: config.projectDocMaxBytes,
+    fallbackFilenames: config.fallbackFilenames,
+  })).digest('hex');
+  return { files, signature, renderedBytes, truncated, maxBytes: config.projectDocMaxBytes, fallbackFilenames: config.fallbackFilenames };
+}
+
 function decodeQuotedScalar(raw) {
   const value = String(raw || '').trim();
   if (value.startsWith('"') && value.endsWith('"')) {
@@ -169,11 +281,9 @@ function yamlTopLevelScalar(markdown, key) {
   if (!parsed) return null;
   const expected = String(key).toLowerCase();
   for (const line of parsed.body.split(/\r?\n/)) {
-    const colon = line.indexOf(':');
-    if (colon < 0) continue;
-    const field = line.slice(0, colon);
-    if (field !== field.trimStart() || field.trimEnd().toLowerCase() !== expected) continue;
-    const scalar = line.slice(colon + 1).trimStart();
+    const entry = yamlMappingEntry(line);
+    if (!entry || entry.indent !== 0 || entry.key.toLowerCase() !== expected) continue;
+    const scalar = entry.value.trimStart();
     return scalar ? decodeQuotedScalar(scalar) : null;
   }
   return null;
@@ -182,13 +292,14 @@ function yamlTopLevelScalar(markdown, key) {
 function replaceFrontmatterField(markdown, key, value) {
   const parsed = frontmatter(markdown);
   if (!parsed) return markdown;
-  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const line = `${key}: ${value}`;
-  const expression = new RegExp(`^${escaped}\\s*:\\s*(.*)$`, 'i');
   const lines = parsed.body.split(/\r?\n/);
-  const index = lines.findIndex((entry) => expression.test(entry));
+  const index = lines.findIndex((entry) => {
+    const mapping = yamlMappingEntry(entry);
+    return mapping && mapping.indent === 0 && mapping.key.toLowerCase() === String(key).toLowerCase();
+  });
   if (index >= 0) {
-    const scalar = (lines[index].match(expression) || [null, ''])[1].trim();
+    const scalar = yamlMappingEntry(lines[index]).value.trim();
     let end = index + 1;
     if (scalar === '' || /^[>|][+-]?[0-9]*$/.test(scalar)) {
       while (end < lines.length && (lines[end].trim() === '' || /^\s+/.test(lines[end]))) end++;
@@ -197,6 +308,31 @@ function replaceFrontmatterField(markdown, key, value) {
   } else lines.unshift(line);
   const body = lines.join(parsed.eol);
   return `${parsed.open}${parsed.eol}${body}${parsed.closePrefix}---${parsed.closeEol}${parsed.rest}`;
+}
+
+function yamlMappingEntry(line) {
+  const text = String(line || '');
+  const indentMatch = text.match(/^ */);
+  const indent = indentMatch ? indentMatch[0].length : 0;
+  let quote = null;
+  let escaped = false;
+  for (let index = indent; index < text.length; index += 1) {
+    const character = text[index];
+    if (escaped) { escaped = false; continue; }
+    if (quote === '"' && character === '\\') { escaped = true; continue; }
+    if (quote) { if (character === quote) quote = null; continue; }
+    if (character === '"' || character === "'") { quote = character; continue; }
+    if (character !== ':') continue;
+    const rawKey = text.slice(indent, index).trim();
+    if (!rawKey) return null;
+    let decoded = rawKey;
+    if ((rawKey.startsWith('"') && rawKey.endsWith('"')) || (rawKey.startsWith("'") && rawKey.endsWith("'"))) {
+      decoded = decodeQuotedScalar(rawKey);
+    }
+    if (typeof decoded !== 'string') return null;
+    return { indent, key: decoded, value: text.slice(index + 1) };
+  }
+  return null;
 }
 
 function setFrontmatterField(markdown, key, value) {
@@ -226,56 +362,227 @@ function tomlString(raw) {
   return null;
 }
 
-function addDisabledPath(disabled, rawPath, baseDirectory = codexHome) {
-  if (!rawPath) return;
-  const configured = path.isAbsolute(rawPath) ? rawPath : path.resolve(baseDirectory, rawPath);
-  disabled.add(canonical(configured));
-  if (/SKILL\.md$/i.test(configured)) disabled.add(canonical(path.dirname(configured)));
+function tomlKey(raw) {
+  const value = String(raw || '').trim();
+  return value.startsWith('"') || value.startsWith("'") ? tomlString(value) : /^[A-Za-z0-9_-]+$/.test(value) ? value : null;
 }
 
-function parseDisabledCodexSkills(projectDir, repoRoot) {
-  const disabled = new Set();
-  const files = [path.join(codexHome, 'config.toml')];
-  if (projectDir && repoRoot) {
+function splitTomlDottedKey(raw) {
+  const parts = [];
+  let start = 0;
+  let quote = null;
+  let escaped = false;
+  const text = String(raw || '').trim();
+  for (let index = 0; index <= text.length; index += 1) {
+    const character = text[index];
+    if (escaped) { escaped = false; continue; }
+    if (quote === '"' && character === '\\') { escaped = true; continue; }
+    if (quote) { if (character === quote) quote = null; continue; }
+    if (character === '"' || character === "'") { quote = character; continue; }
+    if (character !== '.' && index !== text.length) continue;
+    const part = tomlKey(text.slice(start, index));
+    if (part === null) return null;
+    parts.push(part);
+    start = index + 1;
+  }
+  return parts;
+}
+
+function stripTomlComment(raw) {
+  let quote = null;
+  let escaped = false;
+  const text = String(raw || '');
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (escaped) { escaped = false; continue; }
+    if (quote === '"' && character === '\\') { escaped = true; continue; }
+    if (quote) { if (character === quote) quote = null; continue; }
+    if (character === '"' || character === "'") { quote = character; continue; }
+    if (character === '#') return text.slice(0, index).trim();
+  }
+  return text.trim();
+}
+
+function tomlAssignment(line) {
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (escaped) { escaped = false; continue; }
+    if (quote === '"' && character === '\\') { escaped = true; continue; }
+    if (quote) { if (character === quote) quote = null; continue; }
+    if (character === '"' || character === "'") { quote = character; continue; }
+    if (character !== '=') continue;
+    const keys = splitTomlDottedKey(line.slice(0, index));
+    return keys && keys.length ? { keys, value: stripTomlComment(line.slice(index + 1)) } : null;
+  }
+  return null;
+}
+
+function tomlStringArray(raw) {
+  const text = stripTomlComment(raw);
+  if (!text.startsWith('[') || !text.endsWith(']')) return null;
+  const result = [];
+  let index = 1;
+  while (index < text.length - 1) {
+    while (/[\s,]/.test(text[index] || '')) index += 1;
+    if (index >= text.length - 1) break;
+    const rest = text.slice(index);
+    const value = tomlString(rest);
+    if (value === null) return null;
+    result.push(value);
+    if (rest[0] === '"') {
+      const token = rest.match(/^"(?:\\.|[^"\\])*"/);
+      if (!token) return null;
+      index += token[0].length;
+    } else {
+      const end = rest.indexOf("'", 1);
+      if (end < 0) return null;
+      index += end + 1;
+    }
+    while (/\s/.test(text[index] || '')) index += 1;
+    if (text[index] !== ',' && index < text.length - 1) return null;
+  }
+  return result;
+}
+
+function codexSystemConfigFile() {
+  if (process.env.CLAUDEX_CODEX_SYSTEM_CONFIG_FILE) return path.resolve(expandHome(process.env.CLAUDEX_CODEX_SYSTEM_CONFIG_FILE));
+  return isWindows
+    ? path.join(process.env.ProgramData || 'C:\\ProgramData', 'Codex', 'config.toml')
+    : '/etc/codex/config.toml';
+}
+
+function codexProjectTrusted(repoRoot) {
+  const forced = String(process.env.CLAUDEX_CODEX_PROJECT_TRUST || '').toLowerCase();
+  if (forced === 'trusted') return true;
+  if (forced === 'untrusted') return false;
+  let trusted = true;
+  for (const file of [codexSystemConfigFile(), path.join(codexHome, 'config.toml')]) {
+    let source;
+    try { source = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    let table = null;
+    for (const line of source.split(/\r?\n/)) {
+      const header = line.match(/^\s*\[\s*([^\]]+)\s*\]\s*(?:#.*)?$/);
+      if (header) { table = splitTomlDottedKey(header[1]); continue; }
+      if (!table || table.length !== 2 || table[0] !== 'projects') continue;
+      let configured;
+      try { configured = canonical(path.resolve(expandHome(table[1]))); } catch { continue; }
+      if (configured !== canonical(repoRoot)) continue;
+      const assignment = tomlAssignment(line);
+      if (!assignment || assignment.keys.length !== 1 || assignment.keys[0] !== 'trust_level') continue;
+      const level = tomlString(assignment.value);
+      if (level === 'trusted') trusted = true;
+      if (level === 'untrusted') trusted = false;
+    }
+  }
+  return trusted;
+}
+
+function codexConfigFiles(projectDir, repoRoot, projectTrusted = codexProjectTrusted(repoRoot)) {
+  const files = [codexSystemConfigFile(), path.join(codexHome, 'config.toml')];
+  if (projectTrusted && projectDir && repoRoot) {
     for (const directory of ancestry(projectDir, repoRoot).reverse()) files.push(path.join(directory, '.codex', 'config.toml'));
   }
-  for (const file of files) {
-    let source = '';
+  return files;
+}
+
+function effectiveCodexProjectConfig(projectDir, repoRoot) {
+  const projectTrusted = codexProjectTrusted(repoRoot);
+  let projectDocMaxBytes = DEFAULT_MAX_INSTRUCTION_BYTES;
+  let fallbackFilenames = [];
+  for (const file of codexConfigFiles(projectDir, repoRoot, projectTrusted)) {
+    let source;
     try { source = fs.readFileSync(file, 'utf8'); } catch { continue; }
-    const baseDirectory = path.dirname(file);
-
-    const blocks = source.split(/^\s*\[\[\s*skills\.config\s*\]\]\s*$/m).slice(1);
-    for (const block of blocks) {
-      const body = block.split(/^\s*\[\[/m)[0];
-      if (!/^\s*enabled\s*=\s*false\s*(?:#.*)?$/mi.test(body)) continue;
-      const match = body.match(/^\s*path\s*=\s*((?:"(?:\\.|[^"\\])*")|(?:'[^']*'))/mi);
-      if (match) addDisabledPath(disabled, tomlString(match[1]), baseDirectory);
-    }
-
-    const inline = source.match(/(?:^|\n)\s*skills\.config\s*=\s*\[([\s\S]*?)\]\s*(?:#.*)?(?:\n|$)/m);
-    if (inline) {
-      for (const table of inline[1].matchAll(/\{([\s\S]*?)\}/g)) {
-        if (!/(?:^|,)\s*enabled\s*=\s*false\s*(?:,|$)/i.test(table[1])) continue;
-        const match = table[1].match(/(?:^|,)\s*path\s*=\s*((?:"(?:\\.|[^"\\])*")|(?:'[^']*'))/i);
-        if (match) addDisabledPath(disabled, tomlString(match[1]), baseDirectory);
+    let inTopLevel = true;
+    for (const line of source.split(/\r?\n/)) {
+      if (/^\s*\[/.test(line)) { inTopLevel = false; continue; }
+      if (!inTopLevel) continue;
+      const assignment = tomlAssignment(line);
+      if (!assignment || assignment.keys.length !== 1) continue;
+      if (assignment.keys[0] === 'project_doc_max_bytes' && /^\d+$/.test(assignment.value)) {
+        projectDocMaxBytes = Math.min(MAX_TREE_BYTES, Number(assignment.value));
+      } else if (assignment.keys[0] === 'project_doc_fallback_filenames') {
+        const parsed = tomlStringArray(assignment.value);
+        if (parsed) fallbackFilenames = [...new Set(parsed.filter((name) => typeof name === 'string' && name && path.basename(name) === name))];
       }
     }
   }
-  return disabled;
+  return { projectTrusted, projectDocMaxBytes, fallbackFilenames };
+}
+
+function parseDisabledCodexSkills(projectDir, repoRoot, projectTrusted = codexProjectTrusted(repoRoot)) {
+  const states = new Map();
+  for (const file of codexConfigFiles(projectDir, repoRoot, projectTrusted)) {
+    let source = '';
+    try { source = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    const baseDirectory = path.dirname(file);
+    let current = null;
+    const commit = () => {
+      if (!current || !current.path || typeof current.enabled !== 'boolean') return;
+      const configured = path.isAbsolute(current.path) ? current.path : path.resolve(baseDirectory, current.path);
+      const root = /SKILL\.md$/i.test(configured) ? path.dirname(configured) : configured;
+      states.set(canonical(root), current.enabled);
+    };
+    for (const line of source.split(/\r?\n/)) {
+      const header = line.match(/^\s*\[\[\s*([^\]]+)\s*\]\]\s*(?:#.*)?$/);
+      if (header) {
+        commit();
+        const keys = splitTomlDottedKey(header[1]);
+        current = keys && keys.length === 2 && keys[0] === 'skills' && keys[1] === 'config' ? {} : null;
+        continue;
+      }
+      if (/^\s*\[/.test(line)) { commit(); current = null; continue; }
+      const assignment = tomlAssignment(line);
+      if (!assignment || !current || assignment.keys.length !== 1) continue;
+      if (assignment.keys[0] === 'path') current.path = tomlString(assignment.value);
+      if (assignment.keys[0] === 'enabled' && /^(?:true|false)$/i.test(assignment.value)) current.enabled = assignment.value.toLowerCase() === 'true';
+    }
+    commit();
+    // Inline tables are accepted by Codex too. Keep this deliberately strict:
+    // malformed or ambiguous tables never silently re-enable a disabled skill.
+    const inlinePattern = /(?:^|\n)\s*(?:"skills"|'skills'|skills)\s*\.\s*(?:"config"|'config'|config)\s*=\s*\[([\s\S]*?)\]\s*(?:#.*)?(?:\n|$)/gm;
+    for (const inline of source.matchAll(inlinePattern)) {
+      for (const table of inline[1].matchAll(/\{([^{}]*)\}/g)) {
+        let configuredPath = null;
+        let enabled = null;
+        for (const piece of table[1].split(',')) {
+          const assignment = tomlAssignment(piece);
+          if (!assignment || assignment.keys.length !== 1) continue;
+          if (assignment.keys[0] === 'path') configuredPath = tomlString(assignment.value);
+          if (assignment.keys[0] === 'enabled' && /^(?:true|false)$/i.test(assignment.value)) enabled = assignment.value.toLowerCase() === 'true';
+        }
+        if (!configuredPath || enabled === null) continue;
+        const configured = path.isAbsolute(configuredPath) ? configuredPath : path.resolve(baseDirectory, configuredPath);
+        states.set(canonical(/SKILL\.md$/i.test(configured) ? path.dirname(configured) : configured), enabled);
+      }
+    }
+  }
+  return new Set([...states].filter(([, enabled]) => !enabled).map(([configured]) => configured));
 }
 
 function codexPolicyDisablesImplicit(skillRoot) {
   let source = '';
   try { source = fs.readFileSync(path.join(skillRoot, 'agents', 'openai.yaml'), 'utf8'); } catch { return false; }
-  if (/^\s*policy\s*:\s*\{[^}\r\n]*\ballow_implicit_invocation\s*:\s*false\b[^}\r\n]*\}\s*(?:#.*)?$/mi.test(source)) return true;
   const lines = source.split(/\r?\n/);
   let policyIndent = -1;
   for (const line of lines) {
     if (/^\s*(?:#.*)?$/.test(line)) continue;
-    const indent = (line.match(/^\s*/) || [''])[0].length;
-    if (/^\s*policy\s*:\s*(?:&[A-Za-z0-9_-]+\s*)?(?:#.*)?$/.test(line)) { policyIndent = indent; continue; }
-    if (policyIndent >= 0 && indent <= policyIndent) policyIndent = -1;
-    if (policyIndent >= 0 && /^\s*allow_implicit_invocation\s*:\s*false\s*(?:#.*)?$/i.test(line)) return true;
+    const entry = yamlMappingEntry(line);
+    if (!entry) continue;
+    if (entry.indent === 0 && entry.key === 'policy') {
+      policyIndent = entry.indent;
+      const flow = entry.value.trim();
+      if (flow.startsWith('{') && flow.endsWith('}')) {
+        for (const piece of flow.slice(1, -1).split(',')) {
+          const item = yamlMappingEntry(piece.trim());
+          if (item && item.key === 'allow_implicit_invocation' && /^false(?:\s+#.*)?$/i.test(item.value.trim())) return true;
+        }
+      }
+      continue;
+    }
+    if (policyIndent >= 0 && entry.indent <= policyIndent) policyIndent = -1;
+    if (policyIndent >= 0 && entry.key === 'allow_implicit_invocation' && /^false(?:\s+#.*)?$/i.test(entry.value.trim())) return true;
   }
   return false;
 }
@@ -284,7 +591,7 @@ function remapClaudeModel(markdown) {
   const parsed = frontmatter(markdown);
   if (!parsed) return { markdown, changed: false, mappings: [] };
   const mappings = [];
-  const replaced = parsed.body.replace(/^(\s*model\s*:\s*)(["']?)([^\s#"']+)\2(\s*(?:#.*)?)$/gmi,
+  const replaced = parsed.body.replace(/^(model\s*:\s*)(["']?)([^\s#"']+)\2(\s*(?:#.*)?)$/gmi,
     (line, prefix, quote, model, suffix) => {
       const normalized = model.toLocaleLowerCase().replace(/\[1m\]$/, '');
       if (!/(?:opus|sonnet|haiku|fable|best)/.test(normalized)) return line;
@@ -319,7 +626,8 @@ function discoverSkillRoot(root, metadata, candidates, disabled, warnings) {
     return;
   }
   let entries = [];
-  if (existsFile(path.join(root, 'SKILL.md'))) entries = [{ name: path.basename(root), root }];
+  const directSkillRoot = existsFile(path.join(root, 'SKILL.md'));
+  if (directSkillRoot) entries = [{ name: path.basename(root), root }];
   else {
     try {
       entries = fs.readdirSync(root, { withFileTypes: true })
@@ -341,6 +649,10 @@ function discoverSkillRoot(root, metadata, candidates, disabled, warnings) {
       warnings.push(`Ignored project skill symlink outside the repository: ${entry.root}`);
       continue;
     }
+    if (metadata.pluginRootBoundary && !isWithin(realRoot, metadata.pluginRootBoundary)) {
+      warnings.push(`Ignored plugin skill symlink outside its plugin: ${entry.root}`);
+      continue;
+    }
     if (isDisabled(disabled, realRoot, skillFile)) continue;
     let markdown;
     try { markdown = fs.readFileSync(skillFile, 'utf8'); }
@@ -350,7 +662,7 @@ function discoverSkillRoot(root, metadata, candidates, disabled, warnings) {
       const parsed = codexSkillIdentity(markdown);
       if (!parsed.valid) { warnings.push(`Ignored ${skillFile}: ${parsed.reason}`); continue; }
       identity = skillAlias(parsed.name);
-    } else if (metadata.pluginRootBoundary && canonical(entry.root) === canonical(metadata.pluginRootBoundary)) {
+    } else if (metadata.pluginRootBoundary && directSkillRoot) {
       identity = skillAlias(yamlTopLevelScalar(markdown, 'name') || entry.name);
     }
     candidates.push({
@@ -363,6 +675,7 @@ function discoverSkillRoot(root, metadata, candidates, disabled, warnings) {
       manualOnly: metadata.provider === 'codex' && codexPolicyDisablesImplicit(entry.root),
       overrideState: skillOverride,
       excludePluginRuntime: Boolean(metadata.pluginRootBoundary && canonical(entry.root) === canonical(metadata.pluginRootBoundary)),
+      scanBoundary: metadata.pluginRootBoundary || metadata.projectBoundary || null,
     });
   }
 }
@@ -383,10 +696,24 @@ function discoverClaudeCommands(root, candidates, warnings, metadata = {}) {
     return;
   }
   if (!existsDirectory(root)) return;
+  if (existsFile(path.join(root, 'SKILL.md'))) {
+    discoverSkillRoot(root, {
+      ...metadata, provider: 'claude', kind: metadata.kind || 'claude-command',
+      sourceTag: metadata.sourceTag || 'claude-command', priority: metadata.priority || 20,
+    }, candidates, new Set(), warnings);
+    return;
+  }
   let entries;
   try { entries = fs.readdirSync(root, { withFileTypes: true }); }
   catch (error) { warnings.push(`Could not read Claude command directory ${root}: ${error.message}`); return; }
   for (const entry of entries) {
+    if ((entry.isDirectory() || entry.isSymbolicLink()) && existsFile(path.join(root, entry.name, 'SKILL.md'))) {
+      discoverSkillRoot(path.join(root, entry.name), {
+        ...metadata, provider: 'claude', kind: metadata.kind || 'claude-command',
+        sourceTag: metadata.sourceTag || 'claude-command', priority: metadata.priority || 20,
+      }, candidates, new Set(), warnings);
+      continue;
+    }
     if (!entry.isFile() || !/\.md$/i.test(entry.name)) continue;
     const commandName = entry.name.replace(/\.md$/i, '');
     const skillOverride = overrideState(metadata.skillOverrides && metadata.skillOverrides[commandName]);
@@ -447,23 +774,37 @@ function discoverNativePluginNames() {
 }
 
 function mergedClaudeSettings(projectDir, repoRoot) {
-  const settings = { enabledPlugins: {}, skillOverrides: {} };
+  const settings = { enabledPlugins: {}, skillOverrides: {}, disableSideloadFlags: false, strictPluginOnlyCustomization: false };
   const apply = (file) => {
     const value = readJson(file, {});
     if (value && typeof value.enabledPlugins === 'object' && value.enabledPlugins) Object.assign(settings.enabledPlugins, value.enabledPlugins);
     if (value && typeof value.skillOverrides === 'object' && value.skillOverrides) Object.assign(settings.skillOverrides, value.skillOverrides);
+    if (typeof value.disableSideloadFlags === 'boolean') settings.disableSideloadFlags = value.disableSideloadFlags;
+    if (typeof value.strictPluginOnlyCustomization === 'boolean') settings.strictPluginOnlyCustomization = value.strictPluginOnlyCustomization;
   };
   apply(path.join(claudeHome, 'settings.json'));
-  for (const directory of ancestry(projectDir, repoRoot).reverse()) {
-    apply(path.join(directory, '.claude', 'settings.json'));
+  apply(path.join(repoRoot, '.claude', 'settings.json'));
+  // Claude still reads legacy nested local settings, but the repository-root
+  // local file is authoritative when both forms exist.
+  for (const directory of ancestry(projectDir, repoRoot).slice(0, -1).reverse()) {
     apply(path.join(directory, '.claude', 'settings.local.json'));
   }
+  apply(path.join(repoRoot, '.claude', 'settings.local.json'));
   const managed = process.env.CLAUDEX_CLAUDE_MANAGED_SETTINGS_FILE || (isWindows
-    ? path.join(process.env.ProgramData || 'C:\\ProgramData', 'ClaudeCode', 'managed-settings.json')
+    ? path.join(process.env.SystemDrive || 'C:', 'Program Files', 'ClaudeCode', 'managed-settings.json')
     : process.platform === 'darwin'
       ? '/Library/Application Support/ClaudeCode/managed-settings.json'
       : '/etc/claude-code/managed-settings.json');
   apply(managed);
+  for (const dropInDirectory of [...new Set([
+    path.join(path.dirname(managed), 'managed-settings.d'),
+    `${managed}.d`,
+  ])]) {
+    if (!existsDirectory(dropInDirectory)) continue;
+    let files = [];
+    try { files = fs.readdirSync(dropInDirectory).filter((name) => /\.json$/i.test(name)).sort(); } catch { files = []; }
+    for (const name of files) apply(path.join(dropInDirectory, name));
+  }
   return settings;
 }
 
@@ -499,22 +840,51 @@ function pluginManifest(pluginRoot, provider = 'codex') {
   const codex = path.join(pluginRoot, '.codex-plugin', 'plugin.json');
   const claude = path.join(pluginRoot, '.claude-plugin', 'plugin.json');
   const file = provider === 'claude'
-    ? (existsFile(claude) ? claude : codex)
-    : (existsFile(codex) ? codex : claude);
-  return { file, value: readJson(file, {}) };
+    ? (existsFile(claude) ? claude : existsFile(codex) ? codex : null)
+    : (existsFile(codex) ? codex : existsFile(claude) ? claude : null);
+  if (!file) {
+    return provider === 'claude'
+      ? { file: null, value: {}, valid: true, present: false, error: null }
+      : { file: null, value: {}, valid: false, present: false, error: 'required plugin manifest is missing' };
+  }
+  try {
+    const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('manifest root must be an object');
+    if (typeof value.name !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value.name)) {
+      throw new Error('manifest name is required and must use lowercase words separated by hyphens');
+    }
+    for (const field of ['skills', 'commands']) {
+      if (value[field] !== undefined && typeof value[field] !== 'string'
+          && !(Array.isArray(value[field]) && value[field].every((entry) => typeof entry === 'string'))) {
+        throw new Error(`manifest ${field} must be a string or array of strings`);
+      }
+    }
+    if (value.defaultEnabled !== undefined && typeof value.defaultEnabled !== 'boolean') {
+      throw new Error('manifest defaultEnabled must be a boolean');
+    }
+    return { file, value, valid: true, present: true, error: null };
+  } catch (error) {
+    return { file, value: {}, valid: false, present: true, error: error.message };
+  }
 }
 
-function pluginSkillRoots(pluginRoot, provider, warnings) {
-  const { file: manifestFile, value: manifest } = pluginManifest(pluginRoot, provider);
+function pluginSkillRoots(pluginRoot, provider, warnings, inspected = pluginManifest(pluginRoot, provider)) {
+  const { file: manifestFile, value: manifest } = inspected;
   let configured = manifest && manifest.skills;
   if (typeof configured === 'string') configured = [configured];
   if (!Array.isArray(configured)) configured = [];
-  if (!/\.codex-plugin[\\/]plugin\.json$/i.test(manifestFile || '')) configured = ['skills', ...configured];
-  else if (configured.length === 0) configured = ['skills'];
+  const claudeManifest = !/\.codex-plugin[\\/]plugin\.json$/i.test(manifestFile || '');
+  const hasConfiguredSkills = Object.prototype.hasOwnProperty.call(manifest || {}, 'skills');
+  if (claudeManifest) configured = ['./skills', ...configured];
+  else if (!claudeManifest && configured.length === 0) configured = ['skills'];
   configured = [...new Set(configured)];
   const roots = [];
   for (const relative of configured) {
     if (typeof relative !== 'string' || path.isAbsolute(relative)) continue;
+    if (claudeManifest && !relative.startsWith('./')) {
+      warnings.push(`Ignored Claude plugin skill path that must start with ./: ${relative}`);
+      continue;
+    }
     const candidate = path.resolve(pluginRoot, relative);
     if (!isWithin(candidate, pluginRoot)) {
       warnings.push(`Ignored plugin skill path outside its plugin: ${relative}`);
@@ -522,24 +892,36 @@ function pluginSkillRoots(pluginRoot, provider, warnings) {
     }
     if (existsDirectory(candidate)) roots.push(candidate);
   }
-  if (existsFile(path.join(pluginRoot, 'SKILL.md'))) roots.unshift(pluginRoot);
+  if (claudeManifest && !hasConfiguredSkills && !existsDirectory(path.join(pluginRoot, 'skills'))
+      && existsFile(path.join(pluginRoot, 'SKILL.md'))) roots.unshift(pluginRoot);
   return roots;
 }
 
 function discoverPluginContents(pluginRoot, metadata, candidates, disabled, warnings) {
-  const { file: manifestFile, value: manifest } = pluginManifest(pluginRoot, metadata.provider);
+  const inspected = pluginManifest(pluginRoot, metadata.provider);
+  const { file: manifestFile, value: manifest } = inspected;
+  if (!inspected.valid) {
+    warnings.push(`Ignored malformed plugin manifest ${manifestFile || pluginRoot}: ${inspected.error}`);
+    return;
+  }
   const namespace = skillAlias((manifest && manifest.name) || metadata.pluginName || path.basename(pluginRoot), 'plugin');
-  for (const root of pluginSkillRoots(pluginRoot, metadata.provider, warnings)) {
+  for (const root of pluginSkillRoots(pluginRoot, metadata.provider, warnings, inspected)) {
     discoverSkillRoot(root, { ...metadata, namespace, pluginName: namespace, pluginRootBoundary: pluginRoot }, candidates, disabled, warnings);
   }
   if (!/\.codex-plugin[\\/]plugin\.json$/i.test(manifestFile || '')) {
     let commandRoots = manifest && manifest.commands;
     if (typeof commandRoots === 'string') commandRoots = [commandRoots];
-    if (!Array.isArray(commandRoots)) commandRoots = ['commands'];
+    if (!Array.isArray(commandRoots)) commandRoots = ['./commands'];
     for (const relative of commandRoots) {
       if (typeof relative !== 'string' || path.isAbsolute(relative)) continue;
+      if (!relative.startsWith('./')) {
+        warnings.push(`Ignored Claude plugin command path that must start with ./: ${relative}`);
+        continue;
+      }
       const commandRoot = path.resolve(pluginRoot, relative);
-      if (isWithin(commandRoot, pluginRoot)) discoverClaudeCommands(commandRoot, candidates, warnings, { ...metadata, namespace });
+      if (isWithin(commandRoot, pluginRoot)) discoverClaudeCommands(commandRoot, candidates, warnings, {
+        ...metadata, namespace, pluginRootBoundary: pluginRoot,
+      });
     }
   }
 }
@@ -700,18 +1082,28 @@ function assignPluginAliases(candidates, nativePluginNames = new Set()) {
 function sensitivePath(relative) {
   const normalized = relative.replace(/\\/g, '/').toLocaleLowerCase();
   const base = path.posix.basename(normalized);
+  const matches = (suffix) => normalized === suffix || normalized.endsWith(`/${suffix}`);
   if (base === '.env' || (/^\.env\./.test(base) && !/\.(?:example|sample|template)$/.test(base))) return true;
-  if (['.npmrc', '.pypirc', '.netrc', 'credentials', 'id_rsa', 'id_ed25519'].includes(base)) return true;
-  return normalized.endsWith('/.aws/credentials') || normalized.endsWith('/.config/gcloud/application_default_credentials.json');
+  if (['.npmrc', '.pypirc', '.netrc', '.git-credentials', '.credentials.json', 'credentials',
+    'credentials.json', 'auth.json', 'id_rsa', 'id_ed25519'].includes(base)) return true;
+  return matches('.aws/credentials')
+    || matches('.config/gcloud/application_default_credentials.json')
+    || matches('.config/gh/hosts.yml')
+    || matches('.config/glab-cli/config.yml')
+    || matches('.docker/config.json')
+    || matches('.kube/config');
 }
 
 function sensitiveContent(buffer) {
   return /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/.test(buffer.toString('utf8'));
 }
 
-function scanTree(sourceRoot, excludePluginRuntime = false) {
+function scanTree(sourceRoot, excludePluginRuntime = false, allowedBoundary = sourceRoot) {
   const root = canonical(sourceRoot);
+  const boundary = canonical(allowedBoundary || sourceRoot);
+  const boundaryLabel = root === boundary ? 'root' : 'trust boundary';
   if (!existsDirectory(root)) throw new Error(`skill source is not a directory: ${sourceRoot}`);
+  if (!isWithin(root, boundary)) throw new Error(`skill source is outside its trust boundary: ${sourceRoot}`);
   const files = [];
   let totalBytes = 0;
   const activeDirectories = new Set();
@@ -719,7 +1111,7 @@ function scanTree(sourceRoot, excludePluginRuntime = false) {
   const walk = (physicalDirectory, logicalPrefix, depth) => {
     if (depth > MAX_DEPTH) throw new Error(`skill tree exceeds ${MAX_DEPTH} levels`);
     const realDirectory = canonical(physicalDirectory);
-    if (!isWithin(realDirectory, root)) throw new Error(`skill support path escapes its root: ${logicalPrefix || '.'}`);
+    if (!isWithin(realDirectory, boundary)) throw new Error(`skill support path escapes its ${boundaryLabel}: ${logicalPrefix || '.'}`);
     if (activeDirectories.has(realDirectory)) throw new Error(`skill tree contains a directory cycle: ${logicalPrefix || '.'}`);
     activeDirectories.add(realDirectory);
     let entries = fs.readdirSync(physicalDirectory, { withFileTypes: true });
@@ -735,7 +1127,7 @@ function scanTree(sourceRoot, excludePluginRuntime = false) {
       let targetStat = stat;
       if (stat.isSymbolicLink()) {
         resolved = canonical(physical);
-        if (!isWithin(resolved, root)) throw new Error(`skill support symlink escapes its root: ${logical}`);
+        if (!isWithin(resolved, boundary)) throw new Error(`skill support symlink escapes its ${boundaryLabel}: ${logical}`);
         targetStat = fs.statSync(resolved);
       }
       if (targetStat.isDirectory()) {
@@ -749,7 +1141,7 @@ function scanTree(sourceRoot, excludePluginRuntime = false) {
       totalBytes += targetStat.size;
       if (totalBytes > MAX_TREE_BYTES) throw new Error(`skill tree exceeds ${MAX_TREE_BYTES} bytes`);
       const fingerprint = cachedFileFingerprint(resolved, targetStat);
-      if (fingerprint.sensitive) throw new Error(`skill tree contains private-key material: ${logical}`);
+      if (fingerprint.sensitive) throw new Error(`skill tree contains material that resembles a private key: ${logical}`);
       files.push({
         relative: logical.split(path.sep).join('/'), source: resolved, size: targetStat.size,
         mode: targetStat.mode & 0o777, digest: fingerprint.digest,
@@ -776,7 +1168,7 @@ function prepareCandidates(candidates, warnings) {
           files: [{ relative: 'SKILL.md', source: candidate.commandFile, size: bytes.length, mode: 0o600, digest: crypto.createHash('sha256').update(bytes).digest('hex') }],
           signature: crypto.createHash('sha256').update(bytes).digest('hex'),
         };
-      } else candidate.tree = scanTree(candidate.source, candidate.excludePluginRuntime);
+      } else candidate.tree = scanTree(candidate.source, candidate.excludePluginRuntime, candidate.scanBoundary || candidate.source);
       prepared.push(candidate);
     } catch (error) {
       warnings.push(`Ignored unsafe or unreadable skill ${candidate.source}: ${error.message}`);
@@ -830,6 +1222,59 @@ function materializeCandidate(mapping, destination, modelMappings) {
   }
 }
 
+function verifiedInstructionBytes(file) {
+  const bytes = fs.readFileSync(file.realSource);
+  const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (bytes.length !== file.size || digest !== file.digest) {
+    throw new SourceChangedError(`Codex instructions changed while staging: ${file.source}`);
+  }
+  return Buffer.from(bytes.toString('utf8').trim(), 'utf8');
+}
+
+function utf8Prefix(buffer, limit) {
+  if (buffer.length <= limit) return buffer;
+  let text = buffer.subarray(0, Math.max(0, limit)).toString('utf8');
+  if (text.endsWith('\uFFFD')) text = text.slice(0, -1);
+  return Buffer.from(text, 'utf8');
+}
+
+function materializeInstructions(instructions, stage) {
+  const chunks = [];
+  const records = [];
+  let written = 0;
+  for (const file of instructions.files) {
+    const bytes = verifiedInstructionBytes(file);
+    const separator = written > 0 && file.includedBytes > 0 ? Buffer.from('\n\n') : Buffer.alloc(0);
+    const content = utf8Prefix(bytes, file.includedBytes);
+    if (content.length > 0) {
+      chunks.push(separator, content);
+      written += separator.length + content.length;
+    }
+    records.push({
+      scope: file.scope, source: file.source, name: file.name,
+      includedBytes: content.length, truncated: content.length < bytes.length,
+    });
+  }
+  if (written > 0) writeExclusive(path.join(stage, 'CLAUDE.md'), Buffer.concat(chunks), 0o600);
+  return records;
+}
+
+function currentInstructionSignature(instructions) {
+  if (instructions.signature === 'off') return 'off';
+  const files = instructions.files.map((file) => {
+    const bytes = fs.readFileSync(file.realSource);
+    if (bytes.length !== file.size) throw new SourceChangedError(`Codex instructions changed while publishing: ${file.source}`);
+    return {
+      scope: file.scope, source: file.realSource, size: bytes.length,
+      digest: crypto.createHash('sha256').update(bytes).digest('hex'),
+      renderedSize: Buffer.byteLength(bytes.toString('utf8').trim(), 'utf8'), includedBytes: file.includedBytes,
+    };
+  });
+  return crypto.createHash('sha256').update(JSON.stringify({
+    files, maxBytes: instructions.maxBytes, fallbackFilenames: instructions.fallbackFilenames,
+  })).digest('hex');
+}
+
 function sourceSignature(mapping) {
   return {
     alias: mapping.alias, namespace: mapping.namespace || null,
@@ -843,8 +1288,10 @@ function discover(projectDir) {
   const warnings = [];
   const candidates = [];
   const repoRoot = findRepoRoot(projectDir);
+  const codexConfig = effectiveCodexProjectConfig(projectDir, repoRoot);
+  const instructions = discoverInstructions(projectDir, repoRoot, warnings, codexConfig);
   const directories = ancestry(projectDir, repoRoot);
-  const disabled = parseDisabledCodexSkills(projectDir, repoRoot);
+  const disabled = parseDisabledCodexSkills(projectDir, repoRoot, codexConfig.projectTrusted);
   const claudeSettings = mergedClaudeSettings(projectDir, repoRoot);
   const nativeNames = discoverNativeProjectNames(directories);
   const nativePluginNames = discoverNativePluginNames();
@@ -872,6 +1319,14 @@ function discover(projectDir) {
   discoverSkillRoot(path.join(codexHome, 'skills'), {
     provider: 'codex', kind: 'codex-legacy', sourceTag: 'codex-legacy', priority: 60,
   }, candidates, disabled, warnings);
+  // Codex ships its built-in skills below CODEX_HOME/skills/.system rather
+  // than directly below the ordinary user skill root. They are visible in
+  // Codex's skill picker and must therefore be visible in Claudex too. Keep
+  // them lower precedence than user/admin sources so a user-installed skill
+  // with the same identity retains the short alias.
+  discoverSkillRoot(path.join(codexHome, 'skills', '.system'), {
+    provider: 'codex', kind: 'codex-system', sourceTag: 'codex-system', priority: 90,
+  }, candidates, disabled, warnings);
   const adminRoot = process.env.CLAUDEX_CODEX_ADMIN_SKILLS_DIR || (isWindows
     ? path.join(process.env.ProgramData || 'C:\\ProgramData', 'Codex', 'skills')
     : '/etc/codex/skills');
@@ -888,11 +1343,17 @@ function discover(projectDir) {
   discoverClaudePlugins(projectDir, repoRoot, candidates, disabled, warnings);
   discoverCodexPlugins(candidates, disabled, warnings);
   const unique = uniqueCandidates(prepareCandidates(candidates, warnings));
+  const allowPluginDirs = !claudeSettings.disableSideloadFlags;
+  if (!allowPluginDirs) warnings.push(
+    'Managed Claude settings disable --plugin-dir sideloading; imported skills from plugins and $skill reference hooks were omitted. Ask an administrator to install or allow those plugins.',
+  );
   return {
     mappings: assignAliases(unique, nativeNames),
-    pluginMappings: assignPluginAliases(unique, nativePluginNames),
+    pluginMappings: allowPluginDirs ? assignPluginAliases(unique, nativePluginNames) : [],
+    instructions,
     warnings,
     repoRoot,
+    allowPluginDirs,
   };
 }
 
@@ -901,8 +1362,11 @@ function promptHookSource() {
 const fs = require('fs');
 const path = require('path');
 const MAX_INPUT = 1048576;
-const MAX_CONTEXT = 65536;
-const MAX_SKILL = 32768;
+// Claude Code currently injects at most 10,000 characters of hook context
+// directly. Stay below that boundary in UTF-8 bytes so referenced skill
+// instructions do not unexpectedly become an out-of-band attachment.
+const MAX_CONTEXT = 10000;
+const MAX_SKILL = 8192;
 const bytes = (value) => Buffer.byteLength(value, 'utf8');
 const truncateBytes = (value, limit) => {
   if (bytes(value) <= limit) return value;
@@ -937,7 +1401,8 @@ process.stdin.on('end', () => {
         const recovery = '\\n[Skill truncated; read the complete file at ' + item.file + ']';
         markdown = truncateBytes(markdown, MAX_SKILL - bytes(recovery)) + recovery;
       }
-      const block = '\\nThe user explicitly referenced Codex skill $' + name + '. Apply these instructions. Skill directory: ' + item.directory + '\\n<codex-skill name="' + name + '">\\n' + markdown + '\\n</codex-skill>\\n';
+      const ecosystem = item.provider === 'claude' ? 'Claude Code' : item.provider === 'codex' ? 'Codex' : 'shared';
+      const block = '\\nThe user explicitly referenced the installed ' + ecosystem + ' skill $' + name + '. Apply these instructions. Skill directory: ' + item.directory + '\\n<claudex-skill name="' + name + '" provider="' + item.provider + '">\\n' + markdown + '\\n</claudex-skill>\\n';
       if (bytes(context) + bytes(block) > MAX_CONTEXT) {
         omitted.push('$' + name + ' (' + item.file + ')');
         continue;
@@ -956,8 +1421,8 @@ process.stdin.on('end', () => {
 `;
 }
 
-function materializeDollarReferencePlugin(stage, references) {
-  if (!dollarReferencesEnabled || references.length === 0) return null;
+function materializeDollarReferencePlugin(stage, references, allowPluginDirs = true) {
+  if (!allowPluginDirs || !dollarReferencesEnabled || references.length === 0) return null;
   const relative = path.join('plugins', 'claudex-codex-skill-references');
   const root = path.join(stage, relative);
   writeExclusive(path.join(root, '.claude-plugin', 'plugin.json'), Buffer.from(`${JSON.stringify({ name: 'claudex-codex-skill-references', version: '1.0.0', description: 'Claudex Codex skill reference compatibility' }, null, 2)}\n`), 0o600);
@@ -971,15 +1436,45 @@ function generationResult(generation, manifest, extraWarnings = [], currentWarni
   const pluginDirs = (manifest.pluginRelativeDirs || []).map((relative) => path.join(generation, ...relative.split('/')));
   return {
     schema: BRIDGE_SCHEMA, enabled: true, overlay: generation, addDirs: [generation], pluginDirs,
-    skills: manifest.skills || [], modelMappings: manifest.modelMappings || [],
-    warnings: [...currentWarnings, ...extraWarnings],
+    skills: manifest.skills || [], instructions: manifest.instructions || [], modelMappings: manifest.modelMappings || [],
+    warnings: boundedWarnings([...currentWarnings, ...extraWarnings]),
   };
+}
+
+function publishedContentInventory(root) {
+  const files = [];
+  let total = 0;
+  const walk = (directory, prefix = '') => {
+    let entries = fs.readdirSync(directory, { withFileTypes: true });
+    entries = entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (relative === 'manifest.json') continue;
+      const candidate = path.join(directory, entry.name);
+      const stat = fs.lstatSync(candidate);
+      if (stat.isSymbolicLink()) throw new Error(`published cache contains a symlink: ${relative}`);
+      if (stat.isDirectory()) { walk(candidate, relative); continue; }
+      if (!stat.isFile() || stat.size > MAX_FILE_BYTES || files.length >= MAX_FILES) throw new Error('published cache exceeds safety limits');
+      total += stat.size;
+      if (total > MAX_TREE_BYTES) throw new Error('published cache exceeds safety limits');
+      const bytes = fs.readFileSync(candidate);
+      files.push({ relative, size: bytes.length, digest: crypto.createHash('sha256').update(bytes).digest('hex') });
+    }
+  };
+  walk(root);
+  return files;
+}
+
+function contentIntegrity(files) {
+  return crypto.createHash('sha256').update(JSON.stringify(files)).digest('hex');
 }
 
 function validManifest(file, expectedPolicyFingerprint = null) {
   const manifest = readJson(file, null);
   if (!manifest || manifest.schema !== BRIDGE_SCHEMA || manifest.format !== BRIDGE_FORMAT
-      || !Array.isArray(manifest.skills) || !Array.isArray(manifest.pluginRelativeDirs)) return null;
+      || !Array.isArray(manifest.skills) || !Array.isArray(manifest.instructions)
+      || !Array.isArray(manifest.pluginRelativeDirs) || !Array.isArray(manifest.contentFiles)
+      || typeof manifest.contentIntegrity !== 'string') return null;
   if (expectedPolicyFingerprint && manifest.policyFingerprint !== expectedPolicyFingerprint) return null;
   const generation = path.dirname(file);
   for (const relative of manifest.pluginRelativeDirs) {
@@ -1004,6 +1499,17 @@ function validManifest(file, expectedPolicyFingerprint = null) {
     } else return null;
     if (!isWithin(skillFile, generation) || !existsFile(skillFile)) return null;
   }
+  if (manifest.instructions.length > 0 && !existsFile(path.join(generation, 'CLAUDE.md'))) return null;
+  for (const instruction of manifest.instructions) {
+    if (!instruction || !['global', 'project'].includes(instruction.scope)
+        || typeof instruction.source !== 'string' || !instruction.source
+        || typeof instruction.includedBytes !== 'number' || instruction.includedBytes < 0) return null;
+  }
+  try {
+    const inventory = publishedContentInventory(generation);
+    if (contentIntegrity(inventory) !== manifest.contentIntegrity
+        || JSON.stringify(inventory) !== JSON.stringify(manifest.contentFiles)) return null;
+  } catch { return null; }
   return manifest;
 }
 
@@ -1132,13 +1638,17 @@ function syncOnce(projectDir) {
     kind: mapping.candidate.kind, provider: mapping.candidate.provider, manualOnly: mapping.candidate.manualOnly,
     overrideState: mapping.candidate.overrideState || 'on',
   })));
+  const policyInstructions = discovered.instructions.files.map((file) => ({
+    scope: file.scope, source: file.realSource, name: file.name,
+  }));
   const policyFingerprint = crypto.createHash('sha256').update(JSON.stringify({
-    format: BRIDGE_FORMAT, pluginEnabled, dollarReferencesEnabled,
-    skills: policySkills,
+    format: BRIDGE_FORMAT, pluginEnabled, dollarReferencesEnabled, instructionBridgeEnabled,
+    allowPluginDirs: discovered.allowPluginDirs, skills: policySkills, instructions: policyInstructions,
   })).digest('hex');
   const fingerprint = crypto.createHash('sha256').update(JSON.stringify({
     schema: BRIDGE_SCHEMA, format: BRIDGE_FORMAT, platform: process.platform,
-    signatures, dollarReferencesEnabled, policyFingerprint,
+    signatures, instructionSignature: discovered.instructions.signature,
+    dollarReferencesEnabled, instructionBridgeEnabled, policyFingerprint,
   })).digest('hex').slice(0, 20);
   const projectHash = crypto.createHash('sha256').update(canonical(projectDir)).digest('hex').slice(0, 12);
   const generations = path.join(configDir, 'skill-bridge', 'generations');
@@ -1161,6 +1671,7 @@ function syncOnce(projectDir) {
   const pluginRelativeDirs = [];
   const dollarReferences = [];
   try {
+    const instructionRecords = materializeInstructions(discovered.instructions, stage);
     for (const mapping of discovered.mappings) {
       const destination = path.join(skillsDir, mapping.alias);
       materializeCandidate(mapping, destination, modelMappings);
@@ -1174,6 +1685,7 @@ function syncOnce(projectDir) {
       dollarReferences.push([mapping.alias.toLocaleLowerCase(), {
         file: path.join(generation, '.claude', 'skills', mapping.alias, 'SKILL.md'),
         directory: path.join(generation, '.claude', 'skills', mapping.alias),
+        provider: mapping.candidate.provider,
       }]);
     }
 
@@ -1200,24 +1712,32 @@ function syncOnce(projectDir) {
         dollarReferences.push([fullAlias.toLocaleLowerCase(), {
           file: path.join(generation, 'plugins', namespace, 'skills', mapping.alias, 'SKILL.md'),
           directory: path.join(generation, 'plugins', namespace, 'skills', mapping.alias),
+          provider: mapping.candidate.provider,
         }]);
       }
       pluginRelativeDirs.push(relative.split(path.sep).join('/'));
     }
 
-    const hookPlugin = materializeDollarReferencePlugin(stage, dollarReferences);
+    const hookPlugin = materializeDollarReferencePlugin(stage, dollarReferences, discovered.allowPluginDirs);
     if (hookPlugin) pluginRelativeDirs.push(hookPlugin.split(path.sep).join('/'));
 
     for (const mapping of allMappings) {
       const fresh = mapping.candidate.commandFile
         ? crypto.createHash('sha256').update(fs.readFileSync(mapping.candidate.commandFile)).digest('hex')
-        : scanTree(mapping.candidate.source, mapping.candidate.excludePluginRuntime).signature;
+        : scanTree(mapping.candidate.source, mapping.candidate.excludePluginRuntime,
+          mapping.candidate.scanBoundary || mapping.candidate.source).signature;
       if (fresh !== mapping.candidate.tree.signature) throw new SourceChangedError(`skill changed while publishing: ${mapping.candidate.source}`);
     }
+    if (currentInstructionSignature(discovered.instructions) !== discovered.instructions.signature) {
+      throw new SourceChangedError('Codex instructions changed while publishing');
+    }
 
+    const contentFiles = publishedContentInventory(stage);
     manifest = {
       schema: BRIDGE_SCHEMA, format: BRIDGE_FORMAT, project: path.resolve(projectDir), repoRoot: discovered.repoRoot,
-      fingerprint, policyFingerprint, publishedAt: Date.now(), skills: records, pluginRelativeDirs, modelMappings, warnings: discovered.warnings,
+      fingerprint, policyFingerprint, publishedAt: Date.now(), skills: records, instructions: instructionRecords,
+      pluginRelativeDirs, modelMappings, warnings: boundedWarnings(discovered.warnings), contentFiles,
+      contentIntegrity: contentIntegrity(contentFiles),
     };
     fs.writeFileSync(path.join(stage, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
     if (process.env.NODE_ENV === 'test' && process.env.CLAUDEX_TEST_FAIL_SKILL_PUBLICATION === '1') {
@@ -1242,7 +1762,7 @@ function syncOnce(projectDir) {
 }
 
 function sync(projectDir) {
-  if (!bridgeEnabled) return { schema: BRIDGE_SCHEMA, enabled: false, overlay: null, addDirs: [], pluginDirs: [], skills: [], warnings: [] };
+  if (!bridgeEnabled) return { schema: BRIDGE_SCHEMA, enabled: false, overlay: null, addDirs: [], pluginDirs: [], skills: [], instructions: [], warnings: [] };
   const projectHash = crypto.createHash('sha256').update(canonical(projectDir)).digest('hex').slice(0, 12);
   const generations = path.join(configDir, 'skill-bridge', 'generations');
   let lastError;
@@ -1278,12 +1798,16 @@ function printList(result) {
     process.stdout.write('Claudex skill compatibility is disabled (CLAUDEX_SKILL_BRIDGE=off).\n');
     return;
   }
-  process.stdout.write(`Claudex skills: ${result.skills.length} bridged aliases, ${result.pluginDirs.length} isolated compatibility plugins\n`);
+  process.stdout.write(`Claudex skills: ${result.skills.length} bridged aliases, ${result.pluginDirs.length} isolated compatibility plugins, ${(result.instructions || []).length} Codex instruction files\n`);
   for (const skill of result.skills) {
     const qualifier = skill.collisionAlias ? ' (collision alias)' : '';
     process.stdout.write(`/${skill.alias}\t${skill.kind}${qualifier}\t${skill.source}\n`);
   }
   for (const pluginDir of result.pluginDirs) process.stdout.write(`plugin\t${pluginDir}\n`);
+  for (const instruction of result.instructions || []) {
+    const qualifier = instruction.truncated ? ' (truncated)' : '';
+    process.stdout.write(`instructions\t${instruction.scope}${qualifier}\t${instruction.source}\n`);
+  }
   for (const mapping of result.modelMappings || []) process.stdout.write(`model\t${mapping.from} -> ${mapping.to}\t${mapping.source}\n`);
   for (const warning of result.warnings || []) process.stderr.write(`claudex skills: ${warning}\n`);
 }
@@ -1309,7 +1833,7 @@ function main() {
 if (require.main === module) {
   try { main(); }
   catch (error) {
-    process.stderr.write(`claudex skill bridge: ${error.message}\n`);
+    process.stderr.write(`claudex skill bridge: ${safeWarning(error.message)}\n`);
     process.exit(1);
   }
 }
