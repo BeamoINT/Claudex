@@ -1,0 +1,14 @@
+# The maintainer reviews every change because Claudex touches authentication,
+# local credentials, installers, release artifacts, and cross-platform launchers.
+* @BeamoINT
+
+# Keep especially sensitive surfaces explicit so future ownership additions do
+# not accidentally remove maintainer review from them.
+/.github/workflows/ @BeamoINT
+/bootstrap.* @BeamoINT
+/install.* @BeamoINT
+/codex-session* @BeamoINT
+/self-update* @BeamoINT
+/scripts/build-release.sh @BeamoINT
+/scripts/check-release-artifacts.sh @BeamoINT
+/SECURITY.md @BeamoINT

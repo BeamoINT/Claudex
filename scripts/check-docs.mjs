@@ -13,12 +13,21 @@ const requiredFiles = [
   'CODE_OF_CONDUCT.md',
   'CONTRIBUTING.md',
   'GOVERNANCE.md',
+  'MAINTAINERS.md',
+  'ROADMAP.md',
   'SECURITY.md',
   'SUPPORT.md',
   '.github/ISSUE_TEMPLATE/bug_report.yml',
   '.github/ISSUE_TEMPLATE/feature_request.yml',
+  '.github/ISSUE_TEMPLATE/documentation.yml',
   '.github/ISSUE_TEMPLATE/config.yml',
   '.github/pull_request_template.md',
+  '.github/CODEOWNERS',
+  '.github/dependabot.yml',
+  '.github/labeler.yml',
+  '.github/workflows/codeql.yml',
+  '.github/workflows/dependency-review.yml',
+  '.github/workflows/labeler.yml',
 ];
 
 const failures = [];
@@ -30,6 +39,7 @@ for (const file of requiredFiles) {
 for (const file of [
   '.github/ISSUE_TEMPLATE/bug_report.yml',
   '.github/ISSUE_TEMPLATE/feature_request.yml',
+  '.github/ISSUE_TEMPLATE/documentation.yml',
 ]) {
   const path = join(root, file);
   if (!existsSync(path)) continue;
@@ -39,6 +49,32 @@ for (const file of [
       failures.push(`${file} is missing top-level ${key}`);
     }
   }
+}
+
+for (const file of readdirSync(join(root, '.github/workflows'))
+  .filter((entry) => entry.endsWith('.yml'))
+  .sort()) {
+  const relativePath = `.github/workflows/${file}`;
+  const source = readFileSync(join(root, relativePath), 'utf8');
+  for (const match of source.matchAll(/^\s*-?\s*uses:\s*[^@\s]+@([^\s#]+)/gm)) {
+    if (!/^[0-9a-f]{40}$/.test(match[1])) {
+      failures.push(`${relativePath} has an action that is not pinned to a full commit SHA: ${match[0].trim()}`);
+    }
+  }
+  if (/^\s*pull_request_target:/m.test(source)) {
+    if (/uses:\s*actions\/checkout@/.test(source)) {
+      failures.push(`${relativePath} checks out untrusted code from pull_request_target`);
+    }
+    if (/^\s*(?:-\s*)?run:/m.test(source)) {
+      failures.push(`${relativePath} executes shell code from pull_request_target`);
+    }
+  }
+}
+
+const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const changelog = readFileSync(join(root, 'CHANGELOG.md'), 'utf8');
+if (!changelog.includes(`## [${manifest.version}] - `)) {
+  failures.push(`CHANGELOG is missing package version ${manifest.version}`);
 }
 
 function collectMarkdown(directory) {

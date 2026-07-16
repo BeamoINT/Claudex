@@ -2,6 +2,12 @@
 
 Claudex is community-maintained and provided without a support SLA.
 
+Maintainers and community members respond on a best-effort basis. Clear,
+reproducible reports are easiest to help with. Support threads may be marked
+answered when a verified solution is provided, and inactive troubleshooting
+threads may be closed after 30 days; a new thread is always welcome if the
+problem returns on the latest release.
+
 ## Where to ask
 
 - Use [GitHub Discussions](https://github.com/BeamoINT/Claudex/discussions) for

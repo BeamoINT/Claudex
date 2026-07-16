@@ -28,11 +28,10 @@ make_fixture() {
   while IFS= read -r -d '' tracked; do
     mkdir -p "$fixture_root/$(dirname "$tracked")"
     cp -p "$root/$tracked" "$fixture_root/$tracked"
-  done < <(git -C "$root" ls-files -z)
+  done < <(git -C "$root" ls-files --cached --others --exclude-standard -z)
 
-  # This dependency may be untracked while several agents' changes are being
-  # validated together; it is part of the explicit release payload and will be
-  # tracked in the resulting commit.
+  # Retain compatibility with older checkouts where this dependency predates
+  # the untracked-file fixture support above.
   if [[ ! -e "$fixture_root/bin/package-setup-lock.mjs" ]]; then
     mkdir -p "$fixture_root/bin"
     cp -p "$root/bin/package-setup-lock.mjs" "$fixture_root/bin/package-setup-lock.mjs"

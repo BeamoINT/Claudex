@@ -1,0 +1,65 @@
+"area: documentation":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+          - "docs/**"
+
+"area: github-actions":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/workflows/**"
+          - ".github/dependabot.yml"
+          - ".github/labeler.yml"
+
+"area: installer":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "bootstrap.*"
+          - "install.*"
+          - "bin/claudex-package.mjs"
+          - "bin/package-setup-lock.mjs"
+
+"area: updater":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "self-update*"
+          - ".github/workflows/release-assets.yml"
+          - ".github/workflows/verify-installers.yml"
+
+"area: skills":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "skill-bridge.cjs"
+          - "skills/**"
+          - "tests/skill-*.cjs"
+
+"area: terminal-ui":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "preload.cjs"
+          - "statusline*"
+
+"area: authentication":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "codex-session*"
+          - "usage-limit*"
+
+"platform: windows":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.ps1"
+          - "**/*.cmd"
+          - "test.ps1"
+
+"platform: macos-linux":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "claudex"
+          - "codex-session"
+          - "install.sh"
+          - "install.zsh"
+          - "self-update"
+          - "statusline"
+          - "usage-limit"
+          - "test.zsh"

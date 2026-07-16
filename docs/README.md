@@ -28,6 +28,8 @@ and maintainers.
   surfaces, passthrough rules, and known provider limitations.
 - [Contributing](../CONTRIBUTING.md) — how to propose and submit changes.
 - [Security policy](../SECURITY.md) — supported versions and private reporting.
+- [Maintainer guide](../MAINTAINERS.md) — triage, labels, ownership, and release responsibilities.
+- [Roadmap](../ROADMAP.md) — current priorities, contribution ideas, and non-goals.
 
 The root [README](../README.md) is the shortest path from discovery to a first
 successful launch. These guides are the source of truth for details.

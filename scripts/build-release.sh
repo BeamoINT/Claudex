@@ -16,7 +16,7 @@ command -v tar >/dev/null 2>&1 || { printf '%s\n' 'tar is required to build rele
 # these directories would silently publish any untracked editor, credential, or
 # build artifact that happened to be present in a release checkout.
 files=(
-  CHANGELOG.md CODE_OF_CONDUCT.md CONTRIBUTING.md GOVERNANCE.md LICENSE NOTICE.md README.md
+  CHANGELOG.md CODE_OF_CONDUCT.md CONTRIBUTING.md GOVERNANCE.md LICENSE MAINTAINERS.md NOTICE.md README.md ROADMAP.md
   SECURITY.md SUPPORT.md bootstrap.ps1 bootstrap.sh package.json
   claudex claudex.cmd claudex.ps1 claudex-package.cmd
   codex-session codex-session.ps1 env.example install.ps1 install.sh install.zsh
@@ -96,6 +96,8 @@ tar -tzf "$dist/claudex-$version.tar.gz" | awk -v root="claudex-$version/" '
   index($0, root) != 1 || $0 ~ /(^|\/)\.\.($|\/)/ || $0 ~ /^\// { exit 1 }
 ' || { printf '%s\n' 'release archive contains an unsafe path' >&2; exit 1; }
 required_release_files=(
+  MAINTAINERS.md
+  ROADMAP.md
   bin/claudex-package.mjs
   bin/package-setup-lock.mjs
   skill-bridge.cjs

@@ -1,0 +1,46 @@
+name: Documentation improvement
+description: Report unclear, missing, or incorrect Claudex documentation
+title: "[Docs]: "
+labels:
+  - documentation
+  - "area: documentation"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for improving Claudex documentation. For setup help, start a GitHub Discussion instead. Never include credentials, prompts, session IDs, or unsanitized private paths.
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the current documentation, issues, and discussions.
+          required: true
+        - label: I removed credentials and private data from all examples.
+          required: true
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link the page or name the file and section.
+      placeholder: "Example: docs/installation.md, Automatic updates"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is unclear, missing, or incorrect?
+      description: Explain the reader's goal and where the current text falls short.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement
+      description: Propose wording, an example, or an outline if you have one.
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I would be willing to open a pull request for this improvement.

@@ -30,8 +30,29 @@ Include:
 Replace all OAuth tokens, generated proxy keys, account IDs, paths, prompts,
 and session IDs with placeholders. Maintainers will acknowledge the report,
 investigate it, coordinate a fix, and credit the reporter unless anonymity is
-requested. Exact response times are not guaranteed because this is a
-volunteer-maintained project.
+requested.
+
+Claudex is volunteer-maintained. The project targets acknowledgement within
+three business days, an initial impact assessment within seven days, and a
+status update at least weekly while a validated report remains unresolved.
+These are response targets rather than a support SLA. Disclosure timing is
+coordinated with the reporter and may be delayed long enough to prepare and
+ship fixes across every supported platform.
+
+## Safe testing and disclosure
+
+Good-faith research is welcome when it:
+
+- uses only accounts, machines, and data you own or are authorized to test;
+- avoids privacy violations, service disruption, persistence, and accessing
+  more data than the minimal proof requires;
+- stops after confirming the issue and reports it privately without exploiting
+  other users;
+- follows applicable law and upstream provider terms.
+
+The project will not pursue action against research that follows these rules
+and makes a reasonable effort to avoid harm. This safe-harbor statement cannot
+authorize testing against third-party systems or override their policies.
 
 ## Security boundary
 

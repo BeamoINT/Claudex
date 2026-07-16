@@ -5,6 +5,24 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-07-16
+
+### Added
+
+- Added code ownership, maintainer and roadmap documentation, a dedicated
+  documentation issue form, component-aware pull-request labeling, Dependabot,
+  dependency review, and CodeQL scanning for a clearer and safer contributor
+  workflow.
+- Added public triage targets, label guidance, contribution discovery links,
+  responsible AI-assisted contribution expectations, security response targets,
+  and a good-faith research safe-harbor policy.
+
+### Changed
+
+- Expanded repository governance, support expectations, contributor recognition,
+  and maintainer release policy while keeping the project lightweight and
+  volunteer-friendly.
+
 ## [1.5.1] - 2026-07-16
 
 ### Added

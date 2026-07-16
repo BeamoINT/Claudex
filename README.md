@@ -1,6 +1,8 @@
 # Claudex
 
 [![CI](https://github.com/BeamoINT/Claudex/actions/workflows/test.yml/badge.svg)](https://github.com/BeamoINT/Claudex/actions/workflows/test.yml)
+[![CodeQL](https://github.com/BeamoINT/Claudex/actions/workflows/codeql.yml/badge.svg)](https://github.com/BeamoINT/Claudex/actions/workflows/codeql.yml)
+[![Latest release](https://img.shields.io/github/v/release/BeamoINT/Claudex)](https://github.com/BeamoINT/Claudex/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-informational.svg)](docs/installation.md)
 
@@ -148,8 +150,9 @@ Claude Code's own platform limitations still apply. In particular, native Window
 | [Troubleshooting](docs/troubleshooting.md) | Diagnose common installation and runtime problems |
 | [Development](docs/development.md) | Repository layout, tests, and release workflow |
 | [Claude Code compatibility](docs/claude-code-compatibility.md) | Audited upstream feature matrix and known boundaries |
+| [Roadmap](ROADMAP.md) | Current priorities, contribution ideas, and non-goals |
 
-Project policies and history are in [CONTRIBUTING.md](CONTRIBUTING.md), [GOVERNANCE.md](GOVERNANCE.md), [SECURITY.md](SECURITY.md), [SUPPORT.md](SUPPORT.md), and [CHANGELOG.md](CHANGELOG.md).
+Project policies and history are in [CONTRIBUTING.md](CONTRIBUTING.md), [GOVERNANCE.md](GOVERNANCE.md), [MAINTAINERS.md](MAINTAINERS.md), [SECURITY.md](SECURITY.md), [SUPPORT.md](SUPPORT.md), and [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -170,6 +173,8 @@ Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), which 
 
 - Ask usage questions in [GitHub Discussions](https://github.com/BeamoINT/Claudex/discussions).
 - Report reproducible bugs or propose features with the [issue templates](https://github.com/BeamoINT/Claudex/issues/new/choose).
+- Find approachable work under [`good first issue`](https://github.com/BeamoINT/Claudex/labels/good%20first%20issue) and maintainer-supported work under [`help wanted`](https://github.com/BeamoINT/Claudex/labels/help%20wanted).
+- Review the [roadmap](ROADMAP.md) before proposing a large change.
 - Report security vulnerabilities privately through [GitHub Security Advisories](https://github.com/BeamoINT/Claudex/security/advisories/new).
 
 Run the complete local test suite before opening a pull request:

@@ -10,6 +10,21 @@ confirmed bugs and feature proposals belong in
 [GitHub Issues](https://github.com/BeamoINT/Claudex/issues), and vulnerabilities
 must be reported through the private process in [SECURITY.md](SECURITY.md).
 
+## Find a contribution
+
+- Browse [`good first issue`](https://github.com/BeamoINT/Claudex/labels/good%20first%20issue)
+  for narrow tasks with a known approach.
+- Browse [`help wanted`](https://github.com/BeamoINT/Claudex/labels/help%20wanted)
+  for work where maintainer guidance is available.
+- Improve documentation through the
+  [documentation issue form](https://github.com/BeamoINT/Claudex/issues/new?template=documentation.yml).
+- Read the [roadmap](ROADMAP.md) and start an Ideas discussion before building a
+  large or cross-cutting feature.
+
+If you want to help but no existing issue fits, open a Discussion. Maintainers
+can help turn the idea into a reviewable issue before you invest significant
+time.
+
 ## Before opening an issue
 
 1. Update to the current `main` branch and rerun the installer.
@@ -42,6 +57,12 @@ git switch -c fix/short-description
 
 Read [docs/development.md](docs/development.md) for the component map, testing
 strategy, cross-platform expectations, and review checklist.
+
+Draft pull requests are welcome for early design or cross-platform feedback.
+You do not need every supported operating system locally: run the checks your
+platform supports, list them exactly, and let GitHub Actions provide the full
+matrix. Mark the pull request ready only after the documented behavior and
+regression coverage are complete.
 
 ## Making changes
 
@@ -99,3 +120,11 @@ Maintainers may ask for revisions, additional tests, or a smaller scope. A
 maintainer merges accepted changes after CI passes. No contributor license
 agreement is required; contributors retain copyright in their work and license
 their contribution under this repository's MIT License.
+
+Contributors are responsible for every submitted line, including AI-assisted
+work. Review generated changes, remove private or proprietary data, disclose
+substantial automated assistance in the pull request when it affects review,
+and provide the same tests and reasoning expected for manually written code.
+Accepted contributions are credited through Git history, release notes when
+user-visible, and the repository's
+[contributors page](https://github.com/BeamoINT/Claudex/graphs/contributors).

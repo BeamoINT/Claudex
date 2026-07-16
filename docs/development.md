@@ -42,6 +42,12 @@ updates, and installation.
 `.\test.ps1` provides the corresponding native Windows coverage. GitHub
 Actions runs both suites on macOS, Ubuntu, and Windows for every pull request.
 
+CodeQL scans the JavaScript compatibility surface on every pull request and on
+a weekly schedule. Dependency Review blocks newly introduced high or critical
+dependency vulnerabilities, Dependabot proposes pinned dependency updates, and
+the pull-request labeler identifies affected components and platforms. All
+third-party GitHub Actions are pinned to immutable commits.
+
 Documentation validation checks required community files, issue-form metadata,
 and every relative Markdown link. Keep it part of both platform suites.
 
@@ -136,3 +142,8 @@ when installation depends on it.
 - Tests cover success, failure, and stale-state cases.
 - Documentation matches the implemented defaults.
 - The diff contains no installed state or unrelated changes.
+
+See [MAINTAINERS.md](../MAINTAINERS.md) for triage targets, labels, ownership,
+and the merge policy. Community-facing workflow or template changes should be
+tested from a fork-compatible event and must not execute untrusted pull-request
+code with write permissions.

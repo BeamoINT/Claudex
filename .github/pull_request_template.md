@@ -6,6 +6,10 @@
 
 <!-- Use "Closes #123" when applicable. -->
 
+## Contribution provenance
+
+<!-- Note substantial AI assistance or generated code that affects review. Never paste private prompts, credentials, or proprietary source. Write "Not applicable" when none. -->
+
 ## Implementation notes
 
 <!-- Explain important design decisions, compatibility concerns, and tradeoffs. -->
@@ -28,3 +32,4 @@
 - [ ] I have read `CONTRIBUTING.md` and followed the Code of Conduct.
 - [ ] This pull request contains one coherent change.
 - [ ] I reviewed the diff for accidental secrets and unrelated files.
+- [ ] I reviewed and can explain all submitted code, including generated or AI-assisted changes.
