@@ -732,8 +732,8 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
     $delimiterExit = $LASTEXITCODE
     Assert-True ($delimiterExit -eq 0) "installed Windows delimiter route exits successfully; output=$delimiterOutput"
     Assert-True ($delimiterOutput.Contains('"Terra (high)"')) "flag like prompt text after the delimiter does not disable managed agents; output=$delimiterOutput"
-    Assert-True ($delimiterOutput.Contains('--permission-mode auto')) 'flag like prompt text after the delimiter does not disable managed permissions'
-    Assert-True ($delimiterOutput.Contains('--model gpt-5.6-terra')) 'flag like model text after the delimiter does not replace the selected startup model'
+    Assert-True ($delimiterOutput -match '--permission-mode"?\s+"?auto') "flag like prompt text after the delimiter does not disable managed permissions; output=$delimiterOutput"
+    Assert-True ($delimiterOutput -match '--model"?\s+"?gpt-5\.6-terra') "flag like model text after the delimiter does not replace the selected startup model; output=$delimiterOutput"
 
     $restrictedToolsOutput = (& (Join-Path $root 'claudex.ps1') --tools '' --print restricted-tools-test | Out-String)
     Assert-True (-not $restrictedToolsOutput.Contains('Before every final answer, call TaskList')) 'restricted tool surfaces do not receive impossible task lifecycle requirements'
