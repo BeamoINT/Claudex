@@ -1333,36 +1333,31 @@ process.stdout.write(JSON.stringify({
 
     if ($isWindowsPlatform) {
         $usageHelper = Join-Path $testConfig 'usage-limit.ps1'
+        $quotedUsageHelper = '"' + $usageHelper + '"'
         $blockedCurlLog = Join-Path $temporary 'blocked-usage-url-curl.log'
-        $usageUrlRejected = $false
-        $usageUrlRejection = ''
+        $usageUrlErrorLog = Join-Path $temporary 'blocked-usage-url-error.log'
         $env:CLAUDEX_USAGE_SOURCE = 'auto'
         $env:CLAUDEX_USAGE_URL = 'http://127.0.0.1:8123/backend-api/wham/usage'
         $env:FAKE_CURL_CALL_LOG = $blockedCurlLog
         try {
-            & $usageHelper -RefreshCache | Out-Null
-        } catch {
-            $usageUrlRejection = ($_ | Out-String)
-            $usageUrlRejected = $usageUrlRejection.Contains('CLAUDEX_USAGE_URL must remain https://chatgpt.com/backend-api/wham/usage')
+            $usageUrlProcess = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedUsageHelper, '-RefreshCache') `
+                -RedirectStandardError $usageUrlErrorLog -Wait -PassThru
         } finally {
             Remove-Item Env:CLAUDEX_USAGE_URL -ErrorAction SilentlyContinue
             Remove-Item Env:FAKE_CURL_CALL_LOG -ErrorAction SilentlyContinue
         }
-        Assert-True $usageUrlRejected "non-official production usage URL rejected; error=$usageUrlRejection"
+        $usageUrlRejection = Get-Content -LiteralPath $usageUrlErrorLog -Raw
+        Assert-True ($usageUrlProcess.ExitCode -ne 0 -and $usageUrlRejection.Contains('CLAUDEX_USAGE_URL must remain https://chatgpt.com/backend-api/wham/usage')) "non-official production usage URL rejected; exit=$($usageUrlProcess.ExitCode); error=$usageUrlRejection"
         Assert-True (-not (Test-Path -LiteralPath $blockedCurlLog)) 'rejected usage URL never invokes curl'
 
         $env:CLAUDEX_USAGE_SOURCE = 'web'
         $env:CLAUDEX_INSECURE_TEST_ALLOW_USAGE_URL = '1'
         $env:CLAUDEX_USAGE_URL = 'https://example.com/backend-api/wham/usage'
-        $nonLoopbackRejected = $false
-        $nonLoopbackRejection = ''
-        try {
-            & $usageHelper -RefreshCache | Out-Null
-        } catch {
-            $nonLoopbackRejection = ($_ | Out-String)
-            $nonLoopbackRejected = $nonLoopbackRejection.Contains('permits only loopback HTTP(S) usage endpoints')
-        }
-        Assert-True $nonLoopbackRejected "test usage URL remains loopback-only; error=$nonLoopbackRejection"
+        $nonLoopbackErrorLog = Join-Path $temporary 'non-loopback-usage-url-error.log'
+        $nonLoopbackProcess = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedUsageHelper, '-RefreshCache') `
+            -RedirectStandardError $nonLoopbackErrorLog -Wait -PassThru
+        $nonLoopbackRejection = Get-Content -LiteralPath $nonLoopbackErrorLog -Raw
+        Assert-True ($nonLoopbackProcess.ExitCode -ne 0 -and $nonLoopbackRejection.Contains('permits only loopback HTTP(S) usage endpoints')) "test usage URL remains loopback-only; exit=$($nonLoopbackProcess.ExitCode); error=$nonLoopbackRejection"
 
         $loopbackUsageUrl = 'http://127.0.0.1:8123/backend-api/wham/usage'
         $loopbackCurlLog = Join-Path $temporary 'loopback-usage-url-curl.log'
