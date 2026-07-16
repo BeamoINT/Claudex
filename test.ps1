@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
+$PSDefaultParameterValues['Out-String:Width'] = 32767
 
 $root = $PSScriptRoot
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ('claudex-tests-' + [guid]::NewGuid().ToString('N'))
