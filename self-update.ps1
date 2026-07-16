@@ -447,9 +447,11 @@ function ConvertTo-NativeArgument([string] $Value) {
 
 function ConvertTo-CmdArgument([string] $Value) {
     if ($null -eq $Value) { $Value = '' }
-    # cmd.exe applies metacharacter and percent expansion after ordinary
-    # CreateProcess quoting. Keep every token quoted and escape percent signs;
-    # delayed expansion is explicitly disabled by the caller.
+    # Preserve ordinary batch arguments exactly as direct invocation would;
+    # some portable shims compare %1 rather than %~1. Values outside this
+    # deliberately narrow safe alphabet remain quoted, with percent expansion
+    # neutralized and delayed expansion disabled by the caller.
+    if ($Value -match '^[A-Za-z0-9_@.+,=/:\-]+$') { return $Value }
     return '"' + $Value.Replace('%', '%%').Replace('"', '""') + '"'
 }
 
