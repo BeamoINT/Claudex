@@ -253,6 +253,23 @@ if not "%FAKE_CLAUDE_MAINTENANCE_LOG%"=="" (
 echo BUN=%BUN_OPTIONS%
 echo BASE=%ANTHROPIC_BASE_URL%
 echo ARGS=%*
+if not "%FAKE_CLAUDE_TAIL_ARGS%"=="1" goto claudex_tail_done
+shift
+shift
+shift
+shift
+shift
+shift
+shift
+shift
+echo TAIL1=%~1
+echo TAIL2=%~2
+echo TAIL3=%~3
+echo TAIL4=%~4
+echo TAIL5=%~5
+echo TAIL6=%~6
+echo TAIL7=%~7
+:claudex_tail_done
 exit /b 0
 '@, $utf8)
     } else {
@@ -728,12 +745,16 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
     }
     Assert-True ($userSubagentOutput.Contains('SUBAGENT=caller-owned-subagent')) 'managed launch preserves an explicit caller subagent model'
 
-    $delimiterOutput = (& (Join-Path $root 'claudex.cmd') --terra '--' --safe-mode --agents --permission-mode --model literal-prompt-token 2>&1 | Out-String)
-    $delimiterExit = $LASTEXITCODE
+    $env:FAKE_CLAUDE_TAIL_ARGS = '1'
+    try {
+        $delimiterOutput = (& (Join-Path $root 'claudex.cmd') --terra '--' --safe-mode --agents --permission-mode --model literal-prompt-token 2>&1 | Out-String)
+        $delimiterExit = $LASTEXITCODE
+    } finally { Remove-Item Env:FAKE_CLAUDE_TAIL_ARGS -ErrorAction SilentlyContinue }
     Assert-True ($delimiterExit -eq 0) "installed Windows delimiter route exits successfully; output=$delimiterOutput"
     Assert-True ($delimiterOutput.Contains('"Terra (high)"')) "flag like prompt text after the delimiter does not disable managed agents; output=$delimiterOutput"
-    Assert-True ($delimiterOutput -match '--permission-mode"?\s+"?auto') "flag like prompt text after the delimiter does not disable managed permissions; output=$delimiterOutput"
-    Assert-True ($delimiterOutput -match '--model"?\s+"?gpt-5\.6-terra') "flag like model text after the delimiter does not replace the selected startup model; output=$delimiterOutput"
+    Assert-True ($delimiterOutput.Contains("TAIL1=--permission-mode`r`nTAIL2=auto")) "flag like prompt text after the delimiter does not disable managed permissions; output=$delimiterOutput"
+    Assert-True ($delimiterOutput.Contains("TAIL3=--model`r`nTAIL4=gpt-5.6-terra")) "flag like model text after the delimiter does not replace the selected startup model; output=$delimiterOutput"
+    Assert-True ($delimiterOutput.Contains("TAIL5=--`r`nTAIL6=--safe-mode`r`nTAIL7=--agents")) "installed Windows launcher preserves the delimiter and following prompt tokens; output=$delimiterOutput"
 
     $restrictedToolsOutput = (& (Join-Path $root 'claudex.ps1') --tools '' --print restricted-tools-test | Out-String)
     Assert-True (-not $restrictedToolsOutput.Contains('Before every final answer, call TaskList')) 'restricted tool surfaces do not receive impossible task lifecycle requirements'
