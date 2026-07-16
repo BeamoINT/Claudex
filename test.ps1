@@ -510,7 +510,8 @@ process.stdout.write(JSON.stringify({
             Remove-Item Env:FAKE_PROXY_START_LOG -ErrorAction SilentlyContinue
         }
         Assert-True ($unmanaged401Exit -ne 0) 'Windows launcher rejects an unverified loopback process after HTTP 401'
-        Assert-True (($unmanaged401Output | Out-String).Contains('will not stop an unverified process')) 'unverified loopback 401 explains the managed-process safety boundary'
+        $unmanaged401Text = (($unmanaged401Output | Out-String) -replace '\s+', ' ')
+        Assert-True ($unmanaged401Text.Contains('will not stop an unverified process')) 'unverified loopback 401 explains the managed-process safety boundary'
         Assert-True (-not (Test-Path -LiteralPath $unmanaged401StartLog -PathType Leaf)) 'unverified loopback 401 never starts a replacement proxy'
 
         $proxyReady = Join-Path $temporary 'windows-proxy-ready'
