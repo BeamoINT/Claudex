@@ -272,6 +272,50 @@ echo TAIL7=%~7
 :claudex_tail_done
 exit /b 0
 '@, $utf8)
+        [IO.File]::WriteAllText((Join-Path $fakeBin 'claude.ps1'), @'
+$arguments = [string[]] @($args)
+$arg1 = if ($arguments.Count -gt 0) { $arguments[0] } else { '' }
+$arg2 = if ($arguments.Count -gt 1) { $arguments[1] } else { '' }
+$arg3 = if ($arguments.Count -gt 2) { $arguments[2] } else { '' }
+if ($env:FAKE_CLAUDE_NATIVE_LOG) {
+    [IO.File]::WriteAllLines($env:FAKE_CLAUDE_NATIVE_LOG, [string[]] @(
+        "ARG1=$arg1", "ARG2=$arg2", "ARG3=$arg3",
+        "BASE=$env:ANTHROPIC_BASE_URL", "AUTH_TOKEN=$env:ANTHROPIC_AUTH_TOKEN",
+        "PROXY_TOKEN=$env:CLAUDEX_PROXY_TOKEN", "MANAGED=$env:CLAUDEX_MANAGED_SESSION",
+        "BUN=$env:BUN_OPTIONS",
+        "PROVIDERS=${env:CLAUDE_CODE_USE_BEDROCK}|${env:CLAUDE_CODE_USE_VERTEX}|${env:CLAUDE_CODE_USE_FOUNDRY}|${env:ANTHROPIC_BEDROCK_BASE_URL}|${env:ANTHROPIC_VERTEX_BASE_URL}|${env:ANTHROPIC_FOUNDRY_BASE_URL}"
+    ))
+    if ($env:FAKE_CLAUDE_NATIVE_EXIT) { exit ([int] $env:FAKE_CLAUDE_NATIVE_EXIT) }
+}
+if ($arg1 -eq '--version') { Write-Output '2.1.210 (test)'; exit 0 }
+if ($arg1 -eq '--help') {
+    Write-Output '--model --agents --append-system-prompt --permission-mode --settings --effort --add-dir --plugin-dir'
+    exit 0
+}
+if ($arg1 -eq 'auto-mode' -and $arg2 -eq 'defaults') {
+    Write-Output '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Data Exfiltration: default hard deny"]}'
+    exit 0
+}
+if ($arg1 -eq 'update') { exit 0 }
+if ($env:FAKE_CLAUDE_MAINTENANCE_LOG) {
+    $arg4 = if ($arguments.Count -gt 3) { $arguments[3] } else { '' }
+    [IO.File]::WriteAllLines($env:FAKE_CLAUDE_MAINTENANCE_LOG, [string[]] @(
+        "ARG1=$arg1", "ARG2=$arg2", "ARG3=$arg3", "ARG4=$arg4",
+        "BUN=$env:BUN_OPTIONS", "BASE=$env:ANTHROPIC_BASE_URL", "MANAGED=$env:CLAUDEX_MANAGED_SESSION"
+    ))
+}
+Write-Output "BUN=$env:BUN_OPTIONS"
+Write-Output "BASE=$env:ANTHROPIC_BASE_URL"
+Write-Output ('ARGS=' + ($arguments -join ' '))
+if ($env:FAKE_CLAUDE_TAIL_ARGS -eq '1') {
+    for ($tailIndex = 0; $tailIndex -lt 7; $tailIndex++) {
+        $argumentIndex = 8 + $tailIndex
+        $tailValue = if ($argumentIndex -lt $arguments.Count) { $arguments[$argumentIndex] } else { '' }
+        Write-Output "TAIL$($tailIndex + 1)=$tailValue"
+    }
+}
+exit 0
+'@, $utf8)
     } else {
         $fakeCurl = Join-Path $fakeBin 'curl.exe'
         [IO.File]::WriteAllText($fakeCurl, @'

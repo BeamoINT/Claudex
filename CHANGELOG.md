@@ -11,6 +11,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 - Preserved the native Claude Code `--` delimiter through the PowerShell host
   process and exercised it through the installed launcher's process boundary.
+- Preferred sibling PowerShell shims for Windows Claude and Codex launchers so
+  long managed arguments do not hit the batch command length ceiling.
 
 ## [1.5.7] - 2026-07-16
 

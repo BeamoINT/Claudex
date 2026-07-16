@@ -77,6 +77,18 @@ function Fail([string] $Message, [int] $Code = 1) {
     exit $Code
 }
 
+function Resolve-HarnessCommand([string] $Name) {
+    $command = Get-Command $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $command -or -not $command.Source) { return $command }
+    $extension = [IO.Path]::GetExtension([string] $command.Source).ToLowerInvariant()
+    if ($extension -notin @('.cmd', '.bat')) { return $command }
+    $powerShellShim = [IO.Path]::ChangeExtension([string] $command.Source, '.ps1')
+    if (-not (Test-Path -LiteralPath $powerShellShim -PathType Leaf)) { return $command }
+    $shimCommand = Get-Command $powerShellShim -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($shimCommand) { return $shimCommand }
+    return $command
+}
+
 function Protect-PrivatePath([string] $Path, [bool] $Directory) {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
     $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -145,7 +157,7 @@ if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('codex', 'claude
     }
 }
 if ($nativeHarness) {
-    $nativeCommand = Get-Command $nativeHarness -ErrorAction SilentlyContinue | Select-Object -First 1
+    $nativeCommand = Resolve-HarnessCommand $nativeHarness
     if (-not $nativeCommand) {
         $nativeLabel = if ($nativeHarness -eq 'codex') { 'Codex CLI' } else { 'Claude Code' }
         Fail "$nativeLabel was not found. Install it and retry."
@@ -1160,7 +1172,7 @@ if ($ClaudexInternalProxyWatchParentProcessId -gt 0) {
 # Internal watcher processes exit above before touching user-facing state.
 
 function Resolve-ClaudeCommand {
-    $claudeCommand = Get-Command claude -ErrorAction SilentlyContinue
+    $claudeCommand = Resolve-HarnessCommand 'claude'
     if (-not $claudeCommand) { Fail 'Claude Code was not found. Install Claude Code and retry.' }
     $script:claudeCommand = $claudeCommand
     $script:claudeInvocation = if ($claudeCommand.CommandType -eq 'Function') { $claudeCommand.Name } else { $claudeCommand.Source }
