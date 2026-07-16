@@ -240,17 +240,26 @@ function testLastKnownGoodFallback() {
   const asset = path.join(source, 'assets', 'value.txt');
   createSkill(source, 'fallback-tree');
   write(asset, 'known good one\n');
-  invoke(fixture.environment, fixture.project);
+  const first = invoke(fixture.environment, fixture.project);
   write(asset, 'known good two\n');
   const newest = invoke(fixture.environment, fixture.project);
   fs.utimesSync(newest.overlay, new Date(), new Date(Date.now() + 2000));
+  const firstManifest = JSON.parse(fs.readFileSync(path.join(first.overlay, 'manifest.json'), 'utf8'));
+  const newestManifest = JSON.parse(fs.readFileSync(path.join(newest.overlay, 'manifest.json'), 'utf8'));
+  assert.strictEqual(newestManifest.policyFingerprint, firstManifest.policyFingerprint,
+    'source content changes must not change the skill policy fingerprint');
+  const generations = path.join(fixture.config, 'skill-bridge', 'generations');
+  const pointers = fs.readdirSync(generations).filter((entry) => entry.startsWith('.latest-'));
+  assert.strictEqual(pointers.length, 1, 'one policy-stable latest-generation pointer must be recorded');
+  const pointer = JSON.parse(fs.readFileSync(path.join(generations, pointers[0]), 'utf8'));
+  assert.strictEqual(pointer.generation, path.basename(newest.overlay),
+    'the latest-generation pointer must be replaced after every successful publication');
 
   write(asset, 'publication should fail\n');
   const probeConfig = path.join(fixture.root, 'probe-config');
   const probe = invoke({ ...fixture.environment, CLAUDEX_CONFIG_DIR: probeConfig }, fixture.project);
   const blockedGenerationName = path.basename(probe.overlay);
   assert.notStrictEqual(blockedGenerationName, path.basename(newest.overlay));
-  const generations = path.join(fixture.config, 'skill-bridge', 'generations');
   write(path.join(generations, blockedGenerationName), 'reserve the destination as a regular file\n');
 
   const fallback = invoke(fixture.environment, fixture.project);

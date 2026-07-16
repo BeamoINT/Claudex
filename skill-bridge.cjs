@@ -974,17 +974,9 @@ function latestPointerPath(generations, projectHash, policyFingerprint) {
 
 function rememberLatestGeneration(generations, projectHash, policyFingerprint, generation) {
   const pointer = latestPointerPath(generations, projectHash, policyFingerprint);
-  const temporary = `${pointer}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   try {
-    fs.writeFileSync(temporary, `${JSON.stringify({ generation: path.basename(generation) })}\n`, { mode: 0o600, flag: 'wx' });
-    try { fs.renameSync(temporary, pointer); }
-    catch {
-      fs.copyFileSync(temporary, pointer);
-      fs.rmSync(temporary, { force: true });
-    }
-  } catch {
-    try { fs.rmSync(temporary, { force: true }); } catch { }
-  }
+    fs.writeFileSync(pointer, `${JSON.stringify({ generation: path.basename(generation) })}\n`, { mode: 0o600 });
+  } catch { }
 }
 
 function latestGeneration(generations, projectHash, policyFingerprint) {
@@ -1031,14 +1023,20 @@ function garbageCollect(generations, projectHash, active) {
 function syncOnce(projectDir) {
   const discovered = discover(projectDir);
   const allMappings = [...discovered.mappings, ...discovered.pluginMappings];
-  const signatures = allMappings.map(sourceSignature);
+  const sortObjects = (values) => values.sort((left, right) => {
+    const leftKey = JSON.stringify(left);
+    const rightKey = JSON.stringify(right);
+    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+  });
+  const signatures = sortObjects(allMappings.map(sourceSignature));
+  const policySkills = sortObjects(allMappings.map((mapping) => ({
+    alias: mapping.alias, namespace: mapping.namespace || null, source: mapping.candidate.realSource,
+    kind: mapping.candidate.kind, provider: mapping.candidate.provider, manualOnly: mapping.candidate.manualOnly,
+    overrideState: mapping.candidate.overrideState || 'on',
+  })));
   const policyFingerprint = crypto.createHash('sha256').update(JSON.stringify({
     format: BRIDGE_FORMAT, pluginEnabled, dollarReferencesEnabled,
-    skills: allMappings.map((mapping) => ({
-      alias: mapping.alias, namespace: mapping.namespace || null, source: mapping.candidate.realSource,
-      kind: mapping.candidate.kind, provider: mapping.candidate.provider, manualOnly: mapping.candidate.manualOnly,
-      overrideState: mapping.candidate.overrideState || 'on',
-    })),
+    skills: policySkills,
   })).digest('hex');
   const fingerprint = crypto.createHash('sha256').update(JSON.stringify({
     schema: BRIDGE_SCHEMA, format: BRIDGE_FORMAT, platform: process.platform,
