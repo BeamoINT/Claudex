@@ -89,7 +89,10 @@ install_jq() {
 
 install_node() {
   printf '%s\n' 'Installing Node.js and npm for Claudex skill compatibility and the official Codex CLI package...'
-  if command -v brew >/dev/null 2>&1; then brew install node
+  if [[ "${CLAUDEX_TEST_MODE:-}" == 1 && -n "${CLAUDEX_TEST_MANAGED_NODE_DIR:-}" ]]; then
+    install_managed_node
+    return
+  elif command -v brew >/dev/null 2>&1; then brew install node
   elif command -v apt-get >/dev/null 2>&1; then run_as_root apt-get update; run_as_root apt-get install -y nodejs npm
   elif command -v dnf >/dev/null 2>&1; then run_as_root dnf install -y nodejs npm
   elif command -v yum >/dev/null 2>&1; then run_as_root yum install -y nodejs npm
@@ -109,33 +112,41 @@ node_is_compatible() {
 
 install_managed_node() {
   [[ "$(uname -s)" == Linux ]] || fail 'the system package manager did not provide Node.js 18 or newer'
-  local architecture archive base_url sums expected actual node_tmp extracted backup=""
+  local architecture archive base_url sums expected actual node_tmp extracted backup="" fixture
   case "$(uname -m)" in
     x86_64|amd64) architecture=x64 ;;
     aarch64|arm64) architecture=arm64 ;;
     *) fail "Node.js 18 or newer is unavailable for architecture $(uname -m)" ;;
   esac
-  base_url='https://nodejs.org/dist/latest-v22.x'
   node_tmp=$(mktemp -d "$config_dir/.node-install.XXXXXX")
   trap 'rm -rf "$node_tmp"' RETURN
-  sums="$node_tmp/SHASUMS256.txt"
-  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    --connect-timeout 10 --max-time 180 --retry 3 --retry-delay 1 --retry-connrefused \
-    --output "$sums" "$base_url/SHASUMS256.txt"
-  archive=$(awk -v suffix="-linux-$architecture.tar.gz" '$2 ~ /^node-v[0-9]+\.[0-9]+\.[0-9]+-linux-/ && index($2, suffix) == length($2) - length(suffix) + 1 { print $2 }' "$sums")
-  [[ "$archive" != *$'\n'* && "$archive" =~ ^node-v[0-9]+\.[0-9]+\.[0-9]+-linux-(x64|arm64)\.tar\.gz$ ]] || \
-    fail 'official Node.js checksums did not contain one supported Linux archive'
-  expected=$(awk -v name="$archive" '$2 == name { print tolower($1) }' "$sums")
-  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || fail 'official Node.js checksum is invalid'
-  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    --connect-timeout 10 --max-time 300 --retry 3 --retry-delay 1 --retry-connrefused \
-    --output "$node_tmp/$archive" "$base_url/$archive"
-  if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$node_tmp/$archive" | awk '{print tolower($1)}')
-  elif command -v shasum >/dev/null 2>&1; then actual=$(shasum -a 256 "$node_tmp/$archive" | awk '{print tolower($1)}')
-  else fail 'sha256sum or shasum is required to verify Node.js'; fi
-  [[ "$actual" == "$expected" ]] || fail 'official Node.js archive checksum mismatch'
-  tar -xzf "$node_tmp/$archive" -C "$node_tmp"
-  extracted="$node_tmp/${archive%.tar.gz}"
+  fixture=${CLAUDEX_TEST_MANAGED_NODE_DIR:-}
+  if [[ "${CLAUDEX_TEST_MODE:-}" == 1 && -n "$fixture" ]]; then
+    [[ -d "$fixture" && -x "$fixture/bin/node" && -x "$fixture/bin/npm" ]] || fail 'managed Node test fixture is incomplete'
+    extracted="$node_tmp/node-v22-test-linux-$architecture"
+    mkdir -p "$extracted"
+    cp -R "$fixture/." "$extracted/"
+  else
+    base_url='https://nodejs.org/dist/latest-v22.x'
+    sums="$node_tmp/SHASUMS256.txt"
+    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+      --connect-timeout 10 --max-time 180 --retry 3 --retry-delay 1 --retry-connrefused \
+      --output "$sums" "$base_url/SHASUMS256.txt"
+    archive=$(awk -v suffix="-linux-$architecture.tar.gz" '$2 ~ /^node-v[0-9]+\.[0-9]+\.[0-9]+-linux-/ && index($2, suffix) == length($2) - length(suffix) + 1 { print $2 }' "$sums")
+    [[ "$archive" != *$'\n'* && "$archive" =~ ^node-v[0-9]+\.[0-9]+\.[0-9]+-linux-(x64|arm64)\.tar\.gz$ ]] || \
+      fail 'official Node.js checksums did not contain one supported Linux archive'
+    expected=$(awk -v name="$archive" '$2 == name { print tolower($1) }' "$sums")
+    [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || fail 'official Node.js checksum is invalid'
+    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+      --connect-timeout 10 --max-time 300 --retry 3 --retry-delay 1 --retry-connrefused \
+      --output "$node_tmp/$archive" "$base_url/$archive"
+    if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$node_tmp/$archive" | awk '{print tolower($1)}')
+    elif command -v shasum >/dev/null 2>&1; then actual=$(shasum -a 256 "$node_tmp/$archive" | awk '{print tolower($1)}')
+    else fail 'sha256sum or shasum is required to verify Node.js'; fi
+    [[ "$actual" == "$expected" ]] || fail 'official Node.js archive checksum mismatch'
+    tar -xzf "$node_tmp/$archive" -C "$node_tmp"
+    extracted="$node_tmp/${archive%.tar.gz}"
+  fi
   [[ -x "$extracted/bin/node" && -x "$extracted/bin/npm" ]] || fail 'official Node.js archive is incomplete'
   "$extracted/bin/node" -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 18 ? 0 : 1)' || \
     fail 'official Node.js archive is below the supported version'

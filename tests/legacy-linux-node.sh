@@ -31,6 +31,10 @@ EOF
 chmod +x "$fake_bin/codex" "$fake_bin/claude" "$config/bin/cliproxyapi"
 printf '%s\n' '{"auth_mode":"chatgpt","tokens":{"access_token":"test","refresh_token":"test","account_id":"test"}}' > "$home/.codex/auth.json"
 
+if [[ -d /host-node ]]; then
+  export CLAUDEX_TEST_MODE=1
+  export CLAUDEX_TEST_MANAGED_NODE_DIR=/host-node
+fi
 HOME="$home" PATH="$fake_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   CLAUDEX_PROXY_TOKEN=legacy-linux-test CLAUDEX_SKIP_SERVICE_START=1 CLAUDEX_SKIP_CLAUDE_UPDATE=1 \
   "$root/install.sh" >/dev/null
