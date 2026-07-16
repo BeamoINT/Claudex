@@ -725,8 +725,7 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
     }
     Assert-True ($userSubagentOutput.Contains('SUBAGENT=caller-owned-subagent')) 'managed launch preserves an explicit caller subagent model'
 
-    $delimiterCommandLine = '""' + (Join-Path $root 'claudex.cmd') + '" --terra -- --safe-mode --agents --permission-mode --model literal-prompt-token"'
-    $delimiterOutput = (& $env:ComSpec /d /s /c $delimiterCommandLine 2>&1 | Out-String)
+    $delimiterOutput = (& (Join-Path $root 'claudex.cmd') --terra '--' --safe-mode --agents --permission-mode --model literal-prompt-token 2>&1 | Out-String)
     $delimiterExit = $LASTEXITCODE
     Assert-True ($delimiterExit -eq 0) "installed Windows delimiter route exits successfully; output=$delimiterOutput"
     Assert-True ($delimiterOutput.Contains('"Terra (high)"')) "flag like prompt text after the delimiter does not disable managed agents; output=$delimiterOutput"
