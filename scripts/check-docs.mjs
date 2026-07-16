@@ -184,7 +184,7 @@ function proseSegments(source, relativePath) {
 
 for (const path of collectMarkdown(root)) {
   const source = readFileSync(path, 'utf8');
-  const relativePath = relative(root, path);
+  const relativePath = relative(root, path).split(sep).join('/');
   for (const segment of proseSegments(source, relativePath)) {
     if (/[—–‑‒―]/.test(segment.text)) {
       failures.push(`${relativePath}:${segment.line} contains a long dash in prose`);
