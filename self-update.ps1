@@ -87,15 +87,21 @@ function Write-JsonAtomic([string] $Path, $Value) {
     $parent = Split-Path $Path -Parent
     [IO.Directory]::CreateDirectory($parent) | Out-Null
     $temporary = "$Path.tmp.$PID.$([guid]::NewGuid().ToString('N'))"
+    $backup = "$Path.bak.$PID.$([guid]::NewGuid().ToString('N'))"
     try {
         [IO.File]::WriteAllText($temporary, (($Value | ConvertTo-Json -Depth 20) + "`n"), $script:Utf8)
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
-            [IO.File]::Replace($temporary, $Path, $null)
+            # Windows PowerShell 5.1 rejects a null backup path even though
+            # newer .NET runtimes accept it. A same-directory backup keeps the
+            # replace atomic across every supported PowerShell generation.
+            [IO.File]::Replace($temporary, $Path, $backup)
+            Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
         } else {
             [IO.File]::Move($temporary, $Path)
         }
     } finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
     }
 }
 
