@@ -31,7 +31,10 @@ EOF
 chmod +x "$fake_bin/codex" "$fake_bin/claude" "$config/bin/cliproxyapi"
 printf '%s\n' '{"auth_mode":"chatgpt","tokens":{"access_token":"test","refresh_token":"test","account_id":"test"}}' > "$home/.codex/auth.json"
 
-if [[ -d /host-node ]]; then
+if [[ -n "${CLAUDEX_TEST_MANAGED_NODE_DIR:-}" ]]; then
+  [[ -d "$CLAUDEX_TEST_MANAGED_NODE_DIR" ]] || { printf '%s\n' 'managed Node fixture directory is unavailable' >&2; exit 1; }
+  export CLAUDEX_TEST_MODE=1
+elif [[ -d /host-node ]]; then
   export CLAUDEX_TEST_MODE=1
   export CLAUDEX_TEST_MANAGED_NODE_DIR=/host-node
 fi

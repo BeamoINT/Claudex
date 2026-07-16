@@ -34,12 +34,17 @@ jobs:
   legacy-linux-node:
     name: ubuntu-20.04-managed-node
     runs-on: ubuntu-latest
+    container: ubuntu:20.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
       - name: Verify Node 18+ fallback on the oldest supported Ubuntu
         run: |
           node_root="$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")"
-          docker run --rm -v "$PWD:/work:ro" -v "$node_root:/host-node:ro" ubuntu:20.04 bash /work/tests/legacy-linux-node.sh
+          CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_MANAGED_NODE_DIR="$node_root" ./tests/legacy-linux-node.sh
 
   package-artifacts:
     name: package-artifacts
