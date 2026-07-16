@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 $ClaudexInternalProxyWatchParentProcessId = 0
-$ClaudeArguments = [string[]] @($args)
+$ClaudeArguments = @($args)
 $hostArguments = [Environment]::GetCommandLineArgs()
 for ($hostIndex = 0; $hostIndex + 1 -lt $hostArguments.Count; $hostIndex++) {
     if ($hostArguments[$hostIndex] -ine '-File') { continue }
@@ -23,7 +23,8 @@ if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '-ClaudexInternalP
         throw 'Claudex internal proxy watcher requires a numeric parent process ID.'
     }
     $ClaudexInternalProxyWatchParentProcessId = $parsedProxyWatchParent
-    $ClaudeArguments = if ($ClaudeArguments.Count -gt 2) { [string[]] $ClaudeArguments[2..($ClaudeArguments.Count - 1)] } else { [string[]] @() }
+    if ($ClaudeArguments.Count -gt 2) { $ClaudeArguments = @($ClaudeArguments[2..($ClaudeArguments.Count - 1)]) }
+    else { $ClaudeArguments = @() }
 }
 $previousSessionMode = [Environment]::GetEnvironmentVariable('CLAUDEX_SESSION_MODE', 'Process')
 $previousEffortLevel = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_EFFORT_LEVEL', 'Process')
@@ -128,11 +129,12 @@ $claudeRequiredValueOptions = @(
 # Claudex env file. This prevents managed credentials from entering a native
 # child merely because they exist in Claudex's private configuration.
 $nativeHarness = ''
-$nativeArguments = [string[]] @()
+$nativeArguments = @()
 $forceFirstPartyClaude = $false
 if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('codex', 'claude')) {
     $nativeHarness = [string] $ClaudeArguments[0]
-    $nativeArguments = if ($ClaudeArguments.Count -gt 1) { [string[]] $ClaudeArguments[1..($ClaudeArguments.Count - 1)] } else { [string[]] @() }
+    if ($ClaudeArguments.Count -gt 1) { $nativeArguments = @($ClaudeArguments[1..($ClaudeArguments.Count - 1)]) }
+    else { $nativeArguments = @() }
 } elseif ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq 'ultrareview') {
     $nativeHarness = 'claude'
     $nativeArguments = [string[]] @($ClaudeArguments)
