@@ -9,8 +9,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ### Fixed
 
-- Exercised the Windows `--` delimiter regression through the same PowerShell
-  process boundary used by the installed launcher.
+- Preserved the native Claude Code `--` delimiter through the PowerShell host
+  process and exercised it through the installed launcher's process boundary.
 
 ## [1.5.7] - 2026-07-16
 

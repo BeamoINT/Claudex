@@ -2,6 +2,20 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 $ClaudexInternalProxyWatchParentProcessId = 0
 $ClaudeArguments = [string[]] @($args)
+$hostArguments = [Environment]::GetCommandLineArgs()
+for ($hostIndex = 0; $hostIndex + 1 -lt $hostArguments.Count; $hostIndex++) {
+    if ($hostArguments[$hostIndex] -ine '-File') { continue }
+    try {
+        $hostScriptPath = [IO.Path]::GetFullPath([string] $hostArguments[$hostIndex + 1])
+        $currentScriptPath = [IO.Path]::GetFullPath([string] $PSCommandPath)
+    } catch { continue }
+    if (-not [StringComparer]::OrdinalIgnoreCase.Equals($hostScriptPath, $currentScriptPath)) { continue }
+    $firstHostArgument = $hostIndex + 2
+    $ClaudeArguments = if ($firstHostArgument -lt $hostArguments.Count) {
+        [string[]] $hostArguments[$firstHostArgument..($hostArguments.Count - 1)]
+    } else { [string[]] @() }
+    break
+}
 if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '-ClaudexInternalProxyWatchParentProcessId') {
     $parsedProxyWatchParent = 0
     if ($ClaudeArguments.Count -lt 2 -or -not [int]::TryParse($ClaudeArguments[1], [ref] $parsedProxyWatchParent)) {
