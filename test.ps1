@@ -725,7 +725,7 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
     }
     Assert-True ($userSubagentOutput.Contains('SUBAGENT=caller-owned-subagent')) 'managed launch preserves an explicit caller subagent model'
 
-    $delimiterOutput = (& (Join-Path $root 'claudex.ps1') --terra -- --safe-mode --agents --permission-mode --model literal-prompt-token | Out-String)
+    $delimiterOutput = (& $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --terra -- --safe-mode --agents --permission-mode --model literal-prompt-token | Out-String)
     Assert-True ($delimiterOutput.Contains('"Terra (high)"')) 'flag-like prompt text after the delimiter does not disable managed agents'
     Assert-True ($delimiterOutput.Contains('--permission-mode auto')) 'flag-like prompt text after the delimiter does not disable managed permissions'
     Assert-True ($delimiterOutput.Contains('--model gpt-5.6-terra')) 'flag-like model text after the delimiter does not replace the selected startup model'

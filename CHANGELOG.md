@@ -5,6 +5,13 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.5.8] - 2026-07-16
+
+### Fixed
+
+- Exercised the Windows `--` delimiter regression through the same PowerShell
+  process boundary used by the installed launcher.
+
 ## [1.5.7] - 2026-07-16
 
 ### Fixed
@@ -391,7 +398,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first party profile support.
 - Cross platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.5.7...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.5.8...HEAD
+[1.5.8]: https://github.com/BeamoINT/Claudex/compare/v1.5.7...v1.5.8
 [1.5.7]: https://github.com/BeamoINT/Claudex/compare/v1.5.6...v1.5.7
 [1.5.6]: https://github.com/BeamoINT/Claudex/compare/v1.5.5...v1.5.6
 [1.5.5]: https://github.com/BeamoINT/Claudex/compare/v1.5.4...v1.5.5
