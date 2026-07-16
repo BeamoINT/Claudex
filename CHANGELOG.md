@@ -5,7 +5,7 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
-## [1.5.2] - 2026-07-16
+## [1.5.3] - 2026-07-16
 
 ### Added
 
@@ -22,6 +22,12 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Expanded repository governance, support expectations, contributor recognition,
   and maintainer release policy while keeping the project lightweight and
   volunteer-friendly.
+
+### Security
+
+- Replaced ambiguous YAML plain-scalar comment stripping with bounded linear
+  parsing so a large imported skill cannot stall startup with polynomial regex
+  backtracking.
 
 ## [1.5.1] - 2026-07-16
 

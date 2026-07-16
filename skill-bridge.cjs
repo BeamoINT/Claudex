@@ -151,7 +151,8 @@ function decodeQuotedScalar(raw) {
     try { return JSON.parse(value); } catch { return value.slice(1, -1); }
   }
   if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1).replace(/''/g, "'");
-  return value.replace(/\s+#.*$/, '').trim();
+  const comment = value.search(/[ \t]#/);
+  return (comment >= 0 ? value.slice(0, comment) : value).trim();
 }
 
 function frontmatter(markdown) {
@@ -166,9 +167,16 @@ function frontmatter(markdown) {
 function yamlTopLevelScalar(markdown, key) {
   const parsed = frontmatter(markdown);
   if (!parsed) return null;
-  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = parsed.body.match(new RegExp(`^${escaped}\\s*:\\s*(.+?)\\s*$`, 'mi'));
-  return match ? decodeQuotedScalar(match[1]) : null;
+  const expected = String(key).toLowerCase();
+  for (const line of parsed.body.split(/\r?\n/)) {
+    const colon = line.indexOf(':');
+    if (colon < 0) continue;
+    const field = line.slice(0, colon);
+    if (field !== field.trimStart() || field.trimEnd().toLowerCase() !== expected) continue;
+    const scalar = line.slice(colon + 1).trimStart();
+    return scalar ? decodeQuotedScalar(scalar) : null;
+  }
+  return null;
 }
 
 function replaceFrontmatterField(markdown, key, value) {

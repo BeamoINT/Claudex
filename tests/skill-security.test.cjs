@@ -68,6 +68,23 @@ function warningIncludes(result, fragment) {
   return result.warnings.some((warning) => warning.includes(fragment));
 }
 
+function testPlainScalarParsingIsBounded() {
+  const probe = `
+    const { codexSkillIdentity } = require(${JSON.stringify(helper)});
+    const spaces = ' '.repeat(200000);
+    const long = codexSkillIdentity('---\\nname: bounded-scalar\\ndescription: x' + spaces + 'y\\n---\\n');
+    if (!long.valid || long.description.length !== spaces.length + 2) process.exit(2);
+    const commented = codexSkillIdentity('---\\nname: comments\\ndescription: visible text   # ignored comment\\n---\\n');
+    if (!commented.valid || commented.description !== 'visible text') process.exit(3);
+  `;
+  const result = childProcess.spawnSync(process.execPath, ['-e', probe], {
+    encoding: 'utf8', timeout: 2000,
+  });
+  assert.strictEqual(result.error, undefined,
+    `plain scalar parsing exceeded its bounded runtime: ${result.error && result.error.message}`);
+  assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+}
+
 function directorySymlink(target, link) {
   try {
     fs.mkdirSync(path.dirname(link), { recursive: true });
@@ -352,6 +369,7 @@ function testLastKnownGoodFallback() {
 }
 
 try {
+  testPlainScalarParsingIsBounded();
   testProjectSymlinkEscape();
   testInternalSymlinkEscape();
   testSensitiveFilesAndPrivateKeys();
