@@ -1601,6 +1601,24 @@ if ($maintenanceCommandDetected) {
     $injectLeaderGuard = $false
     $injectPermission = $false
     $injectSkills = $false
+    $maintenanceBun = [string] $env:BUN_OPTIONS
+    Remove-Item Env:CLAUDEX_PROXY_TOKEN -ErrorAction SilentlyContinue
+    if ($env:CLAUDEX_MANAGED_SESSION -eq '1') {
+        $maintenanceManagedPreload = '--preload ' + (Join-Path $configDir 'preload.cjs').Replace('\', '/').Replace(' ', '\ ')
+        while ($maintenanceBun -eq $maintenanceManagedPreload -or $maintenanceBun.StartsWith($maintenanceManagedPreload + ' ')) {
+            $maintenanceBun = $maintenanceBun.Substring($maintenanceManagedPreload.Length).TrimStart()
+        }
+        foreach ($environmentName in $sessionEnvironmentNames) {
+            Remove-Item -LiteralPath "Env:$environmentName" -ErrorAction SilentlyContinue
+        }
+        foreach ($environmentName in @(
+            'CLAUDEX_MODEL_MODE', 'CLAUDEX_SESSION_MODE', 'CLAUDEX_INTERACTIVE_TUI',
+            'CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_NO_FLICKER', 'CLAUDE_CODE_ACCESSIBILITY'
+        )) {
+            Remove-Item -LiteralPath "Env:$environmentName" -ErrorAction SilentlyContinue
+        }
+        if ($maintenanceBun) { $env:BUN_OPTIONS = $maintenanceBun }
+    }
 }
 if ($forwardedModelSpecified -and [string]::IsNullOrWhiteSpace($forwardedModel)) {
     Fail '--model requires a model value.' 2

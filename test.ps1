@@ -246,6 +246,7 @@ if not "%FAKE_CLAUDE_MAINTENANCE_LOG%"=="" (
   >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo ARG2=%~2
   >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo ARG3=%~3
   >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo ARG4=%~4
+  >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo BUN=%BUN_OPTIONS%
   >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo BASE=%ANTHROPIC_BASE_URL%
   >>"%FAKE_CLAUDE_MAINTENANCE_LOG%" echo MANAGED=%CLAUDEX_MANAGED_SESSION%
 )
@@ -360,12 +361,15 @@ exit 1
         $savedMaintenanceLog = [Environment]::GetEnvironmentVariable('FAKE_CLAUDE_MAINTENANCE_LOG', 'Process')
         $savedBaseUrl = [Environment]::GetEnvironmentVariable('ANTHROPIC_BASE_URL', 'Process')
         $savedManagedSession = [Environment]::GetEnvironmentVariable('CLAUDEX_MANAGED_SESSION', 'Process')
+        $savedMaintenanceBun = [Environment]::GetEnvironmentVariable('BUN_OPTIONS', 'Process')
         try {
             $env:CLAUDEX_CONFIG_DIR = $missingMaintenanceConfig
             Remove-Item Env:CLAUDEX_SETTINGS_FILE -ErrorAction SilentlyContinue
             $env:FAKE_CLAUDE_MAINTENANCE_LOG = $maintenanceLog
             $env:ANTHROPIC_BASE_URL = 'https://managed-parent.invalid'
             $env:CLAUDEX_MANAGED_SESSION = '1'
+            $maintenanceManagedPreload = '--preload ' + (Join-Path $missingMaintenanceConfig 'preload.cjs').Replace('\', '/').Replace(' ', '\ ')
+            $env:BUN_OPTIONS = "$maintenanceManagedPreload --preload C:/user/preload.cjs"
             foreach ($maintenanceCommand in @('doctor', 'attach', 'respawn', 'stop', 'kill', 'rm', 'logs')) {
                 Remove-Item -LiteralPath $maintenanceLog -Force -ErrorAction SilentlyContinue
                 $maintenanceOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') $maintenanceCommand 'maintenance-sentinel' 2>&1
@@ -373,10 +377,11 @@ exit 1
                 Assert-True ($maintenanceExit -eq 0) "Windows $maintenanceCommand bypasses missing Claudex configuration"
                 Assert-True (Test-Path -LiteralPath $maintenanceLog -PathType Leaf) "Windows $maintenanceCommand reaches Claude"
                 $maintenanceLines = @([IO.File]::ReadAllLines($maintenanceLog))
-                Assert-True ($maintenanceLines.Count -eq 6) "Windows $maintenanceCommand writes one maintenance launch record"
+                Assert-True ($maintenanceLines.Count -eq 7) "Windows $maintenanceCommand writes one maintenance launch record"
                 Assert-True ($maintenanceLines[0] -eq "ARG1=$maintenanceCommand" -and $maintenanceLines[1] -eq 'ARG2=maintenance-sentinel' -and $maintenanceLines[2] -eq 'ARG3=' -and $maintenanceLines[3] -eq 'ARG4=') "Windows $maintenanceCommand preserves exact Claude argv without managed flags"
-                Assert-True ($maintenanceLines[4] -eq 'BASE=') "Windows $maintenanceCommand clears the managed proxy URL"
-                Assert-True ($maintenanceLines[5] -eq 'MANAGED=') "Windows $maintenanceCommand clears the managed-session marker"
+                Assert-True ($maintenanceLines[4] -eq 'BUN=--preload C:/user/preload.cjs') "Windows $maintenanceCommand preserves caller owned Bun options"
+                Assert-True ($maintenanceLines[5] -eq 'BASE=') "Windows $maintenanceCommand clears the managed proxy URL"
+                Assert-True ($maintenanceLines[6] -eq 'MANAGED=') "Windows $maintenanceCommand clears the managed-session marker"
             }
             Remove-Item -LiteralPath $maintenanceLog -Force -ErrorAction SilentlyContinue
             $maintenanceSavedPath = $env:PATH
@@ -388,13 +393,14 @@ exit 1
             Assert-True ($verboseMaintenanceExit -eq 0) 'global options before maintenance bypass missing configuration and stale Node'
             $verboseMaintenanceLines = @([IO.File]::ReadAllLines($maintenanceLog))
             Assert-True ($verboseMaintenanceLines[0] -eq 'ARG1=--verbose' -and $verboseMaintenanceLines[1] -eq 'ARG2=mcp' -and $verboseMaintenanceLines[2] -eq 'ARG3=list' -and $verboseMaintenanceLines[3] -eq 'ARG4=') 'global options preserve exact maintenance argv'
-            Assert-True ($verboseMaintenanceLines[4] -eq 'BASE=' -and $verboseMaintenanceLines[5] -eq 'MANAGED=') 'global-option maintenance launch receives no proxy or managed session injection'
+            Assert-True ($verboseMaintenanceLines[4] -eq 'BUN=--preload C:/user/preload.cjs' -and $verboseMaintenanceLines[5] -eq 'BASE=' -and $verboseMaintenanceLines[6] -eq 'MANAGED=') 'global-option maintenance launch receives no proxy or managed session injection'
         } finally {
             if ($null -eq $savedConfigDir) { Remove-Item Env:CLAUDEX_CONFIG_DIR -ErrorAction SilentlyContinue } else { $env:CLAUDEX_CONFIG_DIR = $savedConfigDir }
             if ($null -eq $savedSettingsFile) { Remove-Item Env:CLAUDEX_SETTINGS_FILE -ErrorAction SilentlyContinue } else { $env:CLAUDEX_SETTINGS_FILE = $savedSettingsFile }
             if ($null -eq $savedMaintenanceLog) { Remove-Item Env:FAKE_CLAUDE_MAINTENANCE_LOG -ErrorAction SilentlyContinue } else { $env:FAKE_CLAUDE_MAINTENANCE_LOG = $savedMaintenanceLog }
             if ($null -eq $savedBaseUrl) { Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue } else { $env:ANTHROPIC_BASE_URL = $savedBaseUrl }
             if ($null -eq $savedManagedSession) { Remove-Item Env:CLAUDEX_MANAGED_SESSION -ErrorAction SilentlyContinue } else { $env:CLAUDEX_MANAGED_SESSION = $savedManagedSession }
+            if ($null -eq $savedMaintenanceBun) { Remove-Item Env:BUN_OPTIONS -ErrorAction SilentlyContinue } else { $env:BUN_OPTIONS = $savedMaintenanceBun }
         }
 
         $nativeBoundaryEnvironment = @{}

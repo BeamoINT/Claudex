@@ -1495,6 +1495,8 @@ if [[ -n "$claude_maintenance_command" ]]; then
   inject_leader_guard=0
   inject_permission=0
   inject_skills=0
+  unset CLAUDEX_PROXY_TOKEN
+  if [[ "$inherited_managed_session" == 1 ]]; then scrub_managed_session_environment; fi
 fi
 if (( parsed_safe_mode )); then
   inject_agents=0
@@ -1858,7 +1860,7 @@ fi
 if (( inject_permission )) && claude_supports '--permission-mode'; then
   claude_args+=(--permission-mode "$permission_mode")
 fi
-if (( ! direct_chrome )) && [[ "$settings_file" != "$CLAUDE_CONFIG_DIR/settings.json" && "$effort_mode" != ultracode ]]; then
+if (( ! direct_chrome )) && [[ "$settings_file" != "$claudex_config_dir/settings.json" && "$effort_mode" != ultracode ]]; then
   claude_args+=(--settings "$settings_file")
 fi
 if (( use_proxy )) && [[ -n "$start_model" ]] && (( ! forwarded_model_specified )); then

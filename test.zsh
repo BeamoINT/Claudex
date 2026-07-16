@@ -167,6 +167,7 @@ printf '%s\n' "INTERACTIVE=${CLAUDEX_INTERACTIVE_TUI:-}"
 printf '%s\n' "CHATGPT_PLAN=${CLAUDEX_CHATGPT_PLAN_LABEL:-}"
 printf '%s\n' "INSTRUCTION_BRIDGE=${CLAUDEX_INSTRUCTION_BRIDGE:-}"
 printf '%s\n' "PROXY_TOKEN_SET=${CLAUDEX_PROXY_TOKEN:+yes}"
+printf '%s\n' "MANAGED=${CLAUDEX_MANAGED_SESSION:-}"
 if [[ "${ANTHROPIC_AUTH_TOKEN:-}" == native-provider-token ]]; then printf '%s\n' 'PROVIDER_TOKEN_OK=yes'
 else printf '%s\n' 'PROVIDER_TOKEN_OK=no'
 fi
@@ -878,6 +879,15 @@ maintenance_output=$(CLAUDE_CODE_DISABLE_1M_CONTEXT=inherited run_wrapper mcp li
 [[ "$maintenance_output" != *"BASE=http"* ]]
 [[ "$maintenance_output" == *$'DISABLE_1M=\n'* ]]
 [[ "$maintenance_output" != *'--agents'* ]]
+
+managed_maintenance_output=$(CLAUDEX_MANAGED_SESSION=1 CLAUDEX_PROXY_TOKEN=must-not-leak \
+  ANTHROPIC_BASE_URL=https://managed.invalid ANTHROPIC_AUTH_TOKEN=managed-secret \
+  BUN_OPTIONS="--preload $tmp/home/.config/claudex/preload.cjs --preload /user/preload.cjs" \
+  run_wrapper doctor maintenance-sentinel)
+[[ "$managed_maintenance_output" == *$'BASE=\n'* ]]
+[[ "$managed_maintenance_output" == *$'PROXY_TOKEN_SET=\n'* ]]
+[[ "$managed_maintenance_output" == *$'MANAGED=\n'* ]]
+[[ "$managed_maintenance_output" == *'BUN=--preload /user/preload.cjs'* ]]
 
 for maintenance_command in agents attach auth auto-mode doctor gateway install kill logs mcp plugin plugins project respawn rm setup-token stop update upgrade; do
   command_output=$(run_wrapper "$maintenance_command" --help)

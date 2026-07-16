@@ -5,6 +5,14 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.5.6] - 2026-07-16
+
+### Fixed
+
+- Cleared inherited managed session credentials and routing state before
+  maintenance commands reach Claude Code on Windows, macOS, and Linux while
+  preserving caller owned Bun options.
+
 ## [1.5.5] - 2026-07-16
 
 ### Fixed
@@ -376,7 +384,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first party profile support.
 - Cross platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.5.5...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.5.6...HEAD
+[1.5.6]: https://github.com/BeamoINT/Claudex/compare/v1.5.5...v1.5.6
 [1.5.5]: https://github.com/BeamoINT/Claudex/compare/v1.5.4...v1.5.5
 [1.5.4]: https://github.com/BeamoINT/Claudex/compare/v1.5.3...v1.5.4
 [1.5.3]: https://github.com/BeamoINT/Claudex/compare/v1.5.1...v1.5.3
