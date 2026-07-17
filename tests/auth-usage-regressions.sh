@@ -233,14 +233,27 @@ printf '%s\n' codex-a.json > "$CLAUDEX_CONFIG_DIR/codex-usage-account"
 [[ ! -e "$CLAUDEX_CONFIG_DIR/usage-cache/summary" ]]
 [[ ! -e "$CLAUDEX_CONFIG_DIR/codex-usage-account" ]]
 
-# The watcher must reconcile a divergence that predates its initial fingerprint.
-write_source_auth account-b access-b
-printf '%s\n' '{"type":"codex","access_token":"access-a","refresh_token":"refresh-a","account_id":"account-a"}' \
-  > "$CLAUDEX_CODEX_AUTH_DIR/codex-claudex-managed.json"
+# An auth change overlapping watcher startup must not become an unsynchronized
+# baseline. Pause immediately after the initial sync, change the source, then
+# require the next poll to publish the new account without a second change.
+write_source_auth account-a access-a
+"$root/codex-session" sync
 sleep 30 & parent_pid=$!
-CLAUDEX_AUTH_WATCH_SECONDS=1 CLAUDEX_AUTH_WATCH_READY_FILE="$tmp/watch-ready" \
+initial_sync_ready="$tmp/watch-initial-sync.ready"
+initial_sync_continue="$tmp/watch-initial-sync.continue"
+CLAUDEX_TEST_MODE=1 CLAUDEX_AUTH_WATCH_SECONDS=1 \
+  CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_READY_FILE="$initial_sync_ready" \
+  CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_CONTINUE_FILE="$initial_sync_continue" \
+  CLAUDEX_AUTH_WATCH_READY_FILE="$tmp/watch-ready" \
   "$root/codex-session" watch "$parent_pid" & watcher_pid=$!
+wait_for_file "$initial_sync_ready" 'auth watcher initial synchronization barrier' 1
+write_source_auth account-b access-b
+: > "$initial_sync_continue"
 wait_for_file "$tmp/watch-ready" 'auth watcher initialization' 1
+for _ in {1..200}; do
+  jq -e '.account_id == "account-b"' "$CLAUDEX_CODEX_AUTH_DIR/codex-claudex-managed.json" >/dev/null 2>&1 && break
+  sleep 0.05
+done
 jq -e '.account_id == "account-b"' "$CLAUDEX_CODEX_AUTH_DIR/codex-claudex-managed.json" >/dev/null
 kill "$parent_pid" 2>/dev/null || true
 wait "$parent_pid" 2>/dev/null || true
@@ -384,12 +397,26 @@ summary=$(<"$CLAUDEX_CONFIG_DIR/usage-cache/summary")
 # Preserve the creation grace so a concurrent creator can finish publishing,
 # then reclaim the same lock once that grace has actually elapsed.
 mkdir -p "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock"
-if "$root/usage-limit" --refresh-cache >"$tmp/fresh-ownerless.out" 2>"$tmp/fresh-ownerless.err"; then
+fresh_lock_bin="$tmp/fresh-lock-bin"
+fresh_lock_mktemp_log="$tmp/fresh-lock-mktemp.log"
+real_mktemp=$(command -v mktemp)
+mkdir -p "$fresh_lock_bin"
+cat > "$fresh_lock_bin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' invoked >> "$FAKE_MKTEMP_LOG"
+exec "$REAL_MKTEMP" "$@"
+EOF
+chmod +x "$fresh_lock_bin/mktemp"
+fresh_lock_started=$SECONDS
+if PATH="$fresh_lock_bin:$PATH" REAL_MKTEMP="$real_mktemp" FAKE_MKTEMP_LOG="$fresh_lock_mktemp_log" \
+    "$root/usage-limit" --refresh-cache >"$tmp/fresh-ownerless.out" 2>"$tmp/fresh-ownerless.err"; then
   printf '%s\n' 'fresh ownerless usage lock was reclaimed before owner publication grace elapsed' >&2
   exit 1
 fi
+(( SECONDS - fresh_lock_started < 10 ))
 grep -F 'another usage refresh is already in progress' "$tmp/fresh-ownerless.err" >/dev/null
 [[ -d "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock" ]]
+[[ ! -e "$fresh_lock_mktemp_log" ]]
 touch -t 202001010000 "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock"
 "$root/usage-limit" --refresh-cache
 [[ ! -d "$CLAUDEX_CONFIG_DIR/usage-cache/refresh.lock" ]]
@@ -657,6 +684,8 @@ grep -F -- '--config $curlConfig -- $usageUrl' "$root/usage-limit.ps1" >/dev/nul
 grep -F 'Protect-PrivatePath $bridgeAuthFile $false' "$root/codex-session.ps1" >/dev/null
 grep -F 'function Acquire-SessionSyncLock' "$root/codex-session.ps1" >/dev/null
 grep -F 'if ($currentFingerprint -ne $sourceFingerprint) { continue }' "$root/codex-session.ps1" >/dev/null
+grep -F '$script:lastSessionSyncFingerprint = $sourceFingerprint' "$root/codex-session.ps1" >/dev/null
+grep -F 'return Get-TextFingerprint ([IO.File]::ReadAllText($codexAuthFile))' "$root/codex-session.ps1" >/dev/null
 grep -F 'function Clear-SensitiveSessionState' "$root/codex-session.ps1" >/dev/null
 grep -F 'CredentialSyncCleanup' "$root/codex-session.ps1" >/dev/null
 grep -F 'AppDomain.CurrentDomain.ProcessExit' "$root/codex-session.ps1" >/dev/null

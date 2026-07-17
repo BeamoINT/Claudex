@@ -24,6 +24,7 @@ mode=detail
 refresh=1
 lock_held=0
 lock_token=""
+refresh_lock_contention_state=""
 account_action=""
 account_selector=""
 temporary_curl_config=""
@@ -291,10 +292,40 @@ remove_legacy_refresh_lock() {
   return 1
 }
 
+inspect_contended_refresh_lock() {
+  local acquisition_started="$1" age observed_nonce legacy_record
+  local legacy_seconds=$(( timeout_seconds * 3 + 10 )) elapsed=$(( SECONDS - acquisition_started ))
+  (( elapsed >= 0 )) || elapsed=0
+  refresh_lock_contention_state="contended"
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE:-}" ]]; then
+    (umask 077; printf '%s\n' ready > "$CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE")
+  fi
+  age=$(refresh_lock_age_seconds)
+  observed_nonce=$(read_refresh_lock_field "$refresh_owner_file" nonce)
+  if [[ -n "$observed_nonce" ]]; then
+    if ! refresh_owner_is_current "$refresh_owner_file" && (( age >= 2 )); then remove_owned_refresh_generation "$observed_nonce" || true; fi
+  elif [[ -n "$(read_refresh_generation_nonce)" && "$age" -ge 2 ]]; then
+    remove_owned_refresh_generation "$(read_refresh_generation_nonce)" || true
+  else
+    legacy_record=$(read_legacy_refresh_owner)
+    if [[ -n "$legacy_record" ]] && ! legacy_refresh_owner_is_current "$legacy_record" && (( age >= 2 )); then
+      remove_legacy_refresh_lock "$legacy_record" || true
+    # The contender's own wait must not age a directory that was still inside
+    # its publication grace when this acquisition began.
+    elif [[ -z "$legacy_record" ]]; then
+      if (( age >= legacy_seconds + elapsed )); then
+        remove_legacy_refresh_lock "$legacy_record" || true
+      else
+        refresh_lock_contention_state="fresh-ownerless"
+      fi
+    fi
+  fi
+}
+
 acquire_refresh_lock() {
-  local attempt age observed_nonce owner_identity generation_nonce generation_tmp owner_tmp quarantine legacy_seconds
+  local attempt observed_nonce owner_identity generation_nonce generation_tmp owner_tmp quarantine
+  local acquisition_started=$SECONDS
   local created_directory_identity current_directory_identity
-  local legacy_record
   (( lock_held == 0 )) || {
     observed_nonce=$(read_refresh_generation_nonce)
     [[ -n "$observed_nonce" ]] || observed_nonce=$(read_refresh_lock_field "$refresh_owner_file" nonce)
@@ -306,13 +337,24 @@ acquire_refresh_lock() {
   }
   mkdir -p "$cache_dir"
   chmod 700 "$cache_dir" 2>/dev/null || true
-  legacy_seconds=$(( timeout_seconds * 3 + 10 ))
   for attempt in {1..100}; do
     recover_refresh_lock_barriers
     if refresh_lock_barrier_exists; then
       if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE:-}" ]]; then
         (umask 077; printf '%s\n' ready > "$CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE")
       fi
+      (( SECONDS - acquisition_started < 5 )) || break
+      sleep 0.02
+      continue
+    fi
+    # A known contender does not require this process to inspect its own start
+    # identity or prepare publication temporaries. Keeping that work behind a
+    # successful mkdir prevents a slow retry loop from aging a fresh ownerless
+    # lock into its own reclamation threshold.
+    if [[ -d "$refresh_lock" ]]; then
+      inspect_contended_refresh_lock "$acquisition_started"
+      [[ "$refresh_lock_contention_state" != fresh-ownerless ]] || break
+      (( SECONDS - acquisition_started < 5 )) || break
       sleep 0.02
       continue
     fi
@@ -369,24 +411,10 @@ acquire_refresh_lock() {
       sleep 0.02
       continue
     fi
-    if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE:-}" ]]; then
-      (umask 077; printf '%s\n' ready > "$CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE")
-    fi
     rm -f "$generation_tmp" "$owner_tmp"
-    age=$(refresh_lock_age_seconds)
-    observed_nonce=$(read_refresh_lock_field "$refresh_owner_file" nonce)
-    if [[ -n "$observed_nonce" ]]; then
-      if ! refresh_owner_is_current "$refresh_owner_file" && (( age >= 2 )); then remove_owned_refresh_generation "$observed_nonce" || true; fi
-    elif [[ -n "$(read_refresh_generation_nonce)" && "$age" -ge 2 ]]; then
-      remove_owned_refresh_generation "$(read_refresh_generation_nonce)" || true
-    else
-      legacy_record=$(read_legacy_refresh_owner)
-      if [[ -n "$legacy_record" ]] && ! legacy_refresh_owner_is_current "$legacy_record" && (( age >= 2 )); then
-        remove_legacy_refresh_lock "$legacy_record" || true
-      elif [[ -z "$legacy_record" ]] && (( age >= legacy_seconds )); then
-        remove_legacy_refresh_lock "$legacy_record" || true
-      fi
-    fi
+    inspect_contended_refresh_lock "$acquisition_started"
+    [[ "$refresh_lock_contention_state" != fresh-ownerless ]] || break
+    (( SECONDS - acquisition_started < 5 )) || break
     sleep 0.02
   done
   fail 'another usage refresh is already in progress.'

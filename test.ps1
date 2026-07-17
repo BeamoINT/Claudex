@@ -2171,6 +2171,8 @@ process.stdout.write(JSON.stringify({
         $backgroundProxyPidFile = Join-Path $temporary 'background-proxy-watcher.pid'
         $backgroundAuthExit = Join-Path $temporary 'background-auth-watcher.exit'
         $backgroundProxyExit = Join-Path $temporary 'background-proxy-watcher.exit'
+        $backgroundAuthInitialSyncReady = Join-Path $temporary 'background-auth-initial-sync.ready'
+        $backgroundAuthInitialSyncContinue = Join-Path $temporary 'background-auth-initial-sync.continue'
         $backgroundBridgeFile = Join-Path $testAuthDir 'codex-claudex-managed.json'
         [IO.File]::WriteAllText($backgroundRegistry, '[{"id":"managed-bg-test","state":"working"}]', $utf8)
         $env:CLAUDEX_TEST_MODE = '1'
@@ -2181,6 +2183,8 @@ process.stdout.write(JSON.stringify({
         $env:CLAUDEX_TEST_PROXY_WATCH_PID_FILE = $backgroundProxyPidFile
         $env:CLAUDEX_TEST_AUTH_WATCH_EXIT_FILE = $backgroundAuthExit
         $env:CLAUDEX_TEST_PROXY_WATCH_EXIT_FILE = $backgroundProxyExit
+        $env:CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_READY_FILE = $backgroundAuthInitialSyncReady
+        $env:CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_CONTINUE_FILE = $backgroundAuthInitialSyncContinue
         $backgroundAuthPid = 0
         $backgroundProxyPid = 0
         $reusedAuthWatcher = $null
@@ -2213,11 +2217,13 @@ process.stdout.write(JSON.stringify({
             $backgroundProxyPid = [int] [IO.File]::ReadAllText($backgroundProxyPidFile).Trim()
             Assert-True ($null -ne (Get-Process -Id $backgroundAuthPid -ErrorAction SilentlyContinue)) 'Windows detached auth watcher survives launcher exit'
             Assert-True ($null -ne (Get-Process -Id $backgroundProxyPid -ErrorAction SilentlyContinue)) 'Windows detached proxy watcher survives launcher exit'
+            Wait-ForTestPath $backgroundAuthInitialSyncReady 'Windows detached auth watcher pauses after its initial synchronization'
             foreach ($line in @([IO.File]::ReadAllLines($backgroundRegistryLog))) {
                 Assert-True ($line -eq 'BASE= AUTH= PROXY= URL= CONFIG= BIN= BEDROCK= MANTLE= VERTEX= FOUNDRY= CUSTOM= MODEL= DEFAULT= SUBAGENT= CODEX=') 'Windows managed registry query scrubs every proxy, provider, model, and credential family'
             }
 
             [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"auth_mode":"chatgpt","tokens":{"access_token":"background-access","refresh_token":"background-refresh","account_id":"background-account"}}', $utf8)
+            [IO.File]::WriteAllText($backgroundAuthInitialSyncContinue, "continue`n", $utf8)
             $backgroundBridgeUpdated = $false
             for ($attempt = 0; $attempt -lt 200; $attempt++) {
                 try {
@@ -2289,7 +2295,9 @@ process.stdout.write(JSON.stringify({
                 'CLAUDEX_TEST_MODE', 'CLAUDEX_AUTH_WATCH_SECONDS', 'FAKE_CLAUDE_AGENT_REGISTRY_FILE',
                 'FAKE_CLAUDE_AGENT_REGISTRY_LOG', 'CLAUDEX_TEST_AUTH_WATCH_PID_FILE',
                 'CLAUDEX_TEST_PROXY_WATCH_PID_FILE', 'CLAUDEX_TEST_AUTH_WATCH_EXIT_FILE',
-                'CLAUDEX_TEST_PROXY_WATCH_EXIT_FILE'
+                'CLAUDEX_TEST_PROXY_WATCH_EXIT_FILE',
+                'CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_READY_FILE',
+                'CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_CONTINUE_FILE'
             )) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
             foreach ($name in $registryPrivateEnvironment.Keys) {
                 $value = $registryPrivateEnvironment[$name]
@@ -2671,12 +2679,18 @@ process.stdout.write(JSON.stringify({
         $usageRefreshLock = Join-Path $testConfig 'usage-cache\refresh.lock'
         [IO.Directory]::CreateDirectory($usageRefreshLock) | Out-Null
         $freshOwnerlessErrorLog = Join-Path $temporary 'fresh-ownerless-usage-lock-error.log'
+        $freshOwnerlessTimer = [Diagnostics.Stopwatch]::StartNew()
         $freshOwnerlessProcess = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedUsageHelper, '-RefreshCache') `
             -RedirectStandardError $freshOwnerlessErrorLog -PassThru
         Wait-ForTestProcess $freshOwnerlessProcess 'fresh ownerless usage lock contender exits'
+        $freshOwnerlessTimer.Stop()
         $freshOwnerlessError = Get-Content -LiteralPath $freshOwnerlessErrorLog -Raw
         Assert-True ($freshOwnerlessProcess.ExitCode -ne 0 -and $freshOwnerlessError.Contains('another usage refresh is already in progress.')) 'fresh ownerless usage lock keeps its owner-publication grace'
+        Assert-True ($freshOwnerlessTimer.Elapsed.TotalSeconds -lt 10) 'fresh ownerless usage lock contention fails promptly'
         Assert-True (Test-Path -LiteralPath $usageRefreshLock -PathType Container) 'fresh ownerless usage lock is preserved'
+        $refreshPublicationTemporaries = @(Get-ChildItem -LiteralPath (Split-Path -Parent $usageRefreshLock) -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like '.refresh-owner.*.tmp' -or $_.Name -like '.refresh-generation.*.tmp' })
+        Assert-True ($refreshPublicationTemporaries.Count -eq 0) 'fresh ownerless usage lock does not prepare publication temporaries'
         (Get-Item -LiteralPath $usageRefreshLock).LastWriteTimeUtc = [DateTime]::UtcNow.AddSeconds(-60)
         $staleOwnerlessProcess = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedUsageHelper, '-RefreshCache') -PassThru
         Wait-ForTestProcess $staleOwnerlessProcess 'stale ownerless usage lock contender exits'

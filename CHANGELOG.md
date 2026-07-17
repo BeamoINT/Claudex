@@ -5,6 +5,17 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-07-17
+
+### Fixed
+
+- Prevented account changes that overlap watcher startup or synchronization
+  from becoming an unsynchronized baseline on Unix or Windows.
+- Made usage refresh contention reject fresh ownerless locks promptly without
+  preparing publication files or aging the lock into its own recovery window.
+- Gave the complete Unix release suite enough hosted runner time to finish and
+  enforced the workflow budget for both LF and CRLF checkouts.
+
 ## [1.6.0] - 2026-07-17
 
 ### Added
@@ -457,7 +468,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first party profile support.
 - Cross platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/BeamoINT/Claudex/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/BeamoINT/Claudex/compare/v1.5.8...v1.6.0
 [1.5.8]: https://github.com/BeamoINT/Claudex/compare/v1.5.7...v1.5.8
 [1.5.7]: https://github.com/BeamoINT/Claudex/compare/v1.5.6...v1.5.7

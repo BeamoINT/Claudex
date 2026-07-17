@@ -14,6 +14,7 @@ readonly session_sync_lock="$bridge_auth_dir/.codex-session-sync.lock"
 session_temporary=""
 session_sync_token=""
 session_sync_owned=0
+last_session_sync_fingerprint=""
 
 fail() {
   printf 'claudex: %s\n' "$*" >&2
@@ -643,6 +644,7 @@ sync_session() {
       rm -f "$session_temporary"
       session_temporary=""
     fi
+    last_session_sync_fingerprint="$source_fingerprint"
     release_session_sync_lock
     return 0
   done
@@ -652,14 +654,12 @@ sync_session() {
 }
 
 auth_fingerprint() {
+  local source_json=""
   if [[ ! -r "$codex_auth_file" ]]; then
     printf '%s\n' missing
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$codex_auth_file" | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$codex_auth_file" | awk '{print $1}'
   else
-    cksum "$codex_auth_file" | awk '{print $1 ":" $2}'
+    source_json=$(<"$codex_auth_file") || { printf '%s\n' unreadable; return; }
+    printf '%s' "$source_json" | json_fingerprint
   fi
 }
 
@@ -721,11 +721,19 @@ watch_session() {
   }
   if [[ "$background" == 1 ]]; then trap '' HUP; fi
   if [[ -z "$parent_identity" ]]; then parent_identity=$(process_identity "$parent_pid" 2>/dev/null || true); fi
-  # Reconcile once before establishing the baseline. Otherwise an account
-  # change between launcher startup and watcher initialization can be missed
-  # until auth.json changes a second time.
-  sync_session >/dev/null 2>&1 || true
+  # Start with the observed source, then advance only to the fingerprint of the
+  # exact coherent snapshot sync_session verified and published. A concurrent
+  # change therefore remains visible on the next poll, including an ABA change.
   fingerprint=$(auth_fingerprint)
+  if sync_session >/dev/null 2>&1 && [[ -n "$last_session_sync_fingerprint" ]]; then
+    fingerprint="$last_session_sync_fingerprint"
+  fi
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 \
+      && -n "${CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_READY_FILE:-}" \
+      && -n "${CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_CONTINUE_FILE:-}" ]]; then
+    (umask 077; printf '%s\n' ready > "$CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_READY_FILE")
+    while [[ ! -e "$CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_CONTINUE_FILE" ]]; do sleep 0.02; done
+  fi
   if [[ -n "${CLAUDEX_AUTH_WATCH_READY_FILE:-}" ]]; then
     (umask 077; printf '%s\n' ready > "$CLAUDEX_AUTH_WATCH_READY_FILE")
   fi
@@ -750,7 +758,7 @@ watch_session() {
     next=$(auth_fingerprint)
     [[ "$next" != "$fingerprint" ]] || continue
     if sync_session >/dev/null 2>&1; then
-      fingerprint="$next"
+      [[ -z "$last_session_sync_fingerprint" ]] || fingerprint="$last_session_sync_fingerprint"
     elif [[ "$next" == missing ]]; then
       # The bridge has already been cleared. Wait quietly for the next login.
       fingerprint="$next"

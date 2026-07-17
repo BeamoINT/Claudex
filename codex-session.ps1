@@ -23,6 +23,7 @@ $isWindowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 $script:sessionTemporary = ''
 $script:sessionSyncToken = ''
 $script:sessionSyncOwned = $false
+$script:lastSessionSyncFingerprint = ''
 
 function Protect-PrivatePath([string] $Path, [bool] $Directory) {
     if (-not $isWindowsPlatform) { return }
@@ -846,6 +847,7 @@ function Sync-Session {
                 [Claudex.CredentialSyncCleanup]::ClearTemporaryTracking()
                 Protect-PrivatePath $bridgeAuthFile $false
             }
+            $script:lastSessionSyncFingerprint = $sourceFingerprint
             return 0
         } finally {
             Clear-SensitiveSessionState
@@ -858,7 +860,7 @@ function Sync-Session {
 
 function Get-AuthFingerprint {
     if (-not (Test-Path -LiteralPath $codexAuthFile -PathType Leaf)) { return 'missing' }
-    try { return (Get-FileHash -LiteralPath $codexAuthFile -Algorithm SHA256).Hash }
+    try { return Get-TextFingerprint ([IO.File]::ReadAllText($codexAuthFile)) }
     catch { return 'unreadable' }
 }
 
@@ -936,8 +938,24 @@ function Watch-Session {
     if ([string]::IsNullOrWhiteSpace($ParentProcessIdentity)) {
         $script:ParentProcessIdentity = Get-ProcessIdentity $ParentProcessId
     }
-    try { Sync-Session | Out-Null } catch { }
+    # Advance the baseline only to the fingerprint of the exact coherent source
+    # snapshot Sync-Session verified and published. Any overlapping source
+    # change remains different on the next poll, including an ABA change.
     $fingerprint = Get-AuthFingerprint
+    try {
+        $initialResult = Sync-Session
+        if ($initialResult -eq 0 -and $script:lastSessionSyncFingerprint) {
+            $fingerprint = $script:lastSessionSyncFingerprint
+        }
+    } catch { }
+    if ($env:CLAUDEX_TEST_MODE -eq '1' -and
+        $env:CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_READY_FILE -and
+        $env:CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_CONTINUE_FILE) {
+        [IO.File]::WriteAllText($env:CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_READY_FILE, "ready`n", $utf8)
+        while (-not (Test-Path -LiteralPath $env:CLAUDEX_TEST_AUTH_WATCH_AFTER_INITIAL_SYNC_CONTINUE_FILE)) {
+            Start-Sleep -Milliseconds 20
+        }
+    }
     if ($env:CLAUDEX_AUTH_WATCH_READY_FILE) {
         [IO.File]::WriteAllText($env:CLAUDEX_AUTH_WATCH_READY_FILE, "ready`n", $utf8)
     }
@@ -957,7 +975,9 @@ function Watch-Session {
         if ($next -eq $fingerprint) { continue }
         try {
             $result = Sync-Session
-            if ($result -eq 0 -or $next -eq 'missing') { $fingerprint = $next }
+            if ($result -eq 0 -and $script:lastSessionSyncFingerprint) {
+                $fingerprint = $script:lastSessionSyncFingerprint
+            } elseif ($next -eq 'missing') { $fingerprint = $next }
         } catch {
             if ($next -eq 'missing') { $fingerprint = $next }
         }

@@ -355,6 +355,33 @@ function Remove-IncompleteRefreshLock {
     return $true
 }
 
+function Resolve-RefreshLockContention([int] $AcquisitionElapsedSeconds) {
+    if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE) {
+        [IO.File]::WriteAllText($env:CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE, "ready`n", $utf8)
+    }
+    $age = Get-RefreshLockAgeSeconds
+    $observed = Get-RefreshLockField $refreshOwnerFile 'nonce'
+    if ($observed -and $age -ge 2 -and -not (Test-RefreshOwnerCurrent $refreshOwnerFile)) {
+        [void] (Remove-OwnedRefreshGeneration $observed)
+    } elseif ((Get-RefreshGenerationNonce) -and $age -ge 2) {
+        [void] (Remove-OwnedRefreshGeneration (Get-RefreshGenerationNonce))
+    } else {
+        $legacyRecord = Get-LegacyRefreshOwnerRecord
+        if ($legacyRecord -and $age -ge 2 -and -not (Test-LegacyRefreshOwnerCurrent $legacyRecord)) {
+            [void] (Remove-LegacyRefreshLock $legacyRecord)
+        # Waiting in this contender cannot make a directory that was initially
+        # inside its publication grace eligible for reclamation.
+        } elseif (-not $legacyRecord -and (Test-Path -LiteralPath $refreshLock -PathType Container)) {
+            if ($age -ge ($legacyRefreshLockMaxAgeSeconds + [Math]::Max(0, $AcquisitionElapsedSeconds))) {
+                [void] (Remove-LegacyRefreshLock '')
+            } else {
+                return 'fresh-ownerless'
+            }
+        }
+    }
+    return 'contended'
+}
+
 function Acquire-RefreshLock {
     if ($LockHeld) {
         $current = Get-RefreshGenerationNonce
@@ -363,12 +390,24 @@ function Acquire-RefreshLock {
         $script:ownsRefreshLock = $true; $script:ownedRefreshToken = $LockToken; return
     }
     [IO.Directory]::CreateDirectory($cacheDir) | Out-Null; Protect-PrivatePath $cacheDir $true
+    $acquisitionTimer = [Diagnostics.Stopwatch]::StartNew()
     for ($attempt = 0; $attempt -lt 100; $attempt++) {
         Recover-RefreshLockBarriers
         if (@(Get-RefreshLockBarriers).Count -gt 0) {
             if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE) {
                 [IO.File]::WriteAllText($env:CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE, "ready`n", $utf8)
             }
+            if ($acquisitionTimer.Elapsed.TotalSeconds -ge 5) { break }
+            Start-Sleep -Milliseconds 20
+            continue
+        }
+        # Avoid process inspection and temporary publication files while a
+        # contender is already present. Otherwise a slow retry loop can age a
+        # newly ownerless directory into its own reclamation threshold.
+        if (Test-Path -LiteralPath $refreshLock -PathType Container) {
+            $contentionState = Resolve-RefreshLockContention ([int] [Math]::Floor($acquisitionTimer.Elapsed.TotalSeconds))
+            if ($contentionState -eq 'fresh-ownerless') { break }
+            if ($acquisitionTimer.Elapsed.TotalSeconds -ge 5) { break }
             Start-Sleep -Milliseconds 20
             continue
         }
@@ -400,24 +439,12 @@ function Acquire-RefreshLock {
             }
             $script:ownsRefreshLock = $true; $script:ownedRefreshToken = $nonce; return
         } catch {
-            if (-not $created -and $env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE) {
-                [IO.File]::WriteAllText($env:CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE, "ready`n", $utf8)
-            }
             if ($created -and $createdDirectoryIdentity -and (Get-RefreshLockDirectoryIdentity) -eq $createdDirectoryIdentity -and
                 -not (Remove-OwnedRefreshGeneration $nonce)) { [void] (Remove-IncompleteRefreshLock) }
         } finally { Remove-Item -LiteralPath $ownerTemporary, $generationTemporary -Force -ErrorAction SilentlyContinue }
-        $age = Get-RefreshLockAgeSeconds; $observed = Get-RefreshLockField $refreshOwnerFile 'nonce'
-        if ($observed -and $age -ge 2 -and -not (Test-RefreshOwnerCurrent $refreshOwnerFile)) { [void] (Remove-OwnedRefreshGeneration $observed) }
-        elseif ((Get-RefreshGenerationNonce) -and $age -ge 2) { [void] (Remove-OwnedRefreshGeneration (Get-RefreshGenerationNonce)) }
-        else {
-            $legacyRecord = Get-LegacyRefreshOwnerRecord
-            if ($legacyRecord -and $age -ge 2 -and -not (Test-LegacyRefreshOwnerCurrent $legacyRecord)) {
-                [void] (Remove-LegacyRefreshLock $legacyRecord)
-            } elseif (-not $legacyRecord -and $age -ge $legacyRefreshLockMaxAgeSeconds -and
-                (Test-Path -LiteralPath $refreshLock -PathType Container)) {
-                [void] (Remove-LegacyRefreshLock '')
-            }
-        }
+        $contentionState = Resolve-RefreshLockContention ([int] [Math]::Floor($acquisitionTimer.Elapsed.TotalSeconds))
+        if ($contentionState -eq 'fresh-ownerless') { break }
+        if ($acquisitionTimer.Elapsed.TotalSeconds -ge 5) { break }
         Start-Sleep -Milliseconds 20
     }
     throw 'another usage refresh is already in progress.'
