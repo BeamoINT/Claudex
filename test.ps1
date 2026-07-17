@@ -491,15 +491,20 @@ exit 1
 
     if ($isWindowsPlatform) {
         $codexConfigArgumentLog = Join-Path $temporary 'codex-config-argument.log'
+        $codexConfigCommandLog = Join-Path $temporary 'codex-config-command.log'
         $env:FAKE_CODEX_CONFIG_ARG_LOG = $codexConfigArgumentLog
+        $env:FAKE_CODEX_AUTH_ARGS_LOG = $codexConfigCommandLog
         try {
             & (Join-Path $testConfig 'codex-session.ps1') sync
             $codexLiteralSyncExit = $LASTEXITCODE
         } finally {
             Remove-Item Env:FAKE_CODEX_CONFIG_ARG_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:FAKE_CODEX_AUTH_ARGS_LOG -ErrorAction SilentlyContinue
         }
-        Assert-True ($codexLiteralSyncExit -eq 0) 'Windows Codex synchronization preserves the file credential override as one argument'
-        Assert-True ([IO.File]::ReadAllText($codexConfigArgumentLog).Trim() -eq "cli_auth_credentials_store='file'") 'Windows Codex synchronization uses a cmd safe TOML literal'
+        $codexConfigArgument = if (Test-Path -LiteralPath $codexConfigArgumentLog -PathType Leaf) { [IO.File]::ReadAllText($codexConfigArgumentLog).Trim() } else { '<missing>' }
+        $codexConfigCommand = if (Test-Path -LiteralPath $codexConfigCommandLog -PathType Leaf) { [IO.File]::ReadAllText($codexConfigCommandLog).Trim() } else { '<missing>' }
+        Assert-True ($codexLiteralSyncExit -eq 0) "Windows Codex synchronization preserves the file credential override as one argument (config=$codexConfigArgument command=$codexConfigCommand exit=$codexLiteralSyncExit)"
+        Assert-True ($codexConfigArgument -eq "cli_auth_credentials_store='file'") 'Windows Codex synchronization uses a cmd safe TOML literal'
 
         $privateHelper = Join-Path $temporary 'private-environment-helper.ps1'
         $privateHelperLog = Join-Path $temporary 'private-environment-helper.log'
