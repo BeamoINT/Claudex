@@ -54,5 +54,14 @@ assert.match(suite, /testSuiteTimeoutSeconds = 600/, 'Windows CI suite has a bou
 assert.match(suite, /test\.ps1 watchdog timed out after/, 'Windows CI watchdog reports the active test stage');
 assert.match(suite, /Stop-Process -Id \$PID -Force/, 'Windows CI watchdog terminates a hung test host');
 assert.match(suite, /testSuiteWatchdog\.Kill\(\)/, 'Windows CI suite cleans up its watchdog after success or failure');
+const updateFixtureStart = suite.indexOf("Write-TestStage 'starting automatic update regressions'");
+const updateFixtureEnd = suite.indexOf("Write-TestStage 'automatic update regressions passed'", updateFixtureStart);
+assert.notEqual(updateFixtureStart, -1, 'Windows suite is missing automatic update regressions');
+assert.notEqual(updateFixtureEnd, -1, 'Windows automatic update regressions are missing their completion boundary');
+const updateFixture = suite.slice(updateFixtureStart, updateFixtureEnd);
+assert.doesNotMatch(updateFixture, /& \$shellPath[\s\S]*--version \| Out-Null/,
+  'detached updater regressions must not wait on a native descendant output pipeline');
+assert.equal((updateFixture.match(/Start-TrackedTestProcess \$shellPath \$updateLauncherArguments/g) || []).length, 4,
+  'each detached updater launcher must use a bounded direct process handle');
 
 console.log('PowerShell background watcher contract passed');

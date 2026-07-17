@@ -1975,6 +1975,8 @@ process.stdout.write(JSON.stringify({
         $updateRelease = Join-Path $temporary 'windows-detached-update-release'
         $updateDone = Join-Path $temporary 'windows-detached-update-done'
         $updateAttempt = Join-Path $temporary 'windows-detached-update-attempt'
+        $updateLauncherArguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            ('"' + (Join-Path $root 'claudex.ps1') + '"'), '--version')
         Write-TestStage 'starting automatic update regressions'
         $savedSkipUpdate = $env:CLAUDEX_SKIP_AUTO_UPDATE
         $savedProxyToken = $env:CLAUDEX_PROXY_TOKEN
@@ -1990,7 +1992,9 @@ process.stdout.write(JSON.stringify({
             $env:FAKE_UPDATE_READY_FILE = $updateReady
             $env:FAKE_UPDATE_WAIT_FILE = $updateRelease
             $env:FAKE_UPDATE_DONE_FILE = $updateDone
-            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+            $detachedUpdateLauncher = Start-TrackedTestProcess $shellPath $updateLauncherArguments 'windows-detached-update-launcher'
+            Wait-ForTestProcess $detachedUpdateLauncher 'Windows launcher exits while its detached updater remains active'
+            Assert-True ($detachedUpdateLauncher.ExitCode -eq 0) 'Windows detached updater launcher succeeds'
             for ($attempt = 0; $attempt -lt 200 -and
                 (-not (Test-Path -LiteralPath $updateReady -PathType Leaf) -or
                  -not (Test-Path -LiteralPath (Join-Path $updateDirectory 'lock\owner') -PathType Leaf)); $attempt++) {
@@ -1999,7 +2003,9 @@ process.stdout.write(JSON.stringify({
             Assert-True (Test-Path -LiteralPath $updateReady -PathType Leaf) 'Windows detached Claude updater outlives launcher host'
             (Get-Item -LiteralPath (Join-Path $updateDirectory 'lock')).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
             $env:CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE = $updateAttempt
-            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+            $liveUpdateContender = Start-TrackedTestProcess $shellPath $updateLauncherArguments 'windows-live-update-contender'
+            Wait-ForTestProcess $liveUpdateContender 'Windows live update owner contender launcher exits'
+            Assert-True ($liveUpdateContender.ExitCode -eq 0) 'Windows live update owner contender launcher succeeds'
             for ($attempt = 0; $attempt -lt 200 -and
                 (-not (Test-Path -LiteralPath $updateAttempt) -or
                  -not ([IO.File]::ReadAllText($updateAttempt).Contains('blocked '))); $attempt++) { Start-Sleep -Milliseconds 20 }
@@ -2024,7 +2030,9 @@ process.stdout.write(JSON.stringify({
             $legacyAttempt = Join-Path $temporary 'windows-legacy-update-attempt'
             $env:CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE = $legacyAttempt
             Remove-Item -LiteralPath @('Env:FAKE_UPDATE_WAIT_FILE', 'Env:FAKE_UPDATE_READY_FILE', 'Env:FAKE_UPDATE_DONE_FILE') -ErrorAction SilentlyContinue
-            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+            $legacyUpdateContender = Start-TrackedTestProcess $shellPath $updateLauncherArguments 'windows-legacy-update-contender'
+            Wait-ForTestProcess $legacyUpdateContender 'Windows legacy ownerless update contender launcher exits'
+            Assert-True ($legacyUpdateContender.ExitCode -eq 0) 'Windows legacy ownerless update contender launcher succeeds'
             for ($attempt = 0; $attempt -lt 200 -and
                 (-not (Test-Path -LiteralPath $legacyAttempt) -or
                  -not ([IO.File]::ReadAllText($legacyAttempt).Contains('blocked '))); $attempt++) { Start-Sleep -Milliseconds 20 }
@@ -2041,7 +2049,9 @@ process.stdout.write(JSON.stringify({
             Remove-Item Env:FAKE_UPDATE_WAIT_FILE -ErrorAction SilentlyContinue
             Remove-Item Env:FAKE_UPDATE_READY_FILE -ErrorAction SilentlyContinue
             Remove-Item Env:FAKE_UPDATE_DONE_FILE -ErrorAction SilentlyContinue
-            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+            $deadUpdateContender = Start-TrackedTestProcess $shellPath $updateLauncherArguments 'windows-dead-update-contender'
+            Wait-ForTestProcess $deadUpdateContender 'Windows dead update owner contender launcher exits'
+            Assert-True ($deadUpdateContender.ExitCode -eq 0) 'Windows dead update owner contender launcher succeeds'
             for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $updateDirectory 'last-success') -PathType Leaf); $attempt++) {
                 Start-Sleep -Milliseconds 20
             }
