@@ -13,6 +13,14 @@ function Assert-True([bool] $Condition, [string] $Message) {
     if (-not $Condition) { throw "assertion failed: $Message" }
 }
 
+function Wait-ForTestPath([string] $Path, [string] $Message, [int] $TimeoutMilliseconds = 20000) {
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    while (-not (Test-Path -LiteralPath $Path) -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 20
+    }
+    Assert-True (Test-Path -LiteralPath $Path) $Message
+}
+
 try {
     [IO.Directory]::CreateDirectory($testConfig) | Out-Null
     [IO.Directory]::CreateDirectory($fakeBin) | Out-Null
@@ -1547,13 +1555,13 @@ process.stdout.write(JSON.stringify({
         $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE = Join-Path $temporary 'windows-aba-a-continue'
         $abaA = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
         Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE')
-        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-aba-a-mkdir')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Wait-ForTestPath (Join-Path $temporary 'windows-aba-a-mkdir') 'Windows publication ABA creator pauses before lock backdating'
         (Get-Item -LiteralPath $modelLock).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
         $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY = Join-Path $temporary 'windows-aba-b-publish'
         $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE = Join-Path $temporary 'windows-aba-b-continue'
         $abaB = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
         Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE')
-        for ($attempt = 0; $attempt -lt 300 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-aba-b-publish')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Wait-ForTestPath (Join-Path $temporary 'windows-aba-b-publish') 'Windows publication ABA replacement publishes before nonce capture'
         $abaBNonce = ([IO.File]::ReadAllLines((Join-Path $modelLock 'owner')) | Where-Object { $_.StartsWith('nonce=') })[0]
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-a-continue'), "continue`n", $utf8)
         Assert-True ($abaA.WaitForExit(10000)) 'Windows publication ABA creator exits'
@@ -1572,15 +1580,15 @@ process.stdout.write(JSON.stringify({
         $env:CLAUDEX_TEST_LOCK_AFTER_RENAME_CONTINUE = Join-Path $temporary 'windows-aba-x-after-continue'
         $abaX = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
         foreach ($name in @('CLAUDEX_TEST_LOCK_BEFORE_RENAME_READY', 'CLAUDEX_TEST_LOCK_BEFORE_RENAME_CONTINUE', 'CLAUDEX_TEST_LOCK_AFTER_RENAME_READY', 'CLAUDEX_TEST_LOCK_AFTER_RENAME_CONTINUE')) { Remove-Item -LiteralPath "Env:$name" }
-        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-aba-x-before')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Wait-ForTestPath (Join-Path $temporary 'windows-aba-x-before') 'Windows rename ABA stale owner pauses before rename'
         $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY = Join-Path $temporary 'windows-aba-y-publish'
         $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE = Join-Path $temporary 'windows-aba-y-continue'
         $abaY = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
         Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE')
-        for ($attempt = 0; $attempt -lt 300 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-aba-y-publish')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Wait-ForTestPath (Join-Path $temporary 'windows-aba-y-publish') 'Windows rename ABA replacement publishes before nonce capture'
         $abaYNonce = ([IO.File]::ReadAllLines((Join-Path $modelLock 'owner')) | Where-Object { $_.StartsWith('nonce=') })[0]
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-x-before-continue'), "continue`n", $utf8)
-        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-aba-x-after')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Wait-ForTestPath (Join-Path $temporary 'windows-aba-x-after') 'Windows rename ABA stale owner pauses behind quarantine barrier'
         $abaZ = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
         Assert-True ($abaZ.WaitForExit(10000)) 'Windows Z contender finishes behind quarantine barrier'
         Assert-True (([IO.File]::ReadAllText((Join-Path $modelLock 'owner'))).Contains($abaYNonce)) 'Windows rename ABA restores Y and excludes Z'
@@ -1601,18 +1609,17 @@ process.stdout.write(JSON.stringify({
         $env:CLAUDEX_TEST_LOCK_AFTER_RENAME_CONTINUE = Join-Path $temporary 'windows-self-x-after-continue'
         $selfX = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
         foreach ($name in @('CLAUDEX_TEST_LOCK_BEFORE_RENAME_READY', 'CLAUDEX_TEST_LOCK_BEFORE_RENAME_CONTINUE', 'CLAUDEX_TEST_LOCK_AFTER_RENAME_READY', 'CLAUDEX_TEST_LOCK_AFTER_RENAME_CONTINUE')) { Remove-Item -LiteralPath "Env:$name" }
-        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-self-x-before')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Wait-ForTestPath (Join-Path $temporary 'windows-self-x-before') 'Windows self recovery stale owner pauses before rename'
         $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY = Join-Path $temporary 'windows-self-y-publish'
         $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE = Join-Path $temporary 'windows-self-y-continue'
         $env:CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE = Join-Path $temporary 'windows-self-y-recovered'
         $selfY = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
         Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE', 'Env:CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE')
-        for ($attempt = 0; $attempt -lt 300 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-self-y-publish')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Wait-ForTestPath (Join-Path $temporary 'windows-self-y-publish') 'Windows self recovery replacement publishes before stale owner resumes'
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-self-x-before-continue'), "continue`n", $utf8)
-        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-self-x-after')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Wait-ForTestPath (Join-Path $temporary 'windows-self-x-after') 'Windows self recovery stale owner pauses after rename'
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-self-y-continue'), "continue`n", $utf8)
-        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-self-y-recovered')); $attempt++) { Start-Sleep -Milliseconds 20 }
-        Assert-True (Test-Path -LiteralPath (Join-Path $temporary 'windows-self-y-recovered')) 'Windows owner restores its own moved generation'
+        Wait-ForTestPath (Join-Path $temporary 'windows-self-y-recovered') 'Windows owner restores its own moved generation'
         Assert-True ($selfY.WaitForExit(10000)) 'Windows recovered owner exits without lock timeout'
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-self-x-after-continue'), "continue`n", $utf8)
         Assert-True ($selfX.WaitForExit(10000)) 'Windows paused remover exits after owner recovery'
@@ -1622,8 +1629,7 @@ process.stdout.write(JSON.stringify({
         $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE = Join-Path $temporary 'windows-legacy-a-continue'
         $legacyA = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
         Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE')
-        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-a-mkdir')); $attempt++) { Start-Sleep -Milliseconds 20 }
-        Assert-True (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-a-mkdir')) 'Windows mixed-version creator pauses before publication'
+        Wait-ForTestPath (Join-Path $temporary 'windows-legacy-a-mkdir') 'Windows mixed-version creator pauses before publication'
         Move-Item -LiteralPath $modelLock -Destination (Join-Path $temporary 'windows-legacy-a-empty')
         [IO.Directory]::CreateDirectory($modelLock) | Out-Null
         [IO.File]::WriteAllText((Join-Path $modelLock 'owner-pid'), "$PID old-token`n", $utf8)
@@ -1638,8 +1644,7 @@ process.stdout.write(JSON.stringify({
         $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE = Join-Path $temporary 'windows-legacy-zero-continue'
         $legacyZero = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
         Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE')
-        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-zero-mkdir')); $attempt++) { Start-Sleep -Milliseconds 20 }
-        Assert-True (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-zero-mkdir')) 'Windows zero-length owner-pid creator pauses before publication'
+        Wait-ForTestPath (Join-Path $temporary 'windows-legacy-zero-mkdir') 'Windows zero-length owner-pid creator pauses before publication'
         Move-Item -LiteralPath $modelLock -Destination (Join-Path $temporary 'windows-legacy-zero-created')
         [IO.Directory]::CreateDirectory($modelLock) | Out-Null
         [IO.File]::WriteAllText((Join-Path $modelLock 'owner-pid'), '', $utf8)
@@ -1660,8 +1665,7 @@ process.stdout.write(JSON.stringify({
         $legacyAbsent = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
         Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE',
             'Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE', 'Env:CLAUDEX_TEST_LOCK_PRESERVE_FILE')
-        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-absent-mkdir')); $attempt++) { Start-Sleep -Milliseconds 20 }
-        Assert-True (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-absent-mkdir')) 'Windows absent owner-pid creator pauses before replacement'
+        Wait-ForTestPath (Join-Path $temporary 'windows-legacy-absent-mkdir') 'Windows absent owner-pid creator pauses before replacement'
         Move-Item -LiteralPath $modelLock -Destination (Join-Path $temporary 'windows-legacy-absent-created')
         [IO.Directory]::CreateDirectory($modelLock) | Out-Null
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-legacy-absent-continue'), "continue`n", $utf8)
@@ -1680,8 +1684,7 @@ process.stdout.write(JSON.stringify({
         $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE = Join-Path $temporary 'windows-unknown-owner-continue'
         $unknownOwner = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
         Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE')
-        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-unknown-owner-mkdir')); $attempt++) { Start-Sleep -Milliseconds 20 }
-        Assert-True (Test-Path -LiteralPath (Join-Path $temporary 'windows-unknown-owner-mkdir')) 'Windows future-format owner creator pauses before publication'
+        Wait-ForTestPath (Join-Path $temporary 'windows-unknown-owner-mkdir') 'Windows future-format owner creator pauses before publication'
         Move-Item -LiteralPath $modelLock -Destination (Join-Path $temporary 'windows-unknown-owner-created')
         [IO.Directory]::CreateDirectory($modelLock) | Out-Null
         [IO.File]::WriteAllText((Join-Path $modelLock 'owner.json'), "future-owner`n", $utf8)
