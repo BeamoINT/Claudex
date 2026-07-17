@@ -2592,17 +2592,20 @@ process.stdout.write(JSON.stringify({
         [IO.Directory]::CreateDirectory($cmdOnlyCodexBin) | Out-Null
         Copy-Item -LiteralPath (Join-Path $fakeBin 'codex.cmd') -Destination (Join-Path $cmdOnlyCodexBin 'codex.cmd')
         $cmdOnlyAuthLog = Join-Path $temporary 'cmd-only-codex-auth.log'
+        $cmdOnlyStandardOutputLog = Join-Path $temporary 'cmd-only-codex.stdout.log'
+        $cmdOnlyStandardErrorLog = Join-Path $temporary 'cmd-only-codex.stderr.log'
         $savedCmdOnlyPath = $env:PATH
         $fakeBinPrefix = "$fakeBin$([IO.Path]::PathSeparator)"
         $env:PATH = "$cmdOnlyCodexBin$([IO.Path]::PathSeparator)$($savedCmdOnlyPath.Substring($fakeBinPrefix.Length))"
         $env:FAKE_CODEX_AUTH_ARGS_LOG = $cmdOnlyAuthLog
-        $savedErrorPreference = $ErrorActionPreference
         try {
-            $ErrorActionPreference = 'Continue'
-            $cmdOnlyOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'codex-session.ps1') status 2>&1
-            $cmdOnlyExit = $LASTEXITCODE
+            $cmdOnlyProcess = Start-Process -FilePath $shellPath -ArgumentList @(
+                '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedSessionHelper, 'status'
+            ) -RedirectStandardOutput $cmdOnlyStandardOutputLog -RedirectStandardError $cmdOnlyStandardErrorLog -PassThru
+            Wait-ForTestProcess $cmdOnlyProcess 'Windows Codex batch only status process exits'
+            $cmdOnlyExit = $cmdOnlyProcess.ExitCode
+            $cmdOnlyOutput = [IO.File]::ReadAllText($cmdOnlyStandardOutputLog) + [IO.File]::ReadAllText($cmdOnlyStandardErrorLog)
         } finally {
-            $ErrorActionPreference = $savedErrorPreference
             $env:PATH = $savedCmdOnlyPath
             Remove-Item Env:FAKE_CODEX_AUTH_ARGS_LOG -ErrorAction SilentlyContinue
         }
