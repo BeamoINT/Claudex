@@ -78,6 +78,8 @@ assert.match(suite, /Write-TestStage 'starting live account watcher regressions'
   'Windows account watcher synchronization must have a bounded CI window and named stages');
 assert.match(suite, /CLAUDEX_CODEX_AUTH_DIR = \$testAuthDir[\s\S]*CLAUDEX_CODEX_SOURCE_AUTH_FILE = Join-Path \$testCodexDir 'auth\.json'[\s\S]*'-ParentProcessIdentity', \$watchParentIdentity/,
   'the direct account watcher fixture must receive the same private auth paths and parent identity as production');
+assert.doesNotMatch(suite, /Remove-Item Env:CLAUDEX_CODEX_(?:AUTH_DIR|SOURCE_AUTH_FILE)/,
+  'direct session regressions after the watcher must retain the production auth paths they exercise');
 assert.match(suite, /Remove-TestPathWithRetry \$temporary/,
   'Windows suite cleanup must not mask a primary failure with a transient open file handle');
 

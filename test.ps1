@@ -2308,8 +2308,9 @@ process.stdout.write(JSON.stringify({
     $env:CLAUDEX_AUTH_WATCH_SECONDS = '1'
     $authWatchReady = Join-Path $temporary 'auth-watch-ready'
     $env:CLAUDEX_AUTH_WATCH_READY_FILE = $authWatchReady
-    $savedWatchAuthDir = [Environment]::GetEnvironmentVariable('CLAUDEX_CODEX_AUTH_DIR', 'Process')
-    $savedWatchSourceAuth = [Environment]::GetEnvironmentVariable('CLAUDEX_CODEX_SOURCE_AUTH_FILE', 'Process')
+    # Direct helper processes do not load the Claudex env file. Keep their
+    # private test paths explicit for this watcher and the session regressions
+    # that follow it, matching the environment supplied by the real launcher.
     $env:CLAUDEX_CODEX_AUTH_DIR = $testAuthDir
     $env:CLAUDEX_CODEX_SOURCE_AUTH_FILE = Join-Path $testCodexDir 'auth.json'
     $shellPath = (Get-Process -Id $PID).Path
@@ -2345,10 +2346,6 @@ process.stdout.write(JSON.stringify({
         Stop-Process -Id $accountWatcher.Id -Force -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDEX_AUTH_WATCH_SECONDS -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDEX_AUTH_WATCH_READY_FILE -ErrorAction SilentlyContinue
-        if ($null -eq $savedWatchAuthDir) { Remove-Item Env:CLAUDEX_CODEX_AUTH_DIR -ErrorAction SilentlyContinue }
-        else { $env:CLAUDEX_CODEX_AUTH_DIR = $savedWatchAuthDir }
-        if ($null -eq $savedWatchSourceAuth) { Remove-Item Env:CLAUDEX_CODEX_SOURCE_AUTH_FILE -ErrorAction SilentlyContinue }
-        else { $env:CLAUDEX_CODEX_SOURCE_AUTH_FILE = $savedWatchSourceAuth }
     }
     $managedIdToken = 'eyJhbGciOiJub25lIn0.eyJlbWFpbCI6Im1hbmFnZWRAZXhhbXBsZS5jb20ifQ.sig'
     [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), ('{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T03:00:00.123456Z","tokens":{"access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"' + $managedIdToken + '","account_id":"account-test"}}'), $utf8)
