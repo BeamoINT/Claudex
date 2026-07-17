@@ -76,6 +76,8 @@ assert.equal((updateFixture.match(/Remove-TestPathWithRetry \$updateDirectory/g)
   'every automatic updater state reset must tolerate transient Windows log handles');
 assert.match(suite, /Write-TestStage 'starting live account watcher regressions'[\s\S]*accountSwitchAttempts = 200[\s\S]*Write-TestStage 'live account watcher regressions passed'/,
   'Windows account watcher synchronization must have a bounded CI window and named stages');
+assert.match(suite, /CLAUDEX_CODEX_AUTH_DIR = \$testAuthDir[\s\S]*CLAUDEX_CODEX_SOURCE_AUTH_FILE = Join-Path \$testCodexDir 'auth\.json'[\s\S]*'-ParentProcessIdentity', \$watchParentIdentity/,
+  'the direct account watcher fixture must receive the same private auth paths and parent identity as production');
 assert.match(suite, /Remove-TestPathWithRetry \$temporary/,
   'Windows suite cleanup must not mask a primary failure with a transient open file handle');
 
