@@ -2569,7 +2569,9 @@ process.stdout.write(JSON.stringify({
             '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedSessionHelper, 'logout'
         ) -RedirectStandardOutput $logoutStandardOutputLog -RedirectStandardError $logoutStandardErrorLog -PassThru
         Wait-ForTestProcess $logoutProcess 'failed Codex logout process exits'
-        $logoutExit = $logoutProcess.ExitCode
+        $logoutProcess.WaitForExit()
+        $logoutProcess.Refresh()
+        $logoutExit = [int] $logoutProcess.ExitCode
         $logoutOutput = [IO.File]::ReadAllText($logoutStandardOutputLog) + [IO.File]::ReadAllText($logoutStandardErrorLog)
     } finally {
         Remove-Item Env:FAKE_CODEX_FILE_LOGOUT -ErrorAction SilentlyContinue
@@ -2603,7 +2605,9 @@ process.stdout.write(JSON.stringify({
                 '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedSessionHelper, 'status'
             ) -RedirectStandardOutput $cmdOnlyStandardOutputLog -RedirectStandardError $cmdOnlyStandardErrorLog -PassThru
             Wait-ForTestProcess $cmdOnlyProcess 'Windows Codex batch only status process exits'
-            $cmdOnlyExit = $cmdOnlyProcess.ExitCode
+            $cmdOnlyProcess.WaitForExit()
+            $cmdOnlyProcess.Refresh()
+            $cmdOnlyExit = [int] $cmdOnlyProcess.ExitCode
             $cmdOnlyOutput = [IO.File]::ReadAllText($cmdOnlyStandardOutputLog) + [IO.File]::ReadAllText($cmdOnlyStandardErrorLog)
         } finally {
             $env:PATH = $savedCmdOnlyPath
