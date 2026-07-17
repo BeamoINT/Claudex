@@ -1,6 +1,12 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 $ClaudexInternalProxyWatchParentProcessId = 0
+$ClaudexInternalProxyWatchParentIdentity = ''
+$ClaudexInternalProxyWatchBackground = $false
+$claudexInternalClaudeUpdate = $false
+$internalClaudeUpdatePath = ''
+$internalClaudeUpdateDirectory = ''
+$internalClaudeUpdateInterval = 0L
 $ClaudeArguments = @($args)
 $hostArguments = [Environment]::GetCommandLineArgs()
 for ($hostIndex = 0; $hostIndex + 1 -lt $hostArguments.Count; $hostIndex++) {
@@ -23,17 +29,52 @@ if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '-ClaudexInternalP
         throw 'Claudex internal proxy watcher requires a numeric parent process ID.'
     }
     $ClaudexInternalProxyWatchParentProcessId = $parsedProxyWatchParent
-    if ($ClaudeArguments.Count -gt 2) { $ClaudeArguments = @($ClaudeArguments[2..($ClaudeArguments.Count - 1)]) }
+    if ($ClaudeArguments.Count -ge 4) {
+        $ClaudexInternalProxyWatchParentIdentity = [string] $ClaudeArguments[2]
+        $parsedProxyWatchBackground = 0
+        if (-not [int]::TryParse([string] $ClaudeArguments[3], [ref] $parsedProxyWatchBackground) -or $parsedProxyWatchBackground -notin @(0, 1)) {
+            throw 'Claudex internal proxy watcher background mode must be 0 or 1.'
+        }
+        $ClaudexInternalProxyWatchBackground = $parsedProxyWatchBackground -eq 1
+        if ($ClaudeArguments.Count -gt 4) { $ClaudeArguments = @($ClaudeArguments[4..($ClaudeArguments.Count - 1)]) }
+        else { $ClaudeArguments = @() }
+    } elseif ($ClaudeArguments.Count -gt 2) { $ClaudeArguments = @($ClaudeArguments[2..($ClaudeArguments.Count - 1)]) }
     else { $ClaudeArguments = @() }
+}
+if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '-ClaudexInternalClaudeUpdate') {
+    $internalNonce = [Environment]::GetEnvironmentVariable('CLAUDEX_INTERNAL_UPDATE_NONCE', 'Process')
+    $sentinelValid = $false
+    if ($ClaudeArguments.Count -eq 5 -and -not [string]::IsNullOrWhiteSpace($internalNonce)) {
+        try {
+            $sentinelValid = [IO.File]::ReadAllText([string] $ClaudeArguments[4]).Trim() -eq $internalNonce
+            if ($sentinelValid) { [IO.File]::Delete([string] $ClaudeArguments[4]) }
+        } catch { $sentinelValid = $false }
+    }
+    if ($sentinelValid -and
+        [long]::TryParse([string] $ClaudeArguments[3], [ref] $internalClaudeUpdateInterval) -and
+        $internalClaudeUpdateInterval -ge 60) {
+        $claudexInternalClaudeUpdate = $true
+        $internalClaudeUpdatePath = [string] $ClaudeArguments[1]
+        $internalClaudeUpdateDirectory = [string] $ClaudeArguments[2]
+        $ClaudeArguments = @()
+    }
 }
 $previousSessionMode = [Environment]::GetEnvironmentVariable('CLAUDEX_SESSION_MODE', 'Process')
 $previousEffortLevel = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_EFFORT_LEVEL', 'Process')
 $previousModelMode = [Environment]::GetEnvironmentVariable('CLAUDEX_MODEL_MODE', 'Process')
 $previousInteractiveTui = [Environment]::GetEnvironmentVariable('CLAUDEX_INTERACTIVE_TUI', 'Process')
+$competingProviderEnvironmentNames = @(
+    'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+    'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_BEDROCK_MANTLE_BASE_URL',
+    'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_VERTEX_PROJECT_ID',
+    'ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_FOUNDRY_RESOURCE', 'ANTHROPIC_FOUNDRY_API_KEY',
+    'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS',
+    'ANTHROPIC_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION',
+    'ANTHROPIC_CUSTOM_MODEL_OPTION', 'ANTHROPIC_CUSTOM_MODEL_OPTION_NAME', 'ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION'
+)
 $sessionEnvironmentNames = @(
     'BUN_OPTIONS', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN',
-    'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
-    'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_FOUNDRY_BASE_URL',
+    $competingProviderEnvironmentNames,
     'ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
     'ANTHROPIC_DEFAULT_FABLE_MODEL_NAME', 'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME', 'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
     'ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION', 'ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION', 'ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION',
@@ -44,14 +85,21 @@ $sessionEnvironmentNames = @(
     'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'CLAUDEX_CHATGPT_PLAN_LABEL',
     'CLAUDEX_NO_SESSION_PERSISTENCE', 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD', 'CLAUDEX_MANAGED_SESSION',
     'CLAUDEX_INSTRUCTION_BRIDGE', 'CLAUDEX_PROXY_TOKEN', 'CLAUDEX_PROXY_URL', 'CLAUDEX_PROXY_CONFIG',
-    'CLAUDEX_PROXY_BIN', 'CLAUDEX_CODEX_AUTH_DIR', 'CLAUDEX_CONFIG_DIR', 'CLAUDEX_CLAUDE_CONFIG_DIR'
-)
+    'CLAUDEX_PROXY_BIN', 'CLAUDEX_CODEX_AUTH_DIR', 'CLAUDEX_CODEX_AUTH_FILE', 'CLAUDEX_CODEX_SOURCE_AUTH_FILE',
+    'CLAUDEX_CONFIG_DIR', 'CLAUDEX_CLAUDE_CONFIG_DIR'
+) | ForEach-Object { $_ }
 $previousSessionEnvironment = @{}
 foreach ($environmentName in $sessionEnvironmentNames) {
     $previousSessionEnvironment[$environmentName] = [Environment]::GetEnvironmentVariable($environmentName, 'Process')
 }
+$previousConfigEnvironment = @{}
 
 function Restore-ClaudexSessionEnvironment {
+    foreach ($environmentName in $previousConfigEnvironment.Keys) {
+        $previousValue = $previousConfigEnvironment[$environmentName]
+        if ($null -eq $previousValue) { Remove-Item -LiteralPath "Env:$environmentName" -ErrorAction SilentlyContinue }
+        else { [Environment]::SetEnvironmentVariable($environmentName, [string] $previousValue, 'Process') }
+    }
     if ($null -eq $previousSessionMode) { Remove-Item Env:CLAUDEX_SESSION_MODE -ErrorAction SilentlyContinue }
     else { $env:CLAUDEX_SESSION_MODE = $previousSessionMode }
     if ($null -eq $previousEffortLevel) { Remove-Item Env:CLAUDE_CODE_EFFORT_LEVEL -ErrorAction SilentlyContinue }
@@ -75,7 +123,46 @@ $curlCommand = if ($env:CLAUDEX_CURL_BIN) { $env:CLAUDEX_CURL_BIN } else { 'curl
 
 function Fail([string] $Message, [int] $Code = 1) {
     [Console]::Error.WriteLine("claudex: $Message")
+    Restore-ClaudexSessionEnvironment
     exit $Code
+}
+
+function Exit-Claudex([int] $Code = 0) {
+    Restore-ClaudexSessionEnvironment
+    exit $Code
+}
+
+$script:lastPrivateBoundarySucceeded = $false
+$script:lastPrivateBoundaryExitCode = 1
+function Invoke-WithoutPrivateManagedEnvironment {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock] $Action,
+        [string[]] $PreserveNames = @()
+    )
+    $savedEnvironment = @{}
+    $privateEnvironmentNames = @($sessionEnvironmentNames + @(
+        'CLAUDEX_SESSION_MODE', 'CLAUDEX_MODEL_MODE', 'CLAUDEX_INTERACTIVE_TUI',
+        'CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDEX_CODEX_AUTH_FILE', 'CLAUDEX_CODEX_SOURCE_AUTH_FILE'
+    ) | Select-Object -Unique)
+    foreach ($environmentName in $privateEnvironmentNames) {
+        if ($PreserveNames -contains $environmentName) { continue }
+        $savedEnvironment[$environmentName] = [Environment]::GetEnvironmentVariable($environmentName, 'Process')
+        Remove-Item -LiteralPath "Env:$environmentName" -ErrorAction SilentlyContinue
+    }
+    try {
+        $global:LASTEXITCODE = $null
+        & $Action
+        $script:lastPrivateBoundarySucceeded = $?
+        $script:lastPrivateBoundaryExitCode = if ($null -ne $LASTEXITCODE) {
+            [int] $LASTEXITCODE
+        } elseif ($script:lastPrivateBoundarySucceeded) { 0 } else { 1 }
+    } finally {
+        foreach ($environmentName in $savedEnvironment.Keys) {
+            $savedValue = $savedEnvironment[$environmentName]
+            if ($null -eq $savedValue) { Remove-Item -LiteralPath "Env:$environmentName" -ErrorAction SilentlyContinue }
+            else { [Environment]::SetEnvironmentVariable($environmentName, [string] $savedValue, 'Process') }
+        }
+    }
 }
 
 function Resolve-HarnessCommand([string] $Name) {
@@ -124,6 +211,577 @@ $claudeRequiredValueOptions = @(
     '--remote-control-session-name-prefix', '--session-id', '--setting-sources', '--settings',
     '--system-prompt', '--system-prompt-file', '--tools'
 )
+$claudeOptionalValueOptions = @(
+    '--debug', '-d', '--from-pr', '--prompt-suggestions', '--remote-control', '--rc',
+    '--resume', '-r', '--worktree', '-w'
+)
+
+function Remove-ProcessEnvironmentVariables([string[]] $Names) {
+    foreach ($environmentName in @($Names | Select-Object -Unique)) {
+        Remove-Item -LiteralPath "Env:$environmentName" -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-OwnedLockField([string] $OwnerFile, [string] $Field) {
+    if (-not (Test-Path -LiteralPath $OwnerFile -PathType Leaf)) { return '' }
+    try {
+        foreach ($line in [IO.File]::ReadAllLines($OwnerFile)) {
+            if ($line.StartsWith($Field + '=', [StringComparison]::Ordinal)) {
+                return $line.Substring($Field.Length + 1)
+            }
+        }
+    } catch { }
+    return ''
+}
+
+function Get-LockGenerationNonce([string] $LockDirectory) {
+    $generationFile = Join-Path $LockDirectory 'generation'
+    if (-not (Test-Path -LiteralPath $generationFile -PathType Leaf)) { return '' }
+    try { return [IO.File]::ReadAllText($generationFile).Trim() } catch { return '' }
+}
+
+function Get-LockBarriers([string] $LockDirectory) {
+    $parent = Split-Path $LockDirectory -Parent
+    $leaf = Split-Path $LockDirectory -Leaf
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) { return @() }
+    return @(Get-ChildItem -LiteralPath $parent -Directory -Filter ($leaf + '.quarantine.*') -ErrorAction SilentlyContinue | Sort-Object Name)
+}
+
+function Invoke-LockTestPause([string] $Stage, [string] $LockDirectory) {
+    if ($env:CLAUDEX_TEST_MODE -ne '1') { return }
+    $match = [Environment]::GetEnvironmentVariable('CLAUDEX_TEST_LOCK_MATCH', 'Process')
+    if ($match -and -not $LockDirectory.Contains($match)) { return }
+    $ready = [Environment]::GetEnvironmentVariable("CLAUDEX_TEST_LOCK_${Stage}_READY", 'Process')
+    $continue = [Environment]::GetEnvironmentVariable("CLAUDEX_TEST_LOCK_${Stage}_CONTINUE", 'Process')
+    if (-not $ready -or -not $continue) { return }
+    [IO.File]::WriteAllText($ready, "ready`n", $utf8)
+    while (-not (Test-Path -LiteralPath $continue -PathType Leaf)) { Start-Sleep -Milliseconds 20 }
+}
+
+function Remove-LockDirectoryFiles([string] $Directory) {
+    Remove-Item -LiteralPath (Join-Path $Directory 'owner') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $Directory 'generation') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $Directory -Force -ErrorAction SilentlyContinue
+}
+
+function Get-LegacyLockPid([string] $Directory) {
+    foreach ($name in @('owner', 'owner-pid')) {
+        $path = Join-Path $Directory $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        try {
+            $first = ([IO.File]::ReadAllText($path).Trim() -split '\s+')[0]
+            $legacyPid = 0
+            if ([int]::TryParse($first, [ref] $legacyPid) -and $legacyPid -gt 0) { return $legacyPid }
+        } catch { }
+    }
+    return 0
+}
+
+function Test-LockDirectoryLegacyOwner([string] $Directory) {
+    $ownerPidPath = Join-Path $Directory 'owner-pid'
+    if (Test-Path -LiteralPath $ownerPidPath -PathType Leaf) { return $true }
+    $ownerPath = Join-Path $Directory 'owner'
+    return (Test-Path -LiteralPath $ownerPath -PathType Leaf) -and (Get-Item -LiteralPath $ownerPath).Length -gt 0 -and
+        -not (Get-OwnedLockField $ownerPath 'nonce')
+}
+
+function Test-LockDirectoryUnknownEntries([string] $Directory) {
+    foreach ($entry in @(Get-ChildItem -LiteralPath $Directory -Force -ErrorAction SilentlyContinue)) {
+        if ($entry.Name -notin @('owner', 'owner-pid', 'generation')) { return $true }
+    }
+    return $false
+}
+
+function Get-LockDirectoryIdentity([string] $Directory) {
+    if (-not (Test-Path -LiteralPath $Directory -PathType Container)) { return '' }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        if (-not ('ClaudexNativeDirectoryIdentity' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class ClaudexNativeDirectoryIdentity {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTime { public uint Low; public uint High; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation {
+        public uint Attributes;
+        public FileTime CreationTime;
+        public FileTime LastAccessTime;
+        public FileTime LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr security,
+        uint creation, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(IntPtr handle, out ByHandleFileInformation information);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static string GetIdentity(string path) {
+        const uint ShareAll = 1u | 2u | 4u;
+        const uint OpenExisting = 3u;
+        const uint BackupSemantics = 0x02000000u;
+        IntPtr handle = CreateFile(path, 0u, ShareAll, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) return String.Empty;
+        try {
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information)) return String.Empty;
+            ulong index = ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow;
+            return information.VolumeSerialNumber.ToString("X8") + ":" + index.ToString("X16");
+        } finally { CloseHandle(handle); }
+    }
+}
+'@
+        }
+        try { return [ClaudexNativeDirectoryIdentity]::GetIdentity($Directory) }
+        catch { return '' }
+    }
+    $stat = Get-Command stat -ErrorAction SilentlyContinue
+    if (-not $stat) { return '' }
+    try { $identity = (& $stat.Source -c '%d:%i' -- $Directory 2>$null | Select-Object -First 1).Trim() }
+    catch { $identity = '' }
+    if ($identity -notmatch '^[0-9]+:[0-9]+$') {
+        try { $identity = (& $stat.Source -f '%d:%i' $Directory 2>$null | Select-Object -First 1).Trim() }
+        catch { $identity = '' }
+    }
+    if ($identity -match '^[0-9]+:[0-9]+$') { return $identity }
+    return ''
+}
+
+function Remove-LegacyLockDirectoryFiles([string] $Directory) {
+    foreach ($name in @('owner', 'owner-pid', 'generation')) {
+        Remove-Item -LiteralPath (Join-Path $Directory $name) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $Directory -Force -ErrorAction SilentlyContinue
+}
+
+function Publish-LockFile([string] $Source, [string] $Destination) {
+    if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE -eq '1') {
+        if (-not $env:CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE_MATCH -or
+            $Destination.Contains($env:CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE_MATCH)) {
+            throw 'forced lock publication failure'
+        }
+    }
+    if ($env:CLAUDEX_TEST_MODE -ne '1' -or $env:CLAUDEX_TEST_FORCE_HARDLINK_FAILURE -ne '1') {
+        try {
+            New-Item -ItemType HardLink -Path $Destination -Target $Source -ErrorAction Stop | Out-Null
+            return
+        } catch { }
+    }
+    $input = $null
+    $output = $null
+    try {
+        $input = [IO.File]::Open($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $output = [IO.FileStream]::new($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $input.CopyTo($output)
+        $output.Flush($true)
+    } finally {
+        if ($output) { $output.Dispose() }
+        if ($input) { $input.Dispose() }
+    }
+}
+
+function Remove-IncompleteLockDirectory([string] $LockDirectory, [string] $ExpectedNonce = '', [bool] $PreserveDirectory = $false) {
+    if (-not (Test-Path -LiteralPath $LockDirectory -PathType Container)) { return $true }
+    $quarantine = $LockDirectory + '.quarantine.incomplete.' + $PID + '.' + [guid]::NewGuid().ToString('N')
+    try { Move-Item -LiteralPath $LockDirectory -Destination $quarantine -ErrorAction Stop }
+    catch { return $false }
+    $movedNonce = Get-LockGenerationNonce $quarantine
+    $ownerNonce = Get-OwnedLockField (Join-Path $quarantine 'owner') 'nonce'
+    if (-not $movedNonce) { $movedNonce = $ownerNonce }
+    $legacyPid = Get-LegacyLockPid $quarantine
+    $legacyOwner = ((Test-Path -LiteralPath (Join-Path $quarantine 'owner') -PathType Leaf) -and
+        (Get-Item -LiteralPath (Join-Path $quarantine 'owner')).Length -gt 0) -or
+        ((Test-Path -LiteralPath (Join-Path $quarantine 'owner-pid') -PathType Leaf) -and
+        (Get-Item -LiteralPath (Join-Path $quarantine 'owner-pid')).Length -gt 0)
+    if ($PreserveDirectory) {
+        if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_LOCK_PRESERVE_FILE) {
+            [IO.File]::WriteAllText($env:CLAUDEX_TEST_LOCK_PRESERVE_FILE, "preserved`n", $utf8)
+        }
+        if ($ExpectedNonce -and $movedNonce -eq $ExpectedNonce) {
+            Remove-Item -LiteralPath (Join-Path $quarantine 'generation') -Force -ErrorAction SilentlyContinue
+        }
+        if ($ExpectedNonce -and $ownerNonce -eq $ExpectedNonce) {
+            Remove-Item -LiteralPath (Join-Path $quarantine 'owner') -Force -ErrorAction SilentlyContinue
+        }
+        [void] (Restore-LockBarrier $LockDirectory $quarantine)
+        return $false
+    }
+    if ((Test-LockDirectoryLegacyOwner $quarantine) -or (Test-LockDirectoryUnknownEntries $quarantine)) {
+        if ($ExpectedNonce -and $movedNonce -eq $ExpectedNonce) {
+            Remove-Item -LiteralPath (Join-Path $quarantine 'generation') -Force -ErrorAction SilentlyContinue
+        }
+        if ($ExpectedNonce -and $ownerNonce -eq $ExpectedNonce) {
+            Remove-Item -LiteralPath (Join-Path $quarantine 'owner') -Force -ErrorAction SilentlyContinue
+        }
+        [void] (Restore-LockBarrier $LockDirectory $quarantine)
+        return $false
+    }
+    if ($ExpectedNonce -and $ownerNonce -eq $ExpectedNonce -and $movedNonce -eq $ExpectedNonce) {
+        Remove-LockDirectoryFiles $quarantine
+        return $true
+    }
+    if ($movedNonce -and $movedNonce -ne $ExpectedNonce) {
+        [void] (Restore-LockBarrier $LockDirectory $quarantine)
+        return $false
+    }
+    Remove-LockDirectoryFiles $quarantine
+    return -not (Test-Path -LiteralPath $quarantine)
+}
+
+function Restore-LockBarrier([string] $LockDirectory, [string] $Barrier) {
+    foreach ($attempt in 1..250) {
+        if (-not (Test-Path -LiteralPath $LockDirectory)) {
+            try { Move-Item -LiteralPath $Barrier -Destination $LockDirectory -ErrorAction Stop; return $true }
+            catch { }
+        }
+        Start-Sleep -Milliseconds 20
+    }
+    return $false
+}
+
+function Get-OwnedLockAgeSeconds([string] $LockDirectory) {
+    try {
+        return [math]::Max(0, ([DateTime]::UtcNow - (Get-Item -LiteralPath $LockDirectory -ErrorAction Stop).LastWriteTimeUtc).TotalSeconds)
+    } catch { return 0 }
+}
+
+function Test-OwnedLockOwnerCurrent([string] $OwnerFile) {
+    $ownerPid = 0
+    if (-not [int]::TryParse((Get-OwnedLockField $OwnerFile 'pid'), [ref] $ownerPid) -or $ownerPid -le 0) { return $false }
+    $process = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+    if ($null -eq $process) { return $false }
+    $recordedIdentity = Get-OwnedLockField $OwnerFile 'identity'
+    if ([string]::IsNullOrWhiteSpace($recordedIdentity)) { return $true }
+    try { return $recordedIdentity -eq [string] $process.StartTime.ToUniversalTime().Ticks }
+    catch { return $true }
+}
+
+function Recover-LockBarriers([string] $LockDirectory, [int] $LegacyOwnerlessSeconds) {
+    foreach ($barrierInfo in @(Get-LockBarriers $LockDirectory)) {
+        $barrier = $barrierInfo.FullName
+        $ownerFile = Join-Path $barrier 'owner'
+        $ownerNonce = Get-OwnedLockField $ownerFile 'nonce'
+        $generationNonce = Get-LockGenerationNonce $barrier
+        $legacyPid = Get-LegacyLockPid $barrier
+        $legacyOwnerPresent = Test-LockDirectoryLegacyOwner $barrier
+        $age = Get-OwnedLockAgeSeconds $barrier
+        if ($legacyOwnerPresent) {
+            # owner-pid is the prior-format source of truth. Sanitize any
+            # interrupted structured publication before evaluating that owner.
+            Remove-Item -LiteralPath (Join-Path $barrier 'generation') -Force -ErrorAction SilentlyContinue
+            if ($ownerNonce) { Remove-Item -LiteralPath (Join-Path $barrier 'owner') -Force -ErrorAction SilentlyContinue }
+            $legacyPid = Get-LegacyLockPid $barrier
+            if ($legacyPid -gt 0 -and $null -ne (Get-Process -Id $legacyPid -ErrorAction SilentlyContinue)) {
+                if (-not (Test-Path -LiteralPath $LockDirectory)) {
+                    try { Move-Item -LiteralPath $barrier -Destination $LockDirectory -ErrorAction Stop } catch { }
+                }
+            } elseif ($legacyPid -gt 0 -and $age -ge $LegacyOwnerlessSeconds) {
+                Remove-LegacyLockDirectoryFiles $barrier
+            } elseif (-not (Test-Path -LiteralPath $LockDirectory)) {
+                try { Move-Item -LiteralPath $barrier -Destination $LockDirectory -ErrorAction Stop } catch { }
+            }
+        } elseif ($ownerNonce -and (Test-OwnedLockOwnerCurrent $ownerFile)) {
+            if (-not (Test-Path -LiteralPath $LockDirectory)) {
+                try { Move-Item -LiteralPath $barrier -Destination $LockDirectory -ErrorAction Stop } catch { }
+            }
+        } elseif ($ownerNonce -and $age -ge 2) {
+            Remove-LockDirectoryFiles $barrier
+        } elseif ($legacyPid -gt 0 -and $age -ge $LegacyOwnerlessSeconds) {
+            Remove-LegacyLockDirectoryFiles $barrier
+        } elseif ($generationNonce -and $age -ge 2) {
+            Remove-LockDirectoryFiles $barrier
+        } elseif (-not $generationNonce -and $age -ge $LegacyOwnerlessSeconds) {
+            Remove-LockDirectoryFiles $barrier
+        }
+    }
+}
+
+function Remove-OwnedLockGeneration([string] $LockDirectory, [string] $ExpectedNonce) {
+    if ([string]::IsNullOrWhiteSpace($ExpectedNonce)) { return $false }
+    $ownerFile = Join-Path $LockDirectory 'owner'
+    $currentNonce = Get-LockGenerationNonce $LockDirectory
+    if (-not $currentNonce) { $currentNonce = Get-OwnedLockField $ownerFile 'nonce' }
+    if ($currentNonce -ne $ExpectedNonce) { return $false }
+    $quarantine = $LockDirectory + '.quarantine.' + $PID + '.' + [guid]::NewGuid().ToString('N')
+    Invoke-LockTestPause 'BEFORE_RENAME' $LockDirectory
+    try { Move-Item -LiteralPath $LockDirectory -Destination $quarantine -ErrorAction Stop }
+    catch { return $false }
+    Invoke-LockTestPause 'AFTER_RENAME' $LockDirectory
+    if (-not (Test-Path -LiteralPath $quarantine -PathType Container)) { return $false }
+    $movedNonce = Get-LockGenerationNonce $quarantine
+    if (-not $movedNonce) { $movedNonce = Get-OwnedLockField (Join-Path $quarantine 'owner') 'nonce' }
+    if ((Test-LockDirectoryLegacyOwner $quarantine) -or (Test-LockDirectoryUnknownEntries $quarantine)) {
+        if ($movedNonce -eq $ExpectedNonce) { Remove-Item -LiteralPath (Join-Path $quarantine 'generation') -Force -ErrorAction SilentlyContinue }
+        if ((Get-OwnedLockField (Join-Path $quarantine 'owner') 'nonce') -eq $ExpectedNonce) {
+            Remove-Item -LiteralPath (Join-Path $quarantine 'owner') -Force -ErrorAction SilentlyContinue
+        }
+        [void] (Restore-LockBarrier $LockDirectory $quarantine)
+        return $false
+    }
+    if ($movedNonce -eq $ExpectedNonce) {
+        Remove-LockDirectoryFiles $quarantine
+        return $true
+    }
+    [void] (Restore-LockBarrier $LockDirectory $quarantine)
+    return $false
+}
+
+function Recover-OwnedLockGeneration([string] $LockDirectory, [string] $ExpectedNonce) {
+    foreach ($barrierInfo in @(Get-LockBarriers $LockDirectory)) {
+        $barrier = $barrierInfo.FullName
+        $movedNonce = Get-LockGenerationNonce $barrier
+        if (-not $movedNonce) { $movedNonce = Get-OwnedLockField (Join-Path $barrier 'owner') 'nonce' }
+        if ($movedNonce -ne $ExpectedNonce) { continue }
+        if ((Test-LockDirectoryLegacyOwner $barrier) -or (Test-LockDirectoryUnknownEntries $barrier)) {
+            Remove-Item -LiteralPath (Join-Path $barrier 'generation') -Force -ErrorAction SilentlyContinue
+            if ((Get-OwnedLockField (Join-Path $barrier 'owner') 'nonce') -eq $ExpectedNonce) {
+                Remove-Item -LiteralPath (Join-Path $barrier 'owner') -Force -ErrorAction SilentlyContinue
+            }
+            if (-not (Test-Path -LiteralPath $LockDirectory)) {
+                try { Move-Item -LiteralPath $barrier -Destination $LockDirectory -ErrorAction Stop } catch { }
+            }
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $LockDirectory)) {
+            try { Move-Item -LiteralPath $barrier -Destination $LockDirectory -ErrorAction Stop } catch { }
+        }
+    }
+    $currentNonce = Get-LockGenerationNonce $LockDirectory
+    if (-not $currentNonce) { $currentNonce = Get-OwnedLockField (Join-Path $LockDirectory 'owner') 'nonce' }
+    if ($currentNonce -eq $ExpectedNonce -and @(Get-LockBarriers $LockDirectory).Count -eq 0) {
+        if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE) {
+            [IO.File]::WriteAllText($env:CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE, "recovered`n", $utf8)
+        }
+        return $true
+    }
+    if ($currentNonce -eq $ExpectedNonce) {
+        [void] (Remove-OwnedLockGeneration $LockDirectory $ExpectedNonce)
+    }
+    foreach ($barrierInfo in @(Get-LockBarriers $LockDirectory)) {
+        $barrier = $barrierInfo.FullName
+        $movedNonce = Get-LockGenerationNonce $barrier
+        if (-not $movedNonce) { $movedNonce = Get-OwnedLockField (Join-Path $barrier 'owner') 'nonce' }
+        if ($movedNonce -eq $ExpectedNonce -and -not (Test-LockDirectoryLegacyOwner $barrier) -and
+            -not (Test-LockDirectoryUnknownEntries $barrier)) { Remove-LockDirectoryFiles $barrier }
+    }
+    return $false
+}
+
+function Acquire-OwnedLock([string] $LockDirectory, [int] $Attempts = 100, [int] $DelayMilliseconds = 20, [int] $LegacyOwnerlessSeconds = 60) {
+    $parent = Split-Path $LockDirectory -Parent
+    [IO.Directory]::CreateDirectory($parent) | Out-Null
+    $ownerFile = Join-Path $LockDirectory 'owner'
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+        Recover-LockBarriers $LockDirectory $LegacyOwnerlessSeconds
+        if (@(Get-LockBarriers $LockDirectory).Count -gt 0) { Start-Sleep -Milliseconds $DelayMilliseconds; continue }
+        $created = $false
+        $ownerPublished = $false
+        $generationPublished = $false
+        $ownerTemporary = ''
+        $generationTemporary = ''
+        $directoryIdentity = ''
+        $directoryReplaced = $false
+        $nonce = [guid]::NewGuid().ToString('N')
+        $currentProcess = Get-Process -Id $PID -ErrorAction Stop
+        $identity = [string] $currentProcess.StartTime.ToUniversalTime().Ticks
+        $ownerTemporary = Join-Path $parent ('.lock-owner.' + [guid]::NewGuid().ToString('N') + '.tmp')
+        $generationTemporary = Join-Path $parent ('.lock-generation.' + [guid]::NewGuid().ToString('N') + '.tmp')
+        [IO.File]::WriteAllText($ownerTemporary, "pid=$PID`nidentity=$identity`nnonce=$nonce`n", $utf8)
+        [IO.File]::WriteAllText($generationTemporary, "$nonce`n", $utf8)
+        Protect-PrivatePath $ownerTemporary $false
+        Protect-PrivatePath $generationTemporary $false
+        try {
+            New-Item -Path $LockDirectory -ItemType Directory -ErrorAction Stop | Out-Null
+            $created = $true
+            $directoryIdentity = Get-LockDirectoryIdentity $LockDirectory
+            Invoke-LockTestPause 'AFTER_MKDIR' $LockDirectory
+            $directoryReplaced = -not $directoryIdentity -or (Get-LockDirectoryIdentity $LockDirectory) -ne $directoryIdentity
+            if ($directoryReplaced) { throw 'lock directory identity changed' }
+            Publish-LockFile $generationTemporary (Join-Path $LockDirectory 'generation')
+            $generationPublished = $true
+            if ((Get-LockDirectoryIdentity $LockDirectory) -ne $directoryIdentity) { throw 'lock directory identity changed' }
+            if ((Get-LockGenerationNonce $LockDirectory) -ne $nonce) { throw 'lock generation publication changed' }
+            Publish-LockFile $ownerTemporary $ownerFile
+            $ownerPublished = $true
+            if ((Get-LockDirectoryIdentity $LockDirectory) -ne $directoryIdentity) { throw 'lock directory identity changed' }
+            if ((Get-OwnedLockField $ownerFile 'nonce') -ne $nonce) { throw 'lock ownership publication changed' }
+            if (@(Get-LockBarriers $LockDirectory).Count -gt 0 -or (Test-LockDirectoryLegacyOwner $LockDirectory) -or
+                (Test-LockDirectoryUnknownEntries $LockDirectory)) { throw 'lock ownership publication changed' }
+            Protect-PrivatePath $ownerFile $false
+            Protect-PrivatePath (Join-Path $LockDirectory 'generation') $false
+            Remove-Item -LiteralPath $ownerTemporary, $generationTemporary -Force -ErrorAction SilentlyContinue
+            Invoke-LockTestPause 'AFTER_PUBLISH' $LockDirectory
+            if ((Get-LockDirectoryIdentity $LockDirectory) -ne $directoryIdentity) {
+                if ((Recover-OwnedLockGeneration $LockDirectory $nonce) -and
+                    (Get-LockDirectoryIdentity $LockDirectory) -eq $directoryIdentity) { return $nonce }
+                if ((Get-LockGenerationNonce $LockDirectory) -eq $nonce -or
+                    (Get-OwnedLockField (Join-Path $LockDirectory 'owner') 'nonce') -eq $nonce) {
+                    [void] (Remove-IncompleteLockDirectory $LockDirectory $nonce $true)
+                }
+                Start-Sleep -Milliseconds $DelayMilliseconds
+                continue
+            }
+            if ((Get-LockGenerationNonce $LockDirectory) -ne $nonce -or @(Get-LockBarriers $LockDirectory).Count -gt 0 -or
+                (Test-LockDirectoryLegacyOwner $LockDirectory) -or (Test-LockDirectoryUnknownEntries $LockDirectory)) {
+                if ((Test-LockDirectoryLegacyOwner $LockDirectory) -or (Test-LockDirectoryUnknownEntries $LockDirectory)) {
+                    [void] (Remove-IncompleteLockDirectory $LockDirectory $nonce)
+                    Start-Sleep -Milliseconds $DelayMilliseconds
+                    continue
+                }
+                if (Recover-OwnedLockGeneration $LockDirectory $nonce) { return $nonce }
+                Start-Sleep -Milliseconds $DelayMilliseconds
+                continue
+            }
+            if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE) {
+                [IO.File]::WriteAllText($env:CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE, "recovered`n", $utf8)
+            }
+            return $nonce
+        } catch {
+            if ($created) {
+                if ($directoryReplaced -or ($directoryIdentity -and (Get-LockDirectoryIdentity $LockDirectory) -ne $directoryIdentity)) {
+                    if ($generationPublished -or $ownerPublished) {
+                        [void] (Remove-IncompleteLockDirectory $LockDirectory $nonce $true)
+                    }
+                } elseif ((Test-LockDirectoryLegacyOwner $LockDirectory) -or (Test-LockDirectoryUnknownEntries $LockDirectory)) {
+                    [void] (Remove-IncompleteLockDirectory $LockDirectory $nonce)
+                } elseif (-not $ownerPublished -or -not (Remove-OwnedLockGeneration $LockDirectory $nonce)) {
+                    [void] (Remove-IncompleteLockDirectory $LockDirectory $nonce)
+                }
+            }
+        }
+        Remove-Item -LiteralPath $ownerTemporary, $generationTemporary -Force -ErrorAction SilentlyContinue
+
+        $age = Get-OwnedLockAgeSeconds $LockDirectory
+        $observedNonce = Get-OwnedLockField $ownerFile 'nonce'
+        $legacyPid = Get-LegacyLockPid $LockDirectory
+        $legacyOwnerPresent = Test-LockDirectoryLegacyOwner $LockDirectory
+        if ($legacyOwnerPresent -and $observedNonce) {
+            $legacyQuarantine = $LockDirectory + '.quarantine.legacy.' + $PID + '.' + [guid]::NewGuid().ToString('N')
+            try { Move-Item -LiteralPath $LockDirectory -Destination $legacyQuarantine -ErrorAction Stop }
+            catch { $legacyQuarantine = '' }
+            if ($legacyQuarantine) {
+                if (Test-LockDirectoryLegacyOwner $legacyQuarantine) {
+                    if ((Get-LockGenerationNonce $legacyQuarantine) -eq $observedNonce) {
+                        Remove-Item -LiteralPath (Join-Path $legacyQuarantine 'generation') -Force -ErrorAction SilentlyContinue
+                    }
+                    if ((Get-OwnedLockField (Join-Path $legacyQuarantine 'owner') 'nonce') -eq $observedNonce) {
+                        Remove-Item -LiteralPath (Join-Path $legacyQuarantine 'owner') -Force -ErrorAction SilentlyContinue
+                    }
+                    $legacyPid = Get-LegacyLockPid $legacyQuarantine
+                    if ($legacyPid -gt 0 -and $null -ne (Get-Process -Id $legacyPid -ErrorAction SilentlyContinue)) {
+                        [void] (Restore-LockBarrier $LockDirectory $legacyQuarantine)
+                    } elseif ($legacyPid -gt 0 -and $age -ge $LegacyOwnerlessSeconds) {
+                        Remove-LegacyLockDirectoryFiles $legacyQuarantine
+                    } else { [void] (Restore-LockBarrier $LockDirectory $legacyQuarantine) }
+                } else { [void] (Restore-LockBarrier $LockDirectory $legacyQuarantine) }
+            }
+        } elseif ($legacyPid -gt 0 -and $null -ne (Get-Process -Id $legacyPid -ErrorAction SilentlyContinue)) {
+            # Prior-format live owners are never reclaimed solely due to age.
+        } elseif ($legacyOwnerPresent -and $legacyPid -gt 0 -and $age -ge $LegacyOwnerlessSeconds) {
+            $legacyQuarantine = $LockDirectory + '.quarantine.legacy.' + $PID + '.' + [guid]::NewGuid().ToString('N')
+            try { Move-Item -LiteralPath $LockDirectory -Destination $legacyQuarantine -ErrorAction Stop }
+            catch { $legacyQuarantine = '' }
+            if ($legacyQuarantine) {
+                $movedLegacyPid = Get-LegacyLockPid $legacyQuarantine
+                if ($movedLegacyPid -gt 0 -and $null -ne (Get-Process -Id $movedLegacyPid -ErrorAction SilentlyContinue)) {
+                    [void] (Restore-LockBarrier $LockDirectory $legacyQuarantine)
+                } else { Remove-LegacyLockDirectoryFiles $legacyQuarantine }
+            }
+        } elseif ($legacyOwnerPresent) {
+            # Preserve unknown and recent prior formats conservatively.
+        } elseif ($observedNonce) {
+            if ($age -ge 2 -and -not (Test-OwnedLockOwnerCurrent $ownerFile)) {
+                [void] (Remove-OwnedLockGeneration $LockDirectory $observedNonce)
+            }
+        } elseif ((Get-LockGenerationNonce $LockDirectory) -and $age -ge 2) {
+            [void] (Remove-OwnedLockGeneration $LockDirectory (Get-LockGenerationNonce $LockDirectory))
+        } elseif ($age -ge $LegacyOwnerlessSeconds -and (Test-Path -LiteralPath $LockDirectory -PathType Container)) {
+            $legacyQuarantine = $LockDirectory + '.quarantine.legacy.' + $PID + '.' + [guid]::NewGuid().ToString('N')
+            try { Move-Item -LiteralPath $LockDirectory -Destination $legacyQuarantine -ErrorAction Stop }
+            catch { $legacyQuarantine = '' }
+            if ($legacyQuarantine) {
+                $legacyPid = Get-LegacyLockPid $legacyQuarantine
+                if ((Get-LockGenerationNonce $legacyQuarantine) -or (Get-OwnedLockField (Join-Path $legacyQuarantine 'owner') 'nonce') -or
+                    ($legacyPid -gt 0 -and $null -ne (Get-Process -Id $legacyPid -ErrorAction SilentlyContinue)) -or
+                    (Test-LockDirectoryUnknownEntries $legacyQuarantine)) {
+                    [void] (Restore-LockBarrier $LockDirectory $legacyQuarantine)
+                } elseif ($legacyPid -gt 0) { Remove-LegacyLockDirectoryFiles $legacyQuarantine }
+                else { Remove-LockDirectoryFiles $legacyQuarantine }
+            }
+        }
+        Start-Sleep -Milliseconds $DelayMilliseconds
+    }
+    return ''
+}
+
+function Release-OwnedLock([string] $LockDirectory, [string] $Nonce) {
+    [void] (Remove-OwnedLockGeneration $LockDirectory $Nonce)
+}
+
+function Invoke-InternalClaudeUpdate {
+    $stamp = Join-Path $internalClaudeUpdateDirectory 'last-success'
+    $lock = Join-Path $internalClaudeUpdateDirectory 'lock'
+    [IO.Directory]::CreateDirectory($internalClaudeUpdateDirectory) | Out-Null
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $last = 0L
+    if (Test-Path -LiteralPath $stamp -PathType Leaf) {
+        [long]::TryParse(([IO.File]::ReadAllText($stamp).Trim()), [ref] $last) | Out-Null
+    }
+    if ($now - $last -lt $internalClaudeUpdateInterval) { return }
+    if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE) {
+        Add-Content -LiteralPath $env:CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE -Value "start $PID" -Encoding UTF8
+    }
+    $nonce = Acquire-OwnedLock $lock 5 20 3600
+    if (-not $nonce) {
+        if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE) {
+            Add-Content -LiteralPath $env:CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE -Value "blocked $PID" -Encoding UTF8
+        }
+        return
+    }
+    try {
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $last = 0L
+        if (Test-Path -LiteralPath $stamp -PathType Leaf) {
+            [long]::TryParse(([IO.File]::ReadAllText($stamp).Trim()), [ref] $last) | Out-Null
+        }
+        if ($now - $last -lt $internalClaudeUpdateInterval) { return }
+        Remove-ProcessEnvironmentVariables @($sessionEnvironmentNames + @(
+            'CLAUDEX_SESSION_MODE', 'CLAUDEX_MODEL_MODE', 'CLAUDEX_INTERACTIVE_TUI',
+            'CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_NO_FLICKER', 'CLAUDE_CODE_ACCESSIBILITY',
+            'CLAUDEX_INTERNAL_UPDATE_NONCE'
+        ))
+        $log = Join-Path $internalClaudeUpdateDirectory 'claude-update.log'
+        $global:LASTEXITCODE = $null
+        & $internalClaudeUpdatePath update *> $log
+        $updateSucceeded = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE -eq 0 } else { $? }
+        if ($updateSucceeded) {
+            $temporary = Join-Path $internalClaudeUpdateDirectory ('.last-success.' + [guid]::NewGuid().ToString('N') + '.tmp')
+            [IO.File]::WriteAllText($temporary, ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString() + "`n"), $utf8)
+            Protect-PrivatePath $temporary $false
+            Move-Item -LiteralPath $temporary -Destination $stamp -Force
+            Protect-PrivatePath $stamp $false
+        }
+    } finally {
+        Release-OwnedLock $lock $nonce
+    }
+}
+
+if ($claudexInternalClaudeUpdate) {
+    Invoke-InternalClaudeUpdate
+    Exit-Claudex 0
+}
 
 # Route native harnesses and Anthropic-hosted features before reading the
 # Claudex env file. This prevents managed credentials from entering a native
@@ -135,7 +793,7 @@ if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('codex', 'claude
     $nativeHarness = [string] $ClaudeArguments[0]
     if ($ClaudeArguments.Count -gt 1) { $nativeArguments = @($ClaudeArguments[1..($ClaudeArguments.Count - 1)]) }
     else { $nativeArguments = @() }
-} elseif ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq 'ultrareview') {
+} elseif ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('remote-control', 'ultrareview')) {
     $nativeHarness = 'claude'
     $nativeArguments = [string[]] @($ClaudeArguments)
     $forceFirstPartyClaude = $true
@@ -148,6 +806,9 @@ if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('codex', 'claude
         if ($nativeScanArgument -match '^(--[^=]+)=(.*)$') {
             $nativeScanOption = $Matches[1]
             $nativeScanHasInlineValue = $true
+        } elseif ($nativeScanArgument -match '^(-[drw])=?.+$') {
+            $nativeScanOption = $Matches[1]
+            $nativeScanHasInlineValue = $true
         }
         if ($nativeScanOption -in @('--remote-control', '--rc')) {
             $nativeHarness = 'claude'
@@ -156,6 +817,10 @@ if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('codex', 'claude
             break
         }
         if (-not $nativeScanHasInlineValue -and $nativeScanOption -in $claudeRequiredValueOptions) { $nativeScanIndex++ }
+        elseif (-not $nativeScanHasInlineValue -and $nativeScanOption -in $claudeOptionalValueOptions -and
+            $nativeScanIndex + 1 -lt $ClaudeArguments.Count -and -not ([string] $ClaudeArguments[$nativeScanIndex + 1]).StartsWith('-')) {
+            $nativeScanIndex++
+        }
     }
 }
 if ($nativeHarness) {
@@ -184,10 +849,13 @@ if ($nativeHarness) {
     } elseif ($forceFirstPartyClaude) {
         foreach ($environmentName in $sessionEnvironmentNames | Where-Object {
             $_ -in @('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDEX_CHATGPT_PLAN_LABEL', 'CLAUDEX_MANAGED_SESSION',
-                'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY') -or
+                'CLAUDEX_CODEX_AUTH_FILE', 'CLAUDEX_CODEX_SOURCE_AUTH_FILE') -or
+            $_ -in $competingProviderEnvironmentNames -or
             $_ -like 'ANTHROPIC_*_BASE_URL' -or
             $_ -like 'ANTHROPIC_DEFAULT_*' -or $_ -like 'CLAUDE_CODE_*MODEL*' -or
-            $_ -in @('CLAUDE_CODE_ALWAYS_ENABLE_EFFORT', 'CLAUDE_CODE_DISABLE_1M_CONTEXT') -or
+            $_ -in @('CLAUDE_CODE_ALWAYS_ENABLE_EFFORT', 'CLAUDE_CODE_DISABLE_1M_CONTEXT',
+                'CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY', 'CLAUDE_CODE_MAX_RETRIES', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+                'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDEX_NO_SESSION_PERSISTENCE') -or
             $_ -like 'CLAUDEX_PROXY_*'
         }) {
             Remove-Item -LiteralPath "Env:$environmentName" -ErrorAction SilentlyContinue
@@ -239,6 +907,9 @@ if (Test-Path -LiteralPath $configFile -PathType Leaf) {
                 $value = $value.Substring(1, $value.Length - 2)
             }
             $value = $value -replace '\\ ', ' '
+            if (-not $previousConfigEnvironment.ContainsKey($name)) {
+                $previousConfigEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            }
             [Environment]::SetEnvironmentVariable($name, $value, 'Process')
         }
     }
@@ -294,31 +965,42 @@ if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq 'self-update') {
     $powerShellHost = if (Get-Command powershell.exe -CommandType Application -ErrorAction SilentlyContinue) {
         (Get-Command powershell.exe -CommandType Application).Source
     } else { (Get-Process -Id $PID).Path }
-    & $powerShellHost -NoLogo -NoProfile -ExecutionPolicy Bypass -File $selfUpdateHelper $selfUpdateSwitch
-    exit $LASTEXITCODE
+    Invoke-WithoutPrivateManagedEnvironment -PreserveNames @('CLAUDEX_CONFIG_DIR') -Action {
+        & $powerShellHost -NoLogo -NoProfile -ExecutionPolicy Bypass -File $selfUpdateHelper $selfUpdateSwitch
+    }
+    Exit-Claudex $script:lastPrivateBoundaryExitCode
 }
 
 if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -in @('--login', '--logout', '--auth-status')) {
     if (-not (Test-Path -LiteralPath $codexSessionHelper -PathType Leaf)) { Fail 'authentication helper is missing; reinstall Claudex.' }
     $action = switch ($ClaudeArguments[0]) { '--login' { 'login' } '--logout' { 'logout' } default { 'status' } }
-    & $codexSessionHelper $action
-    exit $LASTEXITCODE
+    Invoke-WithoutPrivateManagedEnvironment -PreserveNames @('CLAUDEX_CONFIG_DIR', 'CLAUDEX_CODEX_AUTH_DIR', 'CLAUDEX_CODEX_SOURCE_AUTH_FILE') -Action {
+        & $codexSessionHelper $action
+    }
+    Exit-Claudex $script:lastPrivateBoundaryExitCode
 }
 
 $earlyRuntimeBypass = $false
-$earlyMaintenanceCommands = @('--help', '-h', '--version', '-v', 'agents', 'attach', 'auth', 'auto-mode', 'claude', 'codex', 'doctor', 'gateway', 'install', 'kill', 'logs', 'mcp', 'plugin', 'plugins', 'project', 'respawn', 'rm', 'self-update', 'setup-token', 'skills', 'stop', 'ultrareview', 'update', 'upgrade')
+$earlyGlobalMaintenanceOptions = @('--help', '-h', '--version', '-v')
+$earlyMaintenanceCommands = @('agents', 'attach', 'auth', 'auto-mode', 'claude', 'codex', 'doctor', 'gateway', 'install', 'kill', 'logs', 'mcp', 'plugin', 'plugins', 'project', 'remote-control', 'respawn', 'rm', 'self-update', 'setup-token', 'skills', 'stop', 'ultrareview', 'update', 'upgrade')
+$earlyPositionalSeen = $false
 for ($earlyIndex = 0; $earlyIndex -lt $ClaudeArguments.Count; $earlyIndex++) {
     $earlyArgument = [string] $ClaudeArguments[$earlyIndex]
     if ($earlyArgument -eq '--') { break }
     if ($earlyArgument -eq '--claude-chrome') { $earlyRuntimeBypass = $true; break }
     if ($earlyArgument -in @('--sol', '--terra', '--luna', '--solplan', '--manual', '--auto', '--accept-edits', '--ultracode', '--max-effort')) { continue }
-    $earlyOption = if ($earlyArgument -match '^(--[^=]+)=') { $Matches[1] } else { $earlyArgument }
-    if ($earlyOption -in $earlyMaintenanceCommands) { $earlyRuntimeBypass = $true; break }
+    $earlyOption = if ($earlyArgument -match '^(-{1,2}[^=]+)=') { $Matches[1] } elseif ($earlyArgument -match '^(-[drw])=?.+$') { $Matches[1] } else { $earlyArgument }
+    if ($earlyOption -in $earlyGlobalMaintenanceOptions -or (-not $earlyPositionalSeen -and $earlyOption -in $earlyMaintenanceCommands)) {
+        $earlyRuntimeBypass = $true
+        break
+    }
     if ($earlyArgument.StartsWith('-')) {
         if ($earlyArgument -notmatch '=' -and $earlyOption -in $claudeRequiredValueOptions) { $earlyIndex++ }
+        elseif ($earlyArgument -eq $earlyOption -and $earlyOption -in $claudeOptionalValueOptions -and
+            $earlyIndex + 1 -lt $ClaudeArguments.Count -and -not ([string] $ClaudeArguments[$earlyIndex + 1]).StartsWith('-')) { $earlyIndex++ }
         continue
     }
-    break
+    $earlyPositionalSeen = $true
 }
 
 $managedCodexModelIds = @('gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna')
@@ -427,8 +1109,10 @@ if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq 'skills') {
     if ($ClaudeArguments.Count -ne 1) { Fail 'Usage: claudex skills' 2 }
     Assert-SkillBridgeNode
     if (-not (Test-Path -LiteralPath $skillBridgeHelper -PathType Leaf)) { Fail 'skill bridge helper is missing; reinstall Claudex.' }
-    & node $skillBridgeHelper list --project (Get-Location).Path
-    exit $LASTEXITCODE
+    Invoke-WithoutPrivateManagedEnvironment -PreserveNames @(
+        'CLAUDEX_CONFIG_DIR', 'CLAUDEX_CLAUDE_CONFIG_DIR', 'CLAUDEX_INSTRUCTION_BRIDGE'
+    ) -Action { & node $skillBridgeHelper list --project (Get-Location).Path }
+    Exit-Claudex $script:lastPrivateBoundaryExitCode
 }
 $stateFile = Join-Path $configDir '.claude.json'
 $managedModels = @(
@@ -440,22 +1124,8 @@ $managedModels = @(
 
 function Update-ModelCache {
     $lockDirectory = Join-Path (Join-Path $configDir 'run') 'model-display.lock'
-    [IO.Directory]::CreateDirectory((Split-Path $lockDirectory -Parent)) | Out-Null
-    $lockHeld = $false
-    for ($attempt = 0; $attempt -lt 100; $attempt++) {
-        try {
-            New-Item -Path $lockDirectory -ItemType Directory -ErrorAction Stop | Out-Null
-            $lockHeld = $true
-            break
-        } catch {
-            try {
-                $age = ([DateTime]::UtcNow - (Get-Item -LiteralPath $lockDirectory -ErrorAction Stop).LastWriteTimeUtc).TotalSeconds
-                if ($age -ge 60) { Remove-Item -LiteralPath $lockDirectory -Force -ErrorAction SilentlyContinue }
-            } catch { }
-            Start-Sleep -Milliseconds 20
-        }
-    }
-    if (-not $lockHeld) { return }
+    $lockNonce = Acquire-OwnedLock $lockDirectory 100 20
+    if (-not $lockNonce) { return }
 
     $tempFile = $null
     try {
@@ -479,7 +1149,7 @@ function Update-ModelCache {
         if ($tempFile -and (Test-Path -LiteralPath $tempFile -PathType Leaf)) {
             Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
         }
-        Remove-Item -LiteralPath $lockDirectory -Force -ErrorAction SilentlyContinue
+        Release-OwnedLock $lockDirectory $lockNonce
     }
 }
 
@@ -863,9 +1533,15 @@ function Ensure-Proxy([string[]] $RequiredModels = @($model)) {
     if (-not (Test-Path -LiteralPath $codexSessionHelper -PathType Leaf)) {
         throw "authentication helper is missing: $codexSessionHelper; reinstall Claudex."
     }
-    & $codexSessionHelper sync
-    if ($LASTEXITCODE -ne 0) {
-        $syncExitCode = $LASTEXITCODE
+    if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_SKIP_AUTH_SYNC -eq '1') {
+        $script:lastPrivateBoundaryExitCode = 0
+    } else {
+        Invoke-WithoutPrivateManagedEnvironment -PreserveNames @(
+            'CLAUDEX_CONFIG_DIR', 'CLAUDEX_CODEX_AUTH_DIR', 'CLAUDEX_CODEX_SOURCE_AUTH_FILE'
+        ) -Action { & $codexSessionHelper sync }
+    }
+    if ($script:lastPrivateBoundaryExitCode -ne 0) {
+        $syncExitCode = $script:lastPrivateBoundaryExitCode
         $script:lastProxyFailureWasAuthSync = $true
         $script:lastProxyAuthSyncExitCode = $syncExitCode
         throw "authentication synchronization failed with exit code $syncExitCode."
@@ -893,78 +1569,56 @@ function Ensure-Proxy([string[]] $RequiredModels = @($model)) {
     Write-ProxyRecoveryDiagnostic 'authenticated proxy readiness failed; entering recovery'
     $runDir = Join-Path $configDir 'run'
     $lockDir = Join-Path $runDir 'proxy-start.lock'
-    $ownerFile = Join-Path $lockDir 'owner-pid'
     [IO.Directory]::CreateDirectory($runDir) | Out-Null
     $lockAcquired = $false
-    $legacyLockOwned = $false
+    $lockNonce = ''
     $startupMutex = $null
     $useNamedMutex = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    $lockDeadline = [DateTime]::UtcNow.AddSeconds(30)
     if ($useNamedMutex) {
-        $lockDeadline = [DateTime]::UtcNow.AddSeconds(30)
         $startupMutex = New-Object Threading.Mutex($false, (Get-ProxyStartupMutexName))
-        try { $lockAcquired = $startupMutex.WaitOne(30000) }
-        catch [Threading.AbandonedMutexException] { $lockAcquired = $true }
-        if ($lockAcquired) {
-            try {
-                # Keep interoperating with an older launcher that only knows
-                # the directory lock. A recent legacy owner gets a bounded
-                # chance to finish; an old/PID-reused record is reclaimed.
-                if (Test-Path -LiteralPath $lockDir -PathType Container) {
-                    $legacyAge = [DateTime]::UtcNow - (Get-Item -LiteralPath $lockDir).LastWriteTimeUtc
-                    if ($legacyAge.TotalMinutes -lt 2) {
-                        while ([DateTime]::UtcNow -lt $lockDeadline) {
-                            if (Test-ProxyReady 1000) {
-                                Assert-ProxyModelAvailable $RequiredModels
-                                $startupMutex.ReleaseMutex()
-                                $startupMutex.Dispose()
-                                return
-                            }
-                            Start-Sleep -Milliseconds 100
-                        }
-                    }
-                    Remove-Item -LiteralPath $lockDir -Recurse -Force -ErrorAction SilentlyContinue
-                }
-                New-Item -Path $lockDir -ItemType Directory -ErrorAction Stop | Out-Null
-                [IO.File]::WriteAllText($ownerFile, "$PID`n", $utf8)
-                $legacyLockOwned = $true
-            } catch {
-                try { $startupMutex.ReleaseMutex() } catch { }
+        while (-not $lockAcquired -and [DateTime]::UtcNow -lt $lockDeadline) {
+            try { $lockAcquired = $startupMutex.WaitOne(100) }
+            catch [Threading.AbandonedMutexException] { $lockAcquired = $true }
+            if (-not $lockAcquired -and (Test-ProxyReady 1000)) {
+                Assert-ProxyModelAvailable $RequiredModels
                 $startupMutex.Dispose()
-                throw
-            }
-        }
-    } else {
-        foreach ($attempt in 1..300) {
-            try {
-                New-Item -Path $lockDir -ItemType Directory -ErrorAction Stop | Out-Null
-                [IO.File]::WriteAllText($ownerFile, "$PID`n", $utf8)
-                $lockAcquired = $true
-                break
-            } catch {
-                if (Test-ProxyReady 1000) { Assert-ProxyModelAvailable $RequiredModels; return }
-                try {
-                    $lockOwner = 0
-                    $ownerAlive = (Test-Path -LiteralPath $ownerFile -PathType Leaf) -and
-                        [int]::TryParse(([IO.File]::ReadAllText($ownerFile).Trim()), [ref] $lockOwner) -and
-                        $null -ne (Get-Process -Id $lockOwner -ErrorAction SilentlyContinue)
-                    if ($lockOwner -gt 0 -and -not $ownerAlive) {
-                        Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
-                        Remove-Item -LiteralPath $lockDir -Force -ErrorAction SilentlyContinue
-                    } elseif ($lockOwner -le 0 -and (Test-Path -LiteralPath $lockDir -PathType Container)) {
-                        $ownerlessAge = [DateTime]::UtcNow - (Get-Item -LiteralPath $lockDir).LastWriteTimeUtc
-                        if ($ownerlessAge.TotalSeconds -ge 2) {
-                            Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
-                            Remove-Item -LiteralPath $lockDir -Force -ErrorAction SilentlyContinue
-                        }
-                    }
-                } catch { }
-                Start-Sleep -Milliseconds 100
+                return
             }
         }
     }
-    if (-not $lockAcquired) {
+    if ($useNamedMutex -and -not $lockAcquired) {
         if ($startupMutex) { $startupMutex.Dispose() }
         Write-ProxyRecoveryDiagnostic 'timed out waiting for the proxy startup mutex'
+        throw 'timed out waiting for another session to start the local proxy.'
+    }
+    # The filesystem generation lock is required even on Windows. It provides
+    # cross-session and mixed-version coordination that a Local named mutex
+    # cannot provide on its own. Legacy ownerless directories receive the same
+    # conservative two-minute transition window as the Unix launcher.
+    $lockAcquired = $false
+    while (-not $lockAcquired -and [DateTime]::UtcNow -lt $lockDeadline) {
+        $lockNonce = Acquire-OwnedLock $lockDir 1 0 120
+        if ($lockNonce) {
+            $lockAcquired = $true
+            if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE) {
+                Add-Content -LiteralPath $env:CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE -Value "acquired $PID" -Encoding UTF8
+            }
+            break
+        }
+        if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE) {
+            Add-Content -LiteralPath $env:CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE -Value "blocked $PID" -Encoding UTF8
+        }
+        if (Test-ProxyReady 1000) {
+            Assert-ProxyModelAvailable $RequiredModels
+            if ($useNamedMutex) { try { $startupMutex.ReleaseMutex() } catch { }; $startupMutex.Dispose() }
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $lockAcquired) {
+        if ($useNamedMutex) { try { $startupMutex.ReleaseMutex() } catch { }; $startupMutex.Dispose() }
+        Write-ProxyRecoveryDiagnostic 'timed out after 30s waiting for the proxy startup filesystem lock'
         throw 'timed out waiting for another session to start the local proxy.'
     }
     Write-ProxyWatcherTestTrace 'recovery: startup lock acquired'
@@ -1007,7 +1661,7 @@ function Ensure-Proxy([string[]] $RequiredModels = @($model)) {
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $startParameters.WindowStyle = 'Hidden' }
         Write-ProxyWatcherTestTrace "recovery: starting $proxyBinary"
         Write-ProxyRecoveryDiagnostic "starting compatibility service: $proxyBinary"
-        $spawnedProxy = Start-Process @startParameters
+        $spawnedProxy = Invoke-WithoutPrivateManagedEnvironment -Action { Start-Process @startParameters }
         try {
             $spawnedProxyRecord = Write-ManagedProxyMetadata $spawnedProxy $proxyBinary
         } catch {
@@ -1043,16 +1697,10 @@ function Ensure-Proxy([string[]] $RequiredModels = @($model)) {
             }
             try { $spawnedProxy.Dispose() } catch { }
         }
+        if ($lockNonce) { Release-OwnedLock $lockDir $lockNonce }
         if ($useNamedMutex) {
-            if ($legacyLockOwned) {
-                Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
-                Remove-Item -LiteralPath $lockDir -Recurse -Force -ErrorAction SilentlyContinue
-            }
             if ($lockAcquired) { try { $startupMutex.ReleaseMutex() } catch { } }
             if ($startupMutex) { $startupMutex.Dispose() }
-        } else {
-            Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $lockDir -Force -ErrorAction SilentlyContinue
         }
     }
     if (-not $becameReady) {
@@ -1092,9 +1740,11 @@ function Ensure-ProxyForLaunch([string[]] $RequiredModels = @($model)) {
     $script:interactiveLoginAttempted = $true
     [Console]::Error.WriteLine('claudex: Codex sign-in is required. Opening the official Codex browser login...')
     Write-ProxyRecoveryDiagnostic 'foreground startup requested official Codex browser login'
-    & $codexSessionHelper login
-    if ($LASTEXITCODE -ne 0) {
-        Write-ProxyRecoveryDiagnostic "foreground Codex browser login failed with exit code $LASTEXITCODE"
+    Invoke-WithoutPrivateManagedEnvironment -PreserveNames @(
+        'CLAUDEX_CONFIG_DIR', 'CLAUDEX_CODEX_AUTH_DIR', 'CLAUDEX_CODEX_SOURCE_AUTH_FILE'
+    ) -Action { & $codexSessionHelper login }
+    if ($script:lastPrivateBoundaryExitCode -ne 0) {
+        Write-ProxyRecoveryDiagnostic "foreground Codex browser login failed with exit code $($script:lastPrivateBoundaryExitCode)"
         throw 'Codex sign-in did not complete. Run `claudex --login` to retry.'
     }
 
@@ -1112,10 +1762,20 @@ function Ensure-ProxyForLaunch([string[]] $RequiredModels = @($model)) {
 function Start-AuthWatcher {
     if ($env:CLAUDEX_SKIP_AUTH_WATCHER -eq '1') { return $null }
     $hostExecutable = (Get-Process -Id $PID).Path
+    $parentIdentity = [string] (Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().Ticks
     $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $codexSessionHelper,
-        'watch', '-ParentProcessId', [string] $PID)
+        'watch', '-ParentProcessId', [string] $PID, '-ParentProcessIdentity', $parentIdentity)
+    if ($backgroundLaunch) { $arguments += '-BackgroundWatch' }
     try {
-        return Start-DiscardingProcess $hostExecutable $arguments -Hidden:([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
+        $watcher = Invoke-WithoutPrivateManagedEnvironment -PreserveNames @(
+            'CLAUDEX_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CLAUDEX_CODEX_AUTH_DIR', 'CLAUDEX_CODEX_SOURCE_AUTH_FILE'
+        ) -Action {
+            Start-DiscardingProcess $hostExecutable $arguments -Hidden:([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
+        }
+        if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_AUTH_WATCH_PID_FILE) {
+            [IO.File]::WriteAllText($env:CLAUDEX_TEST_AUTH_WATCH_PID_FILE, "$($watcher.Id)`n", $utf8)
+        }
+        return $watcher
     } catch {
         [Console]::Error.WriteLine('claudex: warning: automatic Codex account switching could not be started for this session.')
         return $null
@@ -1127,12 +1787,62 @@ function Write-ProxyWatcherTestTrace([string] $Message) {
     try { Add-Content -LiteralPath $env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE -Value $Message } catch { }
 }
 
-function Invoke-ProxyWatchLoop([int] $ParentProcessId) {
+function Test-WatchParentCurrent([int] $ParentProcessId, [string] $ParentIdentity) {
+    $process = Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue
+    if ($null -eq $process) { return $false }
+    if ([string]::IsNullOrWhiteSpace($ParentIdentity)) { return $true }
+    try { return ([string] $process.StartTime.ToUniversalTime().Ticks) -eq $ParentIdentity } catch { return $false }
+}
+
+function Get-ManagedBackgroundRegistryState {
+    # Query only the managed Claude profile. A proxy watcher needs the private
+    # session environment for health recovery, but none of it belongs in the
+    # separate first-party `claude agents` process used for lifecycle discovery.
+    $privateNames = @($sessionEnvironmentNames + @(
+        'CLAUDEX_SESSION_MODE', 'CLAUDEX_MODEL_MODE', 'CLAUDEX_INTERACTIVE_TUI',
+        'CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_NO_FLICKER', 'CLAUDE_CODE_ACCESSIBILITY'
+    ) | Where-Object { $_ -ne 'CLAUDE_CONFIG_DIR' } | Select-Object -Unique)
+    $saved = @{}
+    foreach ($name in $privateNames) {
+        $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+    }
+    try {
+        $claude = Resolve-HarnessCommand 'claude'
+        if (-not $claude -or -not $claude.Source) { return 'unknown' }
+        $global:LASTEXITCODE = $null
+        $raw = (& $claude.Source agents --json 2>$null | Out-String)
+        if (($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) -or -not $raw.TrimStart().StartsWith('[')) { return 'unknown' }
+        try { $records = $raw | ConvertFrom-Json } catch { return 'unknown' }
+        if ($null -eq $records) {
+            if ($raw -match '^\s*\[\s*\]\s*$') { return 'empty' }
+            return 'unknown'
+        }
+        if ($records -is [Array] -and $records.Count -eq 0) { return 'empty' }
+        return 'active'
+    } finally {
+        foreach ($name in $saved.Keys) {
+            if ($null -eq $saved[$name]) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+            else { [Environment]::SetEnvironmentVariable($name, [string] $saved[$name], 'Process') }
+        }
+    }
+}
+
+function Invoke-ProxyWatchLoop([int] $ParentProcessId, [string] $ParentIdentity, [bool] $BackgroundWatch) {
     Write-ProxyWatcherTestTrace "watcher entered for parent $ParentProcessId"
     $consecutiveFailures = 0
-    while (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue) {
+    $emptyPolls = 0
+    while ($true) {
+        if (Test-WatchParentCurrent $ParentProcessId $ParentIdentity) { $emptyPolls = 0 }
+        elseif ($BackgroundWatch) {
+            $registryState = Get-ManagedBackgroundRegistryState
+            if ($registryState -eq 'active') { $emptyPolls = 0 }
+            elseif ($registryState -eq 'empty') {
+                $emptyPolls++
+                if ($emptyPolls -ge 3) { break }
+            } else { $emptyPolls = 0 }
+        } else { break }
         Start-Sleep -Seconds 1
-        if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { break }
         if (Test-ProxyReachable) {
             $consecutiveFailures = 0
         } else {
@@ -1141,7 +1851,7 @@ function Invoke-ProxyWatchLoop([int] $ParentProcessId) {
         if ($consecutiveFailures -ge 2) {
             Write-ProxyWatcherTestTrace 'proxy unreachable; starting recovery'
             try {
-                Ensure-Proxy
+                Ensure-Proxy *> $null
                 Write-ProxyWatcherTestTrace 'proxy recovery completed'
             } catch {
                 Write-ProxyWatcherTestTrace ("proxy recovery failed: " + $_.Exception.Message)
@@ -1151,15 +1861,23 @@ function Invoke-ProxyWatchLoop([int] $ParentProcessId) {
         }
     }
     Write-ProxyWatcherTestTrace 'watcher exited'
+    if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_PROXY_WATCH_EXIT_FILE) {
+        [IO.File]::WriteAllText($env:CLAUDEX_TEST_PROXY_WATCH_EXIT_FILE, "exited`n", $utf8)
+    }
 }
 
 function Start-ProxyWatcher {
     if ($env:CLAUDEX_SKIP_PROXY_WATCHER -eq '1') { return $null }
     $hostExecutable = (Get-Process -Id $PID).Path
+    $parentIdentity = [string] (Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().Ticks
     $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath,
-        '-ClaudexInternalProxyWatchParentProcessId', [string] $PID)
+        '-ClaudexInternalProxyWatchParentProcessId', [string] $PID, $parentIdentity, $(if ($backgroundLaunch) { '1' } else { '0' }))
     try {
-        return Start-DiscardingProcess $hostExecutable $arguments -Hidden:([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
+        $watcher = Start-DiscardingProcess $hostExecutable $arguments -Hidden:([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
+        if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_PROXY_WATCH_PID_FILE) {
+            [IO.File]::WriteAllText($env:CLAUDEX_TEST_PROXY_WATCH_PID_FILE, "$($watcher.Id)`n", $utf8)
+        }
+        return $watcher
     } catch {
         [Console]::Error.WriteLine('claudex: warning: local proxy recovery watcher could not be started for this session.')
         return $null
@@ -1167,8 +1885,8 @@ function Start-ProxyWatcher {
 }
 
 if ($ClaudexInternalProxyWatchParentProcessId -gt 0) {
-    Invoke-ProxyWatchLoop $ClaudexInternalProxyWatchParentProcessId
-    exit 0
+    Invoke-ProxyWatchLoop $ClaudexInternalProxyWatchParentProcessId $ClaudexInternalProxyWatchParentIdentity $ClaudexInternalProxyWatchBackground
+    Exit-Claudex 0
 }
 
 # Internal watcher processes exit above before touching user-facing state.
@@ -1180,11 +1898,26 @@ function Resolve-ClaudeCommand {
     $script:claudeInvocation = if ($claudeCommand.CommandType -eq 'Function') { $claudeCommand.Name } else { $claudeCommand.Source }
 }
 
+function Test-ClaudeOption([string] $Option) {
+    foreach ($line in @($script:claudeHelp -split "`r?`n")) {
+        $fields = @($line.TrimStart() -split '\s+' | Where-Object { $_ })
+        foreach ($field in $fields) {
+            $candidate = ([string] $field).TrimEnd(',')
+            if (-not $candidate.StartsWith('-')) { break }
+            $candidate = ($candidate -split '=', 2)[0]
+            if ($candidate -eq $Option) { return $true }
+        }
+    }
+    return $false
+}
+
 function Load-ClaudeCapabilities {
     Resolve-ClaudeCommand
-    $script:claudeHelp = (& $script:claudeInvocation --help 2>$null | Out-String)
+    $script:claudeHelp = (Invoke-WithoutPrivateManagedEnvironment -Action {
+        & $script:claudeInvocation --help 2>$null
+    } | Out-String)
     if ([string]::IsNullOrWhiteSpace($script:claudeHelp)) { Fail 'Claude Code did not return its capability list.' }
-    if (-not $script:claudeHelp.Contains('--model')) {
+    if (-not (Test-ClaudeOption '--model')) {
         Fail 'this Claude Code build does not support custom models; run `claude update`.'
     }
 }
@@ -1192,6 +1925,9 @@ function Load-ClaudeCapabilities {
 function Update-AutoModeRules {
     $managedSettings = Join-Path $configDir 'settings.json'
     if ([IO.Path]::GetFullPath($settingsFile) -ne [IO.Path]::GetFullPath($managedSettings)) { return }
+    $lockDirectory = Join-Path (Join-Path $configDir 'run') 'auto-mode.lock'
+    $lockNonce = Acquire-OwnedLock $lockDirectory 100 20
+    if (-not $lockNonce) { return }
     $tempFile = $null
     $snapshotTemp = $null
     try {
@@ -1209,7 +1945,9 @@ function Update-AutoModeRules {
         }
         $defaultsAreFresh = $false
         try {
-            $defaults = (& $script:claudeInvocation auto-mode defaults 2>$null | Out-String) | ConvertFrom-Json
+            $defaults = (Invoke-WithoutPrivateManagedEnvironment -Action {
+                & $script:claudeInvocation auto-mode defaults 2>$null
+            } | Out-String) | ConvertFrom-Json
             foreach ($property in @('allow', 'environment', 'soft_deny', 'hard_deny')) {
                 if ($null -eq $defaults.PSObject.Properties[$property]) { throw "missing auto mode default: $property" }
             }
@@ -1332,11 +2070,8 @@ function Update-AutoModeRules {
     } finally {
         if ($tempFile) { Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue }
         if ($snapshotTemp) { Remove-Item -LiteralPath $snapshotTemp -Force -ErrorAction SilentlyContinue }
+        Release-OwnedLock $lockDirectory $lockNonce
     }
-}
-
-function Test-ClaudeOption([string] $Option) {
-    return $script:claudeHelp.Contains($Option)
 }
 
 function Start-ClaudeUpdateCheck {
@@ -1350,25 +2085,45 @@ function Start-ClaudeUpdateCheck {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     if ($now - $last -lt $claudeUpdateIntervalNumber) { return }
     [IO.Directory]::CreateDirectory($updateDir) | Out-Null
-    $lock = Join-Path $updateDir 'lock'
-    if (Test-Path -LiteralPath $lock -PathType Container) {
-        try {
-            $lockAge = [DateTime]::UtcNow - (Get-Item -LiteralPath $lock).LastWriteTimeUtc
-            if ($lockAge.TotalHours -ge 1) { Remove-Item -LiteralPath $lock -Recurse -Force }
-        } catch { return }
-    }
-    try { New-Item -Path $lock -ItemType Directory -ErrorAction Stop | Out-Null } catch { return }
     $claudePath = $script:claudeInvocation
-    $log = Join-Path $updateDir 'claude-update.log'
-    Start-Job -ScriptBlock {
-        param($ClaudePath, $Log, $Stamp, $Lock)
-        try {
-            & $ClaudePath update *> $Log
-            if ($LASTEXITCODE -eq 0) {
-                [IO.File]::WriteAllText($Stamp, ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString() + "`n"))
+    $powerShellHost = if (Get-Command powershell.exe -CommandType Application -ErrorAction SilentlyContinue) {
+        (Get-Command powershell.exe -CommandType Application).Source
+    } else { (Get-Process -Id $PID).Path }
+    $workerNonce = [guid]::NewGuid().ToString('N')
+    $workerSentinel = Join-Path $updateDir ('.claude-update-worker.' + [guid]::NewGuid().ToString('N') + '.sentinel')
+    [IO.File]::WriteAllText($workerSentinel, "$workerNonce`n", $utf8)
+    Protect-PrivatePath $workerSentinel $false
+    $arguments = @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', (ConvertTo-WindowsCommandLineArgument $PSCommandPath),
+        '-ClaudexInternalClaudeUpdate',
+        (ConvertTo-WindowsCommandLineArgument $claudePath),
+        (ConvertTo-WindowsCommandLineArgument $updateDir),
+        [string] $claudeUpdateIntervalNumber,
+        (ConvertTo-WindowsCommandLineArgument $workerSentinel)
+    )
+    $parameters = @{
+        FilePath = $powerShellHost
+        ArgumentList = $arguments
+        RedirectStandardOutput = (Join-Path $updateDir 'claude-update-worker.stdout.log')
+        RedirectStandardError = (Join-Path $updateDir 'claude-update-worker.stderr.log')
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $parameters.WindowStyle = 'Hidden' }
+    try {
+        Invoke-WithoutPrivateManagedEnvironment -Action {
+            $previousWorkerNonce = [Environment]::GetEnvironmentVariable('CLAUDEX_INTERNAL_UPDATE_NONCE', 'Process')
+            try {
+                $env:CLAUDEX_INTERNAL_UPDATE_NONCE = $workerNonce
+                Start-Process @parameters | Out-Null
+            } finally {
+                if ($null -eq $previousWorkerNonce) { Remove-Item Env:CLAUDEX_INTERNAL_UPDATE_NONCE -ErrorAction SilentlyContinue }
+                else { $env:CLAUDEX_INTERNAL_UPDATE_NONCE = $previousWorkerNonce }
             }
-        } finally { Remove-Item -LiteralPath $Lock -Recurse -Force -ErrorAction SilentlyContinue }
-    } -ArgumentList $claudePath, $log, $stamp, $lock | Out-Null
+        }
+    } catch {
+        Remove-Item -LiteralPath $workerSentinel -Force -ErrorAction SilentlyContinue
+        # An updater launch failure must not block the interactive session.
+    }
 }
 
 function Start-ClaudexUpdateCheck {
@@ -1394,7 +2149,9 @@ function Start-ClaudexUpdateCheck {
             RedirectStandardError = (Join-Path $updateDirectory 'background.stderr.log')
         }
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $parameters.WindowStyle = 'Hidden' }
-        Start-Process @parameters | Out-Null
+        Invoke-WithoutPrivateManagedEnvironment -PreserveNames @('CLAUDEX_CONFIG_DIR') -Action {
+            Start-Process @parameters | Out-Null
+        }
     } catch {
         # Background update failures are persisted by the helper when it
         # starts; a process-launch failure must never break Claudex startup.
@@ -1415,6 +2172,7 @@ function Model-Name([string] $Id) {
 }
 
 function Invoke-Doctor {
+    $script:doctorExitCode = 0
     Assert-ProxyConfiguration
     Update-ModelCache
     Load-ClaudeCapabilities
@@ -1426,14 +2184,21 @@ function Invoke-Doctor {
     $proxyBinary = Find-ProxyExecutable
     $proxyVersion = 'unavailable'
     if ($proxyBinary) {
-        $versionLines = @(& $proxyBinary -version 2>&1)
+        $versionLines = @(Invoke-WithoutPrivateManagedEnvironment -Action { & $proxyBinary -version 2>&1 })
         if ($versionLines.Count -gt 0) { $proxyVersion = [string] $versionLines[0] }
     }
-    $claudeVersion = try { (& claude --version 2>$null | Select-Object -First 1) } catch { 'unavailable' }
+    $claudeVersion = try {
+        (Invoke-WithoutPrivateManagedEnvironment -Action { & claude --version 2>$null } | Select-Object -First 1)
+    } catch { 'unavailable' }
     Write-Output "Claude Code: $claudeVersion"
     Write-Output "CLIProxyAPI: $proxyVersion"
-    & $codexSessionHelper status
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Invoke-WithoutPrivateManagedEnvironment -PreserveNames @(
+        'CLAUDEX_CONFIG_DIR', 'CLAUDEX_CODEX_AUTH_DIR', 'CLAUDEX_CODEX_SOURCE_AUTH_FILE'
+    ) -Action { & $codexSessionHelper status }
+    if ($script:lastPrivateBoundaryExitCode -ne 0) {
+        $script:doctorExitCode = $script:lastPrivateBoundaryExitCode
+        return
+    }
     Write-Output "Proxy: healthy at $proxyUrl"
     Write-Output "Saved model: $(Model-Name $savedModel) ($savedModel)"
     Write-Output "Default permission mode: $permissionMode"
@@ -1467,36 +2232,41 @@ function Invoke-Doctor {
         if ($ids -contains $id) { Write-Output "${id}: advertised" }
         else { [Console]::Error.WriteLine("${id}: not advertised by the authenticated Codex account"); $missing = $true }
     }
-    if ($missing) { exit 1 }
+    if ($missing) { $script:doctorExitCode = 1 }
 }
 
 if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '--doctor') {
     Invoke-Doctor
-    exit 0
+    Exit-Claudex $script:doctorExitCode
 }
 
 if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '--usage-limit') {
     $usageHelper = Join-Path $configDir 'usage-limit.ps1'
     if (-not (Test-Path -LiteralPath $usageHelper -PathType Leaf)) { Fail 'usage-limit helper is missing; reinstall Claudex.' }
     $usageArguments = if ($ClaudeArguments.Count -gt 1) { @($ClaudeArguments[1..($ClaudeArguments.Count - 1)]) } else { @() }
-    & $usageHelper @usageArguments
-    if ($?) { exit 0 }
-    exit 1
+    Invoke-WithoutPrivateManagedEnvironment -PreserveNames @('CLAUDEX_CONFIG_DIR', 'CLAUDEX_CODEX_AUTH_DIR') -Action {
+        & $usageHelper @usageArguments
+    }
+    Exit-Claudex $script:lastPrivateBoundaryExitCode
 }
 
 if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '--accounts') {
     $usageHelper = Join-Path $configDir 'usage-limit.ps1'
     if (-not (Test-Path -LiteralPath $usageHelper -PathType Leaf)) { Fail 'usage-limit helper is missing; reinstall Claudex.' }
-    & $usageHelper -Accounts
-    if ($?) { exit 0 } else { exit 1 }
+    Invoke-WithoutPrivateManagedEnvironment -PreserveNames @('CLAUDEX_CONFIG_DIR', 'CLAUDEX_CODEX_AUTH_DIR') -Action {
+        & $usageHelper -Accounts
+    }
+    Exit-Claudex $script:lastPrivateBoundaryExitCode
 }
 
 if ($ClaudeArguments.Count -gt 0 -and $ClaudeArguments[0] -eq '--account') {
     if ($ClaudeArguments.Count -ne 2) { Fail 'Usage: claudex --account <number|email|filename|auto>' 2 }
     $usageHelper = Join-Path $configDir 'usage-limit.ps1'
     if (-not (Test-Path -LiteralPath $usageHelper -PathType Leaf)) { Fail 'usage-limit helper is missing; reinstall Claudex.' }
-    & $usageHelper -Account $ClaudeArguments[1]
-    if ($?) { exit 0 } else { exit 1 }
+    Invoke-WithoutPrivateManagedEnvironment -PreserveNames @('CLAUDEX_CONFIG_DIR', 'CLAUDEX_CODEX_AUTH_DIR') -Action {
+        & $usageHelper -Account $ClaudeArguments[1]
+    }
+    Exit-Claudex $script:lastPrivateBoundaryExitCode
 }
 
 $startModel = ''
@@ -1550,10 +2320,13 @@ $injectAgents = $true
 $injectLeaderGuard = $true
 $injectPermission = $true
 $injectSkills = $true
+$skillBridgeGlobalOnly = $false
 $suppressResumeFooter = $false
+$backgroundLaunch = $false
 $requestedResumeSessionId = ''
-$maintenanceCommands = @('--help', '-h', '--version', '-v', 'agents', 'attach', 'auth', 'auto-mode', 'doctor', 'gateway', 'install', 'kill', 'logs', 'mcp', 'plugin', 'plugins', 'project', 'respawn', 'rm', 'self-update', 'setup-token', 'skills', 'stop', 'ultrareview', 'update', 'upgrade')
-$lookingForMaintenanceCommand = $true
+$maintenanceGlobalOptions = @('--help', '-h', '--version', '-v')
+$maintenanceCommands = @('agents', 'attach', 'auth', 'auto-mode', 'doctor', 'gateway', 'install', 'kill', 'logs', 'mcp', 'plugin', 'plugins', 'project', 'remote-control', 'respawn', 'rm', 'self-update', 'setup-token', 'skills', 'stop', 'ultrareview', 'update', 'upgrade')
+$maintenancePositionalSeen = $false
 $maintenanceCommandDetected = $false
 for ($scanIndex = 0; $scanIndex -lt $forwardArguments.Count; $scanIndex++) {
     $scanArgument = [string] $forwardArguments[$scanIndex]
@@ -1565,19 +2338,23 @@ for ($scanIndex = 0; $scanIndex -lt $forwardArguments.Count; $scanIndex++) {
         $scanOption = $Matches[1]
         $scanValue = $Matches[2]
         $scanHasInlineValue = $true
+    } elseif (($scanArgument -match '^(-[drw])=?(.*)$') -and $Matches[2]) {
+        $scanOption = $Matches[1]
+        $scanValue = $Matches[2]
+        $scanHasInlineValue = $true
     }
-    if ($lookingForMaintenanceCommand) {
-        if ($scanOption -in $maintenanceCommands) {
-            $maintenanceCommandDetected = $true
-            $lookingForMaintenanceCommand = $false
-        } elseif (-not $scanArgument.StartsWith('-')) {
-            $lookingForMaintenanceCommand = $false
-        }
+    if ($scanOption -in $maintenanceGlobalOptions -or (-not $maintenancePositionalSeen -and $scanOption -in $maintenanceCommands)) {
+        $maintenanceCommandDetected = $true
+    }
+    if (-not $scanArgument.StartsWith('-')) {
+        $maintenancePositionalSeen = $true
     }
     $scanOptionValue = if ($scanHasInlineValue) { $scanValue } elseif ($scanIndex + 1 -lt $forwardArguments.Count -and $forwardArguments[$scanIndex + 1] -ne '--') { [string] $forwardArguments[$scanIndex + 1] } else { '' }
     if ($scanIndex -eq 0 -and $scanArgument -eq 'doctor') { $suppressResumeFooter = $true }
     if ($scanOption -in @('--print', '-p', '--help', '-h', '--version', '-v', '--bg', '--background')) { $suppressResumeFooter = $true }
+    if ($scanOption -in @('--bg', '--background')) { $backgroundLaunch = $true }
     if ($scanOption -eq '--no-session-persistence') { $noSessionPersistence = $true }
+    if ($scanOption -in @('--worktree', '-w')) { $skillBridgeGlobalOnly = $true }
     if ($scanOption -eq '--model') {
         $forwardedModelSpecified = $true
         $forwardedModel = $scanOptionValue
@@ -1623,6 +2400,9 @@ for ($scanIndex = 0; $scanIndex -lt $forwardArguments.Count; $scanIndex++) {
     }
     if (-not $scanHasInlineValue -and $scanOption -in $claudeRequiredValueOptions) {
         if ($scanIndex + 1 -lt $forwardArguments.Count -and $forwardArguments[$scanIndex + 1] -ne '--') { $scanIndex++ }
+    } elseif (-not $scanHasInlineValue -and $scanOption -in $claudeOptionalValueOptions -and
+        $scanIndex + 1 -lt $forwardArguments.Count -and -not ([string] $forwardArguments[$scanIndex + 1]).StartsWith('-')) {
+        $scanIndex++
     }
 }
 if ($maintenanceCommandDetected) {
@@ -1666,24 +2446,17 @@ if ($directChrome) {
     $injectSkills = $false
     if ($env:CLAUDEX_CHROME_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR = $env:CLAUDEX_CHROME_CONFIG_DIR }
     else { Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
-    Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
-    Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue
-    Remove-Item Env:CLAUDEX_CHATGPT_PLAN_LABEL -ErrorAction SilentlyContinue
-    foreach ($environmentName in @(
-        'CLAUDEX_PROXY_TOKEN', 'CLAUDEX_PROXY_URL', 'CLAUDEX_PROXY_CONFIG', 'CLAUDEX_PROXY_BIN',
-        'CLAUDEX_CODEX_AUTH_DIR', 'CLAUDEX_CONFIG_DIR', 'CLAUDE_CODE_USE_BEDROCK',
-        'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BEDROCK_BASE_URL',
-        'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_FOUNDRY_BASE_URL'
-    )) {
-        Remove-Item -LiteralPath "Env:$environmentName" -ErrorAction SilentlyContinue
-    }
-    foreach ($environmentName in $sessionEnvironmentNames | Where-Object {
-        $_ -like 'ANTHROPIC_DEFAULT_*' -or $_ -like 'CLAUDE_CODE_*MODEL*' -or $_ -eq 'CLAUDE_CODE_ALWAYS_ENABLE_EFFORT'
-    }) {
-        Remove-Item -LiteralPath "Env:$environmentName" -ErrorAction SilentlyContinue
-    }
+    Remove-ProcessEnvironmentVariables @($sessionEnvironmentNames | Where-Object {
+        $_ -notin @('BUN_OPTIONS', 'CLAUDE_CONFIG_DIR', 'CLAUDEX_CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD')
+    })
+    Remove-ProcessEnvironmentVariables $competingProviderEnvironmentNames
+    Remove-ProcessEnvironmentVariables @(
+        'CLAUDEX_MODEL_MODE', 'CLAUDEX_SESSION_MODE', 'CLAUDEX_INTERACTIVE_TUI',
+        'CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_NO_FLICKER', 'CLAUDE_CODE_ACCESSIBILITY'
+    )
     $forwardArguments.Insert(0, '--chrome')
 }
+if ($useProxy) { Remove-ProcessEnvironmentVariables $competingProviderEnvironmentNames }
 if ($useProxy) {
     $allowedProxyModelRoutes = @('gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'opus', 'fable', 'sonnet', 'haiku', 'opusplan')
     if ($forwardedModelSpecified -and $forwardedModel -notin $allowedProxyModelRoutes) {
@@ -1728,7 +2501,11 @@ function Set-ChatGptPlanLabel {
     # missing ones. Otherwise a repaired login or plan can remain hidden until
     # another command happens to rewrite the cache.
     if (-not $planLabel -and (Test-Path -LiteralPath $usageHelper -PathType Leaf)) {
-        try { & $usageHelper -RefreshCache *> $null } catch { }
+        try {
+            Invoke-WithoutPrivateManagedEnvironment -PreserveNames @('CLAUDEX_CONFIG_DIR', 'CLAUDEX_CODEX_AUTH_DIR') -Action {
+                & $usageHelper -RefreshCache *> $null
+            }
+        } catch { }
         $planLabel = Get-ChatGptPlanLabelFromCache
     }
     $env:CLAUDEX_CHATGPT_PLAN_LABEL = if ($planLabel) { $planLabel } else { 'ChatGPT' }
@@ -1840,8 +2617,12 @@ if ($injectSkills -and $skillBridgeMode -eq 'on') {
     Assert-SkillBridgeNode
     if (-not (Test-Path -LiteralPath $skillBridgeHelper -PathType Leaf)) { Fail 'skill bridge helper is missing; reinstall Claudex.' }
     try {
-        $skillBridgeOutput = (& node $skillBridgeHelper sync --project (Get-Location).Path | Out-String)
-        if ($LASTEXITCODE -ne 0) { throw 'skill bridge helper failed' }
+        $skillBridgeArguments = @($skillBridgeHelper, 'sync', '--project', (Get-Location).Path)
+        if ($skillBridgeGlobalOnly) { $skillBridgeArguments += '--global-only' }
+        $skillBridgeOutput = (Invoke-WithoutPrivateManagedEnvironment -PreserveNames @(
+            'CLAUDEX_CONFIG_DIR', 'CLAUDEX_CLAUDE_CONFIG_DIR', 'CLAUDEX_INSTRUCTION_BRIDGE'
+        ) -Action { & node @skillBridgeArguments } | Out-String)
+        if ($script:lastPrivateBoundaryExitCode -ne 0) { throw 'skill bridge helper failed' }
         $skillBridgeResult = $skillBridgeOutput | ConvertFrom-Json
         $skillBridgeAddDirs = @($skillBridgeResult.addDirs | Where-Object { $_ })
         $skillBridgePluginDirs = @($skillBridgeResult.pluginDirs | Where-Object { $_ })
@@ -2095,11 +2876,11 @@ try {
     $exitCode = $script:claudeProcessExitCode
     if ($rewriteResumeFooter) { Update-ResumeFooter $resumeMarker }
 } finally {
-    if ($authWatcher -and -not $authWatcher.HasExited) {
+    if (-not $backgroundLaunch -and $authWatcher -and -not $authWatcher.HasExited) {
         Stop-Process -Id $authWatcher.Id -Force -ErrorAction SilentlyContinue
         $authWatcher.WaitForExit(2000) | Out-Null
     }
-    if ($proxyWatcher -and -not $proxyWatcher.HasExited) {
+    if (-not $backgroundLaunch -and $proxyWatcher -and -not $proxyWatcher.HasExited) {
         Stop-Process -Id $proxyWatcher.Id -Force -ErrorAction SilentlyContinue
         $proxyWatcher.WaitForExit(2000) | Out-Null
     }

@@ -2,8 +2,41 @@
 set -euo pipefail
 
 readonly root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
-readonly bin_dir="${CLAUDEX_BIN_DIR:-$HOME/.local/bin}"
-readonly config_dir="${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}"
+if ! install_invocation_dir="$(pwd -P && printf '\037')"; then
+  printf '%s\n' 'install.sh: could not determine the absolute installer invocation directory' >&2
+  exit 1
+fi
+install_invocation_dir="${install_invocation_dir%$'\037'}"
+install_invocation_dir="${install_invocation_dir%$'\n'}"
+readonly install_invocation_dir
+absolute_install_directory() {
+  local input="$1" output_name="$2" rest component result="" index
+  local -a components=()
+  case "$input" in /*) ;; *) input="$install_invocation_dir/$input" ;; esac
+  rest=${input#/}
+  while :; do
+    if [[ "$rest" == */* ]]; then
+      component=${rest%%/*}
+      rest=${rest#*/}
+    else
+      component=$rest
+      rest=""
+    fi
+    case "$component" in
+      ''|.) ;;
+      ..)
+        if (( ${#components[@]} > 0 )); then unset "components[${#components[@]}-1]"; fi
+        ;;
+      *) components+=("$component") ;;
+    esac
+    [[ -n "$rest" ]] || break
+  done
+  for index in "${!components[@]}"; do result="$result/${components[$index]}"; done
+  [[ -n "$result" ]] || result=/
+  printf -v "$output_name" '%s' "$result"
+}
+bin_dir=""; absolute_install_directory "${CLAUDEX_BIN_DIR:-$HOME/.local/bin}" bin_dir; readonly bin_dir
+config_dir=""; absolute_install_directory "${CLAUDEX_CONFIG_DIR:-$HOME/.config/claudex}" config_dir; readonly config_dir
 readonly managed_bin_dir="$config_dir/bin"
 readonly managed_node_dir="$config_dir/node"
 readonly managed_proxy="$managed_bin_dir/cliproxyapi"
@@ -24,6 +57,10 @@ readonly proxy_version="7.2.80"
 readonly proxy_port="${CLAUDEX_PROXY_PORT:-8318}"
 readonly skip_deps="${CLAUDEX_SKIP_DEPENDENCY_INSTALL:-0}"
 readonly skip_service="${CLAUDEX_SKIP_SERVICE_START:-0}"
+package_managed_install=0
+if [[ -n "${CLAUDEX_PACKAGE_ROOT:-}" || "${CLAUDEX_INSTALL_METHOD:-}" =~ ^(homebrew|scoop|winget)$ ]]; then
+  package_managed_install=1
+fi
 
 if [[ -x "$managed_node_dir/bin/node" ]]; then export PATH="$managed_node_dir/bin:$PATH"; fi
 
@@ -72,6 +109,17 @@ usage() {
 fail() {
   printf 'install.sh: %s\n' "$*" >&2
   exit 1
+}
+
+protect_private_launcher_directory() {
+  local directory="$1" mode=""
+  mkdir -p "$directory"
+  if [[ "$(uname -s)" == Darwin ]]; then
+    chmod -N "$directory" || fail "direct/archive installs require a private launcher directory; could not remove inherited ACLs from $directory"
+  fi
+  chmod 700 "$directory" || fail "direct/archive installs require a private launcher directory; could not protect $directory"
+  mode=$(stat -f '%Lp' "$directory" 2>/dev/null || stat -c '%a' "$directory" 2>/dev/null || true)
+  [[ "$mode" == 700 ]] || fail "direct/archive installs require a private launcher directory; $directory remained mode ${mode:-unknown}"
 }
 
 while (( $# > 0 )); do
@@ -233,16 +281,17 @@ begin_install_transaction() {
   transaction_dir=$(mktemp -d "$config_dir/.install-transaction.XXXXXX")
   chmod 700 "$transaction_dir"
   mkdir -p "$transaction_dir/backup"
+  printf '%s\n' nul-v1 > "$transaction_dir/manifest-format"
   : > "$transaction_dir/manifest"
   for index in "${!transaction_targets[@]}"; do
     target=${transaction_targets[$index]}
     if [[ -e "$target" || -L "$target" ]]; then
       [[ -f "$target" && ! -L "$target" ]] || fail "managed install target is not a regular file: $target"
       cp -p "$target" "$transaction_dir/backup/$index"
-      printf '1\t%s\n' "$target" >> "$transaction_dir/manifest"
+      printf '1\0%s\0' "$target" >> "$transaction_dir/manifest"
       transaction_had_files=1
     else
-      printf '0\t%s\n' "$target" >> "$transaction_dir/manifest"
+      printf '0\0%s\0' "$target" >> "$transaction_dir/manifest"
     fi
   done
   local state_tmp="$transaction_dir/.state.tmp"
@@ -258,22 +307,56 @@ transaction_target_is_allowed() {
 }
 
 restore_install_transaction_dir() {
-  local source="$1" index=0 existed target restore_failed=0 line_count=0
+  local source="$1" index=0 existed target normalized_target extra="" restore_failed=0 line_count=0
+  local -a recorded_existence=() recorded_targets=()
   [[ -r "$source/manifest" ]] || return 1
-  while IFS=$'\t' read -r existed target; do
-    [[ "$existed" == 0 || "$existed" == 1 ]] || return 1
-    transaction_target_is_allowed "$target" || return 1
-    [[ "$target" == "${transaction_targets[$index]:-}" ]] || return 1
+  if [[ -r "$source/manifest-format" ]]; then
+    [[ "$(<"$source/manifest-format")" == nul-v1 ]] || return 1
+    exec 3< "$source/manifest"
+    for index in "${!transaction_targets[@]}"; do
+      existed=""; target=""
+      IFS= read -r -d '' existed <&3 || { exec 3<&-; return 1; }
+      IFS= read -r -d '' target <&3 || { exec 3<&-; return 1; }
+      [[ "$existed" == 0 || "$existed" == 1 ]] || { exec 3<&-; return 1; }
+      transaction_target_is_allowed "$target" || { exec 3<&-; return 1; }
+      [[ "$target" == "${transaction_targets[$index]}" ]] || { exec 3<&-; return 1; }
+      recorded_existence+=("$existed")
+      recorded_targets+=("$target")
+    done
+    # A complete manifest ends immediately after the final NUL. Reject both a
+    # further record and an unterminated trailing fragment before restoring.
+    if IFS= read -r -d '' extra <&3 || [[ -n "$extra" ]]; then exec 3<&-; return 1; fi
+    exec 3<&-
+  else
+    # Releases before the NUL journal used one tab-delimited record per line.
+    # Retain recovery for their ordinary paths while all newly written
+    # transactions use the path-safe format above.
+    while IFS=$'\t' read -r existed target; do
+      [[ "$existed" == 0 || "$existed" == 1 ]] || return 1
+      normalized_target=""
+      absolute_install_directory "$target" normalized_target
+      transaction_target_is_allowed "$normalized_target" || return 1
+      [[ "$normalized_target" == "${transaction_targets[$index]:-}" ]] || return 1
+      recorded_existence+=("$existed")
+      recorded_targets+=("$normalized_target")
+      index=$(( index + 1 ))
+    done < "$source/manifest"
+    (( index == ${#transaction_targets[@]} )) || return 1
+  fi
+  for index in "${!transaction_targets[@]}"; do
+    [[ "${recorded_existence[$index]}" != 1 || -f "$source/backup/$index" ]] || return 1
+  done
+  for index in "${!transaction_targets[@]}"; do
+    existed=${recorded_existence[$index]}
+    target=${recorded_targets[$index]}
     if [[ "$existed" == 1 ]]; then
-      [[ -f "$source/backup/$index" ]] || return 1
       mkdir -p "$(dirname "$target")" 2>/dev/null || restore_failed=1
       cp -p "$source/backup/$index" "$target" 2>/dev/null || restore_failed=1
     else
       rm -f "$target" 2>/dev/null || restore_failed=1
     fi
-    index=$(( index + 1 ))
     line_count=$(( line_count + 1 ))
-  done < "$source/manifest"
+  done
   (( line_count == ${#transaction_targets[@]} )) || return 1
   (( restore_failed == 0 )) || return 1
   rm -rf "$source"
@@ -412,7 +495,16 @@ install_proxy() {
   proxy_temp_dir=""
 }
 
-mkdir -p "$bin_dir" "$config_dir" "$managed_bin_dir" "$auth_dir"
+if (( package_managed_install )); then
+  # Package managers own their shim/package directories and must retain the
+  # directory policy needed for atomic upgrades and link management.
+  mkdir -p "$bin_dir"
+else
+  # A protected launcher file is still replaceable when its parent grants
+  # broad write/DeleteChild access. Direct/archive installs own this directory.
+  protect_private_launcher_directory "$bin_dir"
+fi
+mkdir -p "$config_dir" "$managed_bin_dir" "$auth_dir"
 chmod 700 "$config_dir" "$managed_bin_dir" "$auth_dir"
 acquire_install_lock
 trap cleanup EXIT

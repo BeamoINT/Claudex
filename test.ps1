@@ -36,6 +36,8 @@ try {
     [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T01:00:00Z","tokens":{"access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"codex-source-id","account_id":"account-test"}}', $utf8)
 
     if ($isWindowsPlatform) {
+        $savedLockTestMode = [Environment]::GetEnvironmentVariable('CLAUDEX_TEST_MODE', 'Process')
+        $env:CLAUDEX_TEST_MODE = '1'
         $fakeCurl = Join-Path $fakeBin 'curl.exe'
         Add-Type -TypeDefinition @'
 using System;
@@ -86,7 +88,15 @@ public static class ClaudexTestCurl
                 [IO.File]::WriteAllLines($env:FAKE_CLAUDE_ARGUMENT_LOG, [string[]] @($args))
             }
             if ($firstArgument -eq '--version') { Write-Output '2.1.210 (test)'; return }
-            if ($firstArgument -eq '--help') { Write-Output '--model --agents --append-system-prompt --permission-mode --settings --effort --add-dir --plugin-dir'; return }
+            if ($firstArgument -eq '--help') {
+                if ($env:FAKE_CLAUDE_HELP_PROSE_ONLY -eq '1') {
+                    Write-Output '  --model <model>  Model for this session'
+                    Write-Output '  --bare           Minimal mode; prose may mention --agents, --append-system-prompt, --permission-mode, --add-dir, or --plugin-dir'
+                } else {
+                    Write-Output '--model --agents --append-system-prompt --permission-mode --settings --effort --add-dir --plugin-dir'
+                }
+                return
+            }
             if ($firstArgument -eq 'auto-mode' -and $args.Count -gt 1 -and $args[1] -eq 'defaults') {
                 if ($env:FAKE_AUTO_MODE_DEFAULTS_FAIL -eq '1') { $global:LASTEXITCODE = 1; return }
                 if ($env:FAKE_AUTO_MODE_DEFAULT_VERSION -eq '2') {
@@ -96,7 +106,15 @@ public static class ClaudexTestCurl
                 }
                 return
             }
-            if ($firstArgument -eq 'update') { return }
+            if ($firstArgument -eq 'update') {
+                if ($env:FAKE_UPDATE_LOG) { Add-Content -LiteralPath $env:FAKE_UPDATE_LOG -Value $PID }
+                if ($env:FAKE_UPDATE_READY_FILE) { [IO.File]::WriteAllText($env:FAKE_UPDATE_READY_FILE, "ready`n", $utf8) }
+                if ($env:FAKE_UPDATE_WAIT_FILE) {
+                    while (-not (Test-Path -LiteralPath $env:FAKE_UPDATE_WAIT_FILE -PathType Leaf)) { Start-Sleep -Milliseconds 20 }
+                }
+                if ($env:FAKE_UPDATE_DONE_FILE) { [IO.File]::WriteAllText($env:FAKE_UPDATE_DONE_FILE, "done`n", $utf8) }
+                return
+            }
             if ($env:FAKE_CLAUDE_RESUME -eq '1') {
                 $projectKey = [regex]::Replace((Get-Location).Path, '[^A-Za-z0-9]', '-')
                 $sessionConfig = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
@@ -142,6 +160,15 @@ public static class ClaudexTestCurl
             Write-Output "PROXY_CONFIG=$env:CLAUDEX_PROXY_CONFIG"
             Write-Output "CODEX_AUTH_DIR=$env:CLAUDEX_CODEX_AUTH_DIR"
             Write-Output "PROVIDERS=$env:CLAUDE_CODE_USE_BEDROCK|$env:CLAUDE_CODE_USE_VERTEX|$env:CLAUDE_CODE_USE_FOUNDRY|$env:ANTHROPIC_BEDROCK_BASE_URL|$env:ANTHROPIC_VERTEX_BASE_URL|$env:ANTHROPIC_FOUNDRY_BASE_URL"
+            Write-Output "API_KEY=$env:ANTHROPIC_API_KEY"
+            Write-Output "OAUTH_TOKEN=$env:CLAUDE_CODE_OAUTH_TOKEN"
+            Write-Output "CUSTOM_HEADERS=$env:ANTHROPIC_CUSTOM_HEADERS"
+            Write-Output "ANTHROPIC_MODEL=$env:ANTHROPIC_MODEL"
+            Write-Output "CUSTOM_MODEL=$env:ANTHROPIC_CUSTOM_MODEL_OPTION"
+            Write-Output "OPUS_DESCRIPTION=$env:ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION"
+            Write-Output "OPUS_CAPABILITIES=$env:ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES"
+            Write-Output "CODEX_AUTH_FILE=$env:CLAUDEX_CODEX_AUTH_FILE"
+            Write-Output "CODEX_SOURCE_AUTH_FILE=$env:CLAUDEX_CODEX_SOURCE_AUTH_FILE"
             Write-Output "BUN=$env:BUN_OPTIONS"
             Write-Output "INTERACTIVE=$env:CLAUDEX_INTERACTIVE_TUI"
             Write-Output "MANAGED=$env:CLAUDEX_MANAGED_SESSION"
@@ -204,12 +231,32 @@ if "%1"=="app-server" (
   echo {"id":2,"result":{"rateLimits":{"limitId":"codex","limitName":"Codex","planType":"pro","primary":{"usedPercent":63,"windowDurationMins":10080,"resetsAt":1784705933}},"rateLimitsByLimitId":{}}}
   exit /b 0
 )
-if "%FAKE_CODEX_LOGGED_OUT%"=="1" exit /b 1
-if "%1"=="login" if "%2"=="status" exit /b 0
-if "%1"=="logout" if not "%FAKE_CODEX_LOGOUT_EXIT%"=="" exit /b %FAKE_CODEX_LOGOUT_EXIT%
-if "%1"=="logout" exit /b 0
 if "%1"=="-c" (
-  if not "%FAKE_CODEX_LOGIN_LOG%"=="" echo login>>"%FAKE_CODEX_LOGIN_LOG%"
+  if not "%FAKE_CODEX_AUTH_ARGS_LOG%"=="" echo file:%~3 %~4>>"%FAKE_CODEX_AUTH_ARGS_LOG%"
+  if "%3"=="login" if "%4"=="status" (
+    if not "%FAKE_CODEX_FILE_STATUS%"=="" exit /b %FAKE_CODEX_FILE_STATUS%
+    if "%FAKE_CODEX_LOGGED_OUT%"=="1" exit /b 1
+    exit /b 0
+  )
+  if "%3"=="logout" (
+    if not "%FAKE_CODEX_FILE_LOGOUT%"=="" exit /b %FAKE_CODEX_FILE_LOGOUT%
+    if not "%FAKE_CODEX_LOGOUT_EXIT%"=="" exit /b %FAKE_CODEX_LOGOUT_EXIT%
+    exit /b 0
+  )
+  if "%3"=="login" (
+    if not "%FAKE_CODEX_LOGIN_LOG%"=="" echo login>>"%FAKE_CODEX_LOGIN_LOG%"
+    exit /b 0
+  )
+)
+if not "%FAKE_CODEX_AUTH_ARGS_LOG%"=="" echo default:%~1 %~2>>"%FAKE_CODEX_AUTH_ARGS_LOG%"
+if "%FAKE_CODEX_LOGGED_OUT%"=="1" exit /b 1
+if "%1"=="login" if "%2"=="status" (
+  if not "%FAKE_CODEX_DEFAULT_STATUS%"=="" exit /b %FAKE_CODEX_DEFAULT_STATUS%
+  exit /b 0
+)
+if "%1"=="logout" (
+  if not "%FAKE_CODEX_DEFAULT_LOGOUT%"=="" exit /b %FAKE_CODEX_DEFAULT_LOGOUT%
+  if not "%FAKE_CODEX_LOGOUT_EXIT%"=="" exit /b %FAKE_CODEX_LOGOUT_EXIT%
   exit /b 0
 )
 exit /b 2
@@ -298,11 +345,40 @@ if ($arg1 -eq '--help') {
     Write-Output '--model --agents --append-system-prompt --permission-mode --settings --effort --add-dir --plugin-dir'
     exit 0
 }
+if ($arg1 -eq 'agents' -and $arg2 -eq '--json') {
+    if ($env:FAKE_CLAUDE_AGENT_REGISTRY_LOG) {
+        Add-Content -LiteralPath $env:FAKE_CLAUDE_AGENT_REGISTRY_LOG -Value ("BASE=$env:ANTHROPIC_BASE_URL " +
+            "AUTH=$env:ANTHROPIC_AUTH_TOKEN PROXY=$env:CLAUDEX_PROXY_TOKEN URL=$env:CLAUDEX_PROXY_URL " +
+            "CONFIG=$env:CLAUDEX_PROXY_CONFIG BIN=$env:CLAUDEX_PROXY_BIN BEDROCK=$env:CLAUDE_CODE_USE_BEDROCK " +
+            "MANTLE=$env:ANTHROPIC_BEDROCK_MANTLE_BASE_URL VERTEX=$env:ANTHROPIC_VERTEX_PROJECT_ID " +
+            "FOUNDRY=$env:ANTHROPIC_FOUNDRY_API_KEY CUSTOM=$env:ANTHROPIC_CUSTOM_HEADERS " +
+            "MODEL=$env:ANTHROPIC_MODEL DEFAULT=$env:ANTHROPIC_DEFAULT_OPUS_MODEL " +
+            "SUBAGENT=$env:CLAUDE_CODE_SUBAGENT_MODEL CODEX=$env:CLAUDEX_CODEX_AUTH_FILE")
+    }
+    if ($env:FAKE_CLAUDE_AGENT_REGISTRY_FILE -and (Test-Path -LiteralPath $env:FAKE_CLAUDE_AGENT_REGISTRY_FILE -PathType Leaf)) {
+        Get-Content -LiteralPath $env:FAKE_CLAUDE_AGENT_REGISTRY_FILE -Raw
+    } else { Write-Output '[]' }
+    exit 0
+}
 if ($arg1 -eq 'auto-mode' -and $arg2 -eq 'defaults') {
     Write-Output '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Data Exfiltration: default hard deny"]}'
     exit 0
 }
-if ($arg1 -eq 'update') { exit 0 }
+if ($arg1 -eq 'update') {
+    if ($env:FAKE_UPDATE_LOG) { Add-Content -LiteralPath $env:FAKE_UPDATE_LOG -Value $PID }
+    if ($env:FAKE_UPDATE_ENV_LOG) {
+        Add-Content -LiteralPath $env:FAKE_UPDATE_ENV_LOG -Value "PROXY_TOKEN=$env:CLAUDEX_PROXY_TOKEN"
+        Add-Content -LiteralPath $env:FAKE_UPDATE_ENV_LOG -Value "AUTH_TOKEN=$env:ANTHROPIC_AUTH_TOKEN"
+        Add-Content -LiteralPath $env:FAKE_UPDATE_ENV_LOG -Value "MANAGED=$env:CLAUDEX_MANAGED_SESSION"
+        Add-Content -LiteralPath $env:FAKE_UPDATE_ENV_LOG -Value "SUBAGENT=$env:CLAUDE_CODE_SUBAGENT_MODEL"
+    }
+    if ($env:FAKE_UPDATE_READY_FILE) { [IO.File]::WriteAllText($env:FAKE_UPDATE_READY_FILE, "ready`n") }
+    if ($env:FAKE_UPDATE_WAIT_FILE) {
+        while (-not (Test-Path -LiteralPath $env:FAKE_UPDATE_WAIT_FILE -PathType Leaf)) { Start-Sleep -Milliseconds 20 }
+    }
+    if ($env:FAKE_UPDATE_DONE_FILE) { [IO.File]::WriteAllText($env:FAKE_UPDATE_DONE_FILE, "done`n") }
+    exit 0
+}
 if ($env:FAKE_CLAUDE_MAINTENANCE_LOG) {
     $arg4 = if ($arguments.Count -gt 3) { $arguments[3] } else { '' }
     [IO.File]::WriteAllLines($env:FAKE_CLAUDE_MAINTENANCE_LOG, [string[]] @(
@@ -376,13 +452,20 @@ printf 'ARGS='; printf ' %s' "$@"; printf '\n'
 '@, $utf8)
         [IO.File]::WriteAllText((Join-Path $fakeBin 'codex'), @'
 #!/bin/sh
-if [ "${FAKE_CODEX_LOGGED_OUT:-0}" = 1 ]; then exit 1; fi
-if [ "${1:-}" = login ] && [ "${2:-}" = status ]; then exit 0; fi
-if [ "${1:-}" = logout ]; then exit "${FAKE_CODEX_LOGOUT_EXIT:-0}"; fi
 if [ "${1:-}" = -c ]; then
-  [ -z "${FAKE_CODEX_LOGIN_LOG:-}" ] || printf '%s\n' login >> "$FAKE_CODEX_LOGIN_LOG"
-  exit 0
+  shift 2
+  [ -z "${FAKE_CODEX_AUTH_ARGS_LOG:-}" ] || printf 'file:%s\n' "$*" >> "$FAKE_CODEX_AUTH_ARGS_LOG"
+  if [ "${1:-}" = login ] && [ "${2:-}" = status ]; then exit "${FAKE_CODEX_FILE_STATUS:-0}"; fi
+  if [ "${1:-}" = logout ]; then exit "${FAKE_CODEX_FILE_LOGOUT:-${FAKE_CODEX_LOGOUT_EXIT:-0}}"; fi
+  if [ "${1:-}" = login ]; then
+    [ -z "${FAKE_CODEX_LOGIN_LOG:-}" ] || printf '%s\n' login >> "$FAKE_CODEX_LOGIN_LOG"
+    exit 0
+  fi
 fi
+[ -z "${FAKE_CODEX_AUTH_ARGS_LOG:-}" ] || printf 'default:%s\n' "$*" >> "$FAKE_CODEX_AUTH_ARGS_LOG"
+if [ "${FAKE_CODEX_LOGGED_OUT:-0}" = 1 ]; then exit 1; fi
+if [ "${1:-}" = login ] && [ "${2:-}" = status ]; then exit "${FAKE_CODEX_DEFAULT_STATUS:-0}"; fi
+if [ "${1:-}" = logout ]; then exit "${FAKE_CODEX_DEFAULT_LOGOUT:-${FAKE_CODEX_LOGOUT_EXIT:-0}}"; fi
 exit 2
 '@, $utf8)
         [IO.File]::WriteAllText((Join-Path $fakeBin 'cliproxyapi'), @'
@@ -406,6 +489,48 @@ exit 1
     Remove-Item Env:CLAUDEX_MOUSE_POINTER_SHAPE -ErrorAction SilentlyContinue
 
     if ($isWindowsPlatform) {
+        $privateHelper = Join-Path $temporary 'private-environment-helper.ps1'
+        $privateHelperLog = Join-Path $temporary 'private-environment-helper.log'
+        [IO.File]::WriteAllText($privateHelper, @'
+param([switch] $Status)
+[IO.File]::WriteAllLines($env:FAKE_PRIVATE_HELPER_LOG, @(
+    "PROXY_TOKEN=$env:CLAUDEX_PROXY_TOKEN",
+    "PROXY_URL=$env:CLAUDEX_PROXY_URL",
+    "AUTH_TOKEN=$env:ANTHROPIC_AUTH_TOKEN",
+    "API_KEY=$env:ANTHROPIC_API_KEY",
+    "BEDROCK=$env:CLAUDE_CODE_USE_BEDROCK"
+))
+exit 43
+'@, $utf8)
+        $privateHelperEnvironment = @{}
+        foreach ($privateHelperName in @(
+            'CLAUDEX_CONFIG_DIR', 'CLAUDEX_SELF_UPDATE_HELPER', 'FAKE_PRIVATE_HELPER_LOG', 'CLAUDEX_PROXY_TOKEN',
+            'CLAUDEX_PROXY_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_BEDROCK'
+        )) {
+            $privateHelperEnvironment[$privateHelperName] = [Environment]::GetEnvironmentVariable($privateHelperName, 'Process')
+        }
+        try {
+            $env:CLAUDEX_CONFIG_DIR = $testConfig
+            $env:CLAUDEX_SELF_UPDATE_HELPER = $privateHelper
+            $env:FAKE_PRIVATE_HELPER_LOG = $privateHelperLog
+            $env:CLAUDEX_PROXY_TOKEN = 'parent-proxy-secret'
+            $env:CLAUDEX_PROXY_URL = 'https://private-proxy.invalid'
+            $env:ANTHROPIC_AUTH_TOKEN = 'parent-provider-secret'
+            $env:ANTHROPIC_API_KEY = 'parent-api-secret'
+            $env:CLAUDE_CODE_USE_BEDROCK = '1'
+            $privateHelperShell = (Get-Process -Id $PID).Path
+            & $privateHelperShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') self-update --status 2>&1 | Out-Null
+            Assert-True ($LASTEXITCODE -eq 43) 'private helper boundary preserves self-update exit code'
+            $privateHelperLines = @([IO.File]::ReadAllLines($privateHelperLog))
+            Assert-True (($privateHelperLines -join '|') -eq 'PROXY_TOKEN=|PROXY_URL=|AUTH_TOKEN=|API_KEY=|BEDROCK=') 'self-update helper receives no managed proxy or provider credentials'
+        } finally {
+            foreach ($privateHelperName in $privateHelperEnvironment.Keys) {
+                $privateHelperValue = $privateHelperEnvironment[$privateHelperName]
+                if ($null -eq $privateHelperValue) { Remove-Item -LiteralPath "Env:$privateHelperName" -ErrorAction SilentlyContinue }
+                else { [Environment]::SetEnvironmentVariable($privateHelperName, [string] $privateHelperValue, 'Process') }
+            }
+        }
+
         $oldNodeBin = Join-Path $temporary 'old-node-bin'
         [IO.Directory]::CreateDirectory($oldNodeBin) | Out-Null
         [IO.File]::WriteAllText((Join-Path $oldNodeBin 'node.cmd'), "@echo off`r`nif `"%~1`"==`"--version`" (`r`n  echo v16.20.2`r`n  exit /b 0`r`n)`r`nexit /b 99`r`n", $utf8)
@@ -464,6 +589,17 @@ exit 1
             $verboseMaintenanceLines = @([IO.File]::ReadAllLines($maintenanceLog))
             Assert-True ($verboseMaintenanceLines[0] -eq 'ARG1=--verbose' -and $verboseMaintenanceLines[1] -eq 'ARG2=mcp' -and $verboseMaintenanceLines[2] -eq 'ARG3=list' -and $verboseMaintenanceLines[3] -eq 'ARG4=') 'global options preserve exact maintenance argv'
             Assert-True ($verboseMaintenanceLines[4] -eq 'BUN=--preload C:/user/preload.cjs' -and $verboseMaintenanceLines[5] -eq 'BASE=' -and $verboseMaintenanceLines[6] -eq 'MANAGED=') 'global option maintenance launch receives no proxy or managed session injection'
+
+            foreach ($maintenanceArguments in @(
+                [string[]] @('--debug=api', 'mcp', '--help'),
+                [string[]] @('literal-prompt', '--version')
+            )) {
+                Remove-Item -LiteralPath $maintenanceLog -Force -ErrorAction SilentlyContinue
+                & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') @maintenanceArguments 2>&1 | Out-Null
+                Assert-True ($LASTEXITCODE -eq 0) "valid global maintenance option bypasses missing configuration: $($maintenanceArguments -join ' ')"
+                $globalMaintenanceLines = @([IO.File]::ReadAllLines($maintenanceLog))
+                Assert-True ($globalMaintenanceLines[0] -eq "ARG1=$($maintenanceArguments[0])" -and $globalMaintenanceLines[1] -eq "ARG2=$($maintenanceArguments[1])") "valid global maintenance option preserves argv: $($maintenanceArguments -join ' ')"
+            }
         } finally {
             if ($null -eq $savedConfigDir) { Remove-Item Env:CLAUDEX_CONFIG_DIR -ErrorAction SilentlyContinue } else { $env:CLAUDEX_CONFIG_DIR = $savedConfigDir }
             if ($null -eq $savedSettingsFile) { Remove-Item Env:CLAUDEX_SETTINGS_FILE -ErrorAction SilentlyContinue } else { $env:CLAUDEX_SETTINGS_FILE = $savedSettingsFile }
@@ -532,6 +668,16 @@ exit 1
             Assert-True ($remoteLines[3] -eq 'BASE=' -and $remoteLines[4] -eq 'AUTH_TOKEN=' -and $remoteLines[5] -eq 'PROXY_TOKEN=') 'Remote Control forces a first-party provider boundary'
             Assert-True ($remoteLines[7] -eq 'BUN=--preload C:/user/native-preload.cjs') 'Remote Control preserves caller-owned native Bun options'
             Assert-True ($remoteLines[8] -eq 'PROVIDERS=|||||') 'Remote Control clears alternate provider selectors and base URLs'
+
+            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') remote-control 2>&1 | Out-Null
+            Assert-True ($LASTEXITCODE -eq 23) 'positional Remote Control route preserves the native Claude exit code'
+            $positionalRemoteLines = @([IO.File]::ReadAllLines($nativeClaudeLog))
+            Assert-True ($positionalRemoteLines[0] -eq 'ARG1=remote-control' -and $positionalRemoteLines[1] -eq 'ARG2=') 'positional Remote Control routes to native Claude unchanged'
+
+            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') -d hosted --remote-control=debug-session 2>&1 | Out-Null
+            Assert-True ($LASTEXITCODE -eq 23) 'optional debug value does not hide a later Remote Control route'
+            $debugRemoteLines = @([IO.File]::ReadAllLines($nativeClaudeLog))
+            Assert-True ($debugRemoteLines[0] -eq 'ARG1=-d' -and $debugRemoteLines[1] -eq 'ARG2=hosted' -and $debugRemoteLines[2] -eq 'ARG3=--remote-control=debug-session') 'debug plus Remote Control preserves exact argv'
 
             $env:FAKE_CLAUDE_NATIVE_EXIT = '19'
             & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') ultrareview review-target 2>&1 | Out-Null
@@ -639,7 +785,7 @@ switch ($Action) {
     Assert-True ($nativeClaudeOutput.Contains('INTERACTIVE=') -and -not $nativeClaudeOutput.Contains('INTERACTIVE=1')) 'native Claude route removes Claudex session state'
 
     $nativeUserSavedEnvironment = @{}
-    foreach ($nativeName in @('CLAUDEX_CLAUDE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CLAUDEX_PROXY_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'CLAUDE_CODE_AUTO_MODE_MODEL', 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD', 'CLAUDEX_MANAGED_SESSION', 'BUN_OPTIONS')) {
+    foreach ($nativeName in @('CLAUDEX_CLAUDE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CLAUDEX_PROXY_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS', 'ANTHROPIC_MODEL', 'ANTHROPIC_CUSTOM_MODEL_OPTION', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'CLAUDE_CODE_AUTO_MODE_MODEL', 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD', 'CLAUDEX_MANAGED_SESSION', 'BUN_OPTIONS')) {
         $nativeUserSavedEnvironment[$nativeName] = [Environment]::GetEnvironmentVariable($nativeName, 'Process')
     }
     try {
@@ -648,6 +794,11 @@ switch ($Action) {
         $env:CLAUDE_CONFIG_DIR = 'C:\user\claude-profile'
         $env:ANTHROPIC_BASE_URL = 'https://custom-provider.invalid'
         $env:ANTHROPIC_AUTH_TOKEN = 'custom-provider-secret'
+        $env:ANTHROPIC_API_KEY = 'native-api-key'
+        $env:CLAUDE_CODE_OAUTH_TOKEN = 'native-oauth-token'
+        $env:ANTHROPIC_CUSTOM_HEADERS = 'X-Native: preserved'
+        $env:ANTHROPIC_MODEL = 'claude-native'
+        $env:ANTHROPIC_CUSTOM_MODEL_OPTION = 'claude-native-custom'
         $env:CLAUDEX_PROXY_TOKEN = 'native-must-not-see-this'
         $env:ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-custom'
         $env:CLAUDE_CODE_AUTO_MODE_MODEL = 'custom-auto'
@@ -664,10 +815,12 @@ switch ($Action) {
     Assert-True ($nativeUserOutput.Contains('ADDITIONAL_DIR_MD=1')) 'native Claude route preserves user additional-directory instructions'
     Assert-True ($nativeUserOutput.Contains('BUN=--preload C:/user/native-preload.cjs')) 'native Claude route preserves user Bun options'
     Assert-True ($nativeUserOutput.Contains('BASE=https://custom-provider.invalid') -and $nativeUserOutput.Contains('AUTH_TOKEN=custom-provider-secret')) 'explicit native Claude route preserves caller-owned gateway settings'
+    Assert-True ($nativeUserOutput.Contains('API_KEY=native-api-key') -and $nativeUserOutput.Contains('OAUTH_TOKEN=native-oauth-token')) 'explicit native Claude route preserves caller-owned API and OAuth credentials'
+    Assert-True ($nativeUserOutput.Contains('CUSTOM_HEADERS=X-Native: preserved') -and $nativeUserOutput.Contains('ANTHROPIC_MODEL=claude-native') -and $nativeUserOutput.Contains('CUSTOM_MODEL=claude-native-custom')) 'explicit native Claude route preserves caller-owned custom routing'
     Assert-True ($nativeUserOutput.Contains('PROXY_TOKEN=') -and -not $nativeUserOutput.Contains('PROXY_TOKEN=native-must-not-see-this')) 'explicit native Claude route never exposes the Claudex proxy token'
 
     $hostedProviderEnvironment = @{}
-    foreach ($hostedProviderName in @('CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_FOUNDRY_BASE_URL')) {
+    foreach ($hostedProviderName in @('CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS', 'ANTHROPIC_MODEL', 'ANTHROPIC_CUSTOM_MODEL_OPTION', 'ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION', 'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES', 'CLAUDEX_CODEX_AUTH_FILE', 'CLAUDEX_CODEX_SOURCE_AUTH_FILE')) {
         $hostedProviderEnvironment[$hostedProviderName] = [Environment]::GetEnvironmentVariable($hostedProviderName, 'Process')
         [Environment]::SetEnvironmentVariable($hostedProviderName, 'caller-provider-setting', 'Process')
     }
@@ -682,6 +835,18 @@ switch ($Action) {
         }
     }
     Assert-True ($hostedProviderOutput.Contains('PROVIDERS=|||||')) 'hosted route clears alternate provider selectors and base URLs in the child'
+    Assert-True ($hostedProviderOutput.Contains('API_KEY=') -and -not $hostedProviderOutput.Contains('API_KEY=caller-provider-setting')) 'hosted route clears API key routing'
+    Assert-True ($hostedProviderOutput.Contains('OAUTH_TOKEN=') -and -not $hostedProviderOutput.Contains('OAUTH_TOKEN=caller-provider-setting')) 'hosted route clears long-lived OAuth routing'
+    Assert-True ($hostedProviderOutput.Contains('CUSTOM_HEADERS=') -and -not $hostedProviderOutput.Contains('CUSTOM_HEADERS=caller-provider-setting')) 'hosted route clears custom headers'
+    Assert-True ($hostedProviderOutput.Contains('ANTHROPIC_MODEL=') -and -not $hostedProviderOutput.Contains('ANTHROPIC_MODEL=caller-provider-setting')) 'hosted route clears direct model routing'
+    Assert-True ($hostedProviderOutput.Contains('CUSTOM_MODEL=') -and -not $hostedProviderOutput.Contains('CUSTOM_MODEL=caller-provider-setting')) 'hosted route clears custom model routing'
+    Assert-True ($hostedProviderOutput.Contains('OPUS_DESCRIPTION=') -and -not $hostedProviderOutput.Contains('OPUS_DESCRIPTION=caller-provider-setting')) 'hosted route clears managed model descriptions'
+    Assert-True ($hostedProviderOutput.Contains('OPUS_CAPABILITIES=') -and -not $hostedProviderOutput.Contains('OPUS_CAPABILITIES=caller-provider-setting')) 'hosted route clears managed model capabilities'
+    Assert-True ($hostedProviderOutput.Contains('CODEX_AUTH_FILE=') -and -not $hostedProviderOutput.Contains('CODEX_AUTH_FILE=caller-provider-setting')) 'hosted route clears managed Codex credential path'
+    Assert-True ($hostedProviderOutput.Contains('CODEX_SOURCE_AUTH_FILE=') -and -not $hostedProviderOutput.Contains('CODEX_SOURCE_AUTH_FILE=caller-provider-setting')) 'hosted route clears source Codex credential path'
+
+    $positionalRemoteOutput = (& (Join-Path $root 'claudex.ps1') remote-control | Out-String)
+    Assert-True ($positionalRemoteOutput.Contains('ARGS=remote-control')) 'positional Remote Control routes to native Claude unchanged'
 
     $instructionBridgeProbe = Join-Path $temporary 'instruction-bridge-probe.cjs'
     $instructionBridgeLog = Join-Path $temporary 'instruction-bridge-probe.log'
@@ -783,6 +948,82 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
     Assert-True (-not $output.Contains('"claudex-builder"')) 'legacy builder alias removed'
     Assert-True (-not $output.Contains('"claudex-fast"')) 'legacy fast alias removed'
     Assert-True (-not $output.Contains('"model":"gpt-5.6-sol"')) 'leader model is not delegated'
+
+    $managedProviderEnvironment = @{}
+    foreach ($managedProviderName in @('CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS', 'ANTHROPIC_MODEL', 'ANTHROPIC_CUSTOM_MODEL_OPTION')) {
+        $managedProviderEnvironment[$managedProviderName] = [Environment]::GetEnvironmentVariable($managedProviderName, 'Process')
+        [Environment]::SetEnvironmentVariable($managedProviderName, 'caller-provider-setting', 'Process')
+    }
+    try {
+        $managedProviderOutput = (& (Join-Path $root 'claudex.ps1') managed-provider-boundary-test | Out-String)
+    } finally {
+        foreach ($managedProviderName in $managedProviderEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($managedProviderName, $managedProviderEnvironment[$managedProviderName], 'Process')
+        }
+    }
+    Assert-True ($managedProviderOutput.Contains('PROVIDERS=|||||')) 'managed proxy route clears alternate provider selectors and URLs'
+    Assert-True ($managedProviderOutput.Contains('API_KEY=') -and -not $managedProviderOutput.Contains('API_KEY=caller-provider-setting')) 'managed proxy route clears API key routing'
+    Assert-True ($managedProviderOutput.Contains('OAUTH_TOKEN=') -and -not $managedProviderOutput.Contains('OAUTH_TOKEN=caller-provider-setting')) 'managed proxy route clears OAuth routing'
+    Assert-True ($managedProviderOutput.Contains('CUSTOM_HEADERS=') -and -not $managedProviderOutput.Contains('CUSTOM_HEADERS=caller-provider-setting')) 'managed proxy route clears custom headers'
+    Assert-True ($managedProviderOutput.Contains('ANTHROPIC_MODEL=') -and -not $managedProviderOutput.Contains('ANTHROPIC_MODEL=caller-provider-setting')) 'managed proxy route clears direct model routing'
+    Assert-True ($managedProviderOutput.Contains('CUSTOM_MODEL=') -and -not $managedProviderOutput.Contains('CUSTOM_MODEL=caller-provider-setting')) 'managed proxy route clears custom model routing'
+
+    $trailingBareOutput = (& (Join-Path $root 'claudex.ps1') literal-prompt --bare --print | Out-String)
+    Assert-True (-not $trailingBareOutput.Contains('--agents') -and -not $trailingBareOutput.Contains('--append-system-prompt') -and -not $trailingBareOutput.Contains('--permission-mode auto')) 'valid globals after a positional prompt still control managed injection'
+    $trailingModelOutput = (& (Join-Path $root 'claudex.ps1') literal-prompt --model gpt-5.6-luna | Out-String)
+    Assert-True ($trailingModelOutput.Contains('literal-prompt --model gpt-5.6-luna') -and -not $trailingModelOutput.Contains('--model gpt-5.6-sol literal-prompt --model gpt-5.6-luna')) 'model after a positional prompt suppresses default injection'
+
+    try {
+        $env:FAKE_CLAUDE_HELP_PROSE_ONLY = '1'
+        $env:CLAUDEX_SKILL_BRIDGE = 'off'
+        $proseCapabilityOutput = (& (Join-Path $root 'claudex.ps1') --print prose-capability-test | Out-String)
+    } finally {
+        Remove-Item Env:FAKE_CLAUDE_HELP_PROSE_ONLY -ErrorAction SilentlyContinue
+        Remove-Item Env:CLAUDEX_SKILL_BRIDGE -ErrorAction SilentlyContinue
+    }
+    Assert-True (-not $proseCapabilityOutput.Contains('--agents') -and -not $proseCapabilityOutput.Contains('--append-system-prompt') -and -not $proseCapabilityOutput.Contains('--permission-mode auto') -and -not $proseCapabilityOutput.Contains('--add-dir')) 'capability detection ignores option names mentioned only in prose'
+
+    foreach ($optionalForm in @('--debug=api', '-dapi', '--from-pr=42', '--prompt-suggestions=false', '--resume=session-123', '-rsession-123', '--worktree=audit', '-waudit')) {
+        $optionalFormOutput = (& (Join-Path $root 'claudex.ps1') $optionalForm --bare --print optional-form-test | Out-String)
+        Assert-True ($optionalFormOutput.Contains($optionalForm) -and -not $optionalFormOutput.Contains('--agents') -and -not $optionalFormOutput.Contains('--permission-mode auto')) "inline or attached optional value form is classified: $optionalForm"
+    }
+
+    $worktreeBridgeProbe = Join-Path $temporary 'worktree-skill-bridge.cjs'
+    $worktreeBridgeLog = Join-Path $temporary 'worktree-skill-bridge.log'
+    [IO.File]::WriteAllText($worktreeBridgeProbe, @'
+'use strict';
+require('fs').writeFileSync(process.env.CLAUDEX_TEST_WORKTREE_BRIDGE_LOG, process.argv.slice(2).join('\n') + '\n');
+process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions: [], warnings: [] }) + '\n');
+'@, $utf8)
+    $savedWorktreeBridgeHelper = [Environment]::GetEnvironmentVariable('CLAUDEX_SKILL_BRIDGE_HELPER', 'Process')
+    $savedWorktreeBridgeLog = [Environment]::GetEnvironmentVariable('CLAUDEX_TEST_WORKTREE_BRIDGE_LOG', 'Process')
+    try {
+        $env:CLAUDEX_SKILL_BRIDGE_HELPER = $worktreeBridgeProbe
+        $env:CLAUDEX_TEST_WORKTREE_BRIDGE_LOG = $worktreeBridgeLog
+        $worktreeForms = @(
+            @{ Arguments = [string[]] @('--worktree') },
+            @{ Arguments = [string[]] @('--worktree', 'audit-tree') },
+            @{ Arguments = [string[]] @('--worktree=audit-tree') },
+            @{ Arguments = [string[]] @('-w') },
+            @{ Arguments = [string[]] @('-w', 'audit-tree') },
+            @{ Arguments = [string[]] @('-w=audit-tree') },
+            @{ Arguments = [string[]] @('-waudit-tree') }
+        )
+        foreach ($worktreeForm in $worktreeForms) {
+            $worktreeArguments = [string[]] $worktreeForm.Arguments
+            & (Join-Path $root 'claudex.ps1') @worktreeArguments --print worktree-bridge-test | Out-Null
+            $worktreeBridgeArguments = @([IO.File]::ReadAllLines($worktreeBridgeLog))
+            Assert-True ($worktreeBridgeArguments -contains '--global-only') "worktree form selects global-only bridge mode: $($worktreeArguments -join ' ')"
+        }
+        & (Join-Path $root 'claudex.ps1') --print ordinary-bridge-test | Out-Null
+        $ordinaryBridgeArguments = @([IO.File]::ReadAllLines($worktreeBridgeLog))
+        Assert-True ($ordinaryBridgeArguments -notcontains '--global-only') 'ordinary launch remains project aware'
+    } finally {
+        if ($null -eq $savedWorktreeBridgeHelper) { Remove-Item Env:CLAUDEX_SKILL_BRIDGE_HELPER -ErrorAction SilentlyContinue }
+        else { $env:CLAUDEX_SKILL_BRIDGE_HELPER = $savedWorktreeBridgeHelper }
+        if ($null -eq $savedWorktreeBridgeLog) { Remove-Item Env:CLAUDEX_TEST_WORKTREE_BRIDGE_LOG -ErrorAction SilentlyContinue }
+        else { $env:CLAUDEX_TEST_WORKTREE_BRIDGE_LOG = $savedWorktreeBridgeLog }
+    }
 
     $savedUserSubagentModel = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_SUBAGENT_MODEL', 'Process')
     try {
@@ -1002,6 +1243,12 @@ process.stdout.write(JSON.stringify({
         $watcherOutputLog = Join-Path $temporary 'windows-proxy-watcher-output.log'
         $watcherStandardErrorLog = Join-Path $temporary 'windows-proxy-watcher-standard-error.log'
         $env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE = $watcherErrorLog
+        $proxyLockPublishReady = Join-Path $temporary 'windows-proxy-lock-published'
+        $proxyLockPublishContinue = Join-Path $temporary 'windows-proxy-lock-continue'
+        $env:CLAUDEX_TEST_LOCK_MATCH = 'proxy-start.lock'
+        $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY = $proxyLockPublishReady
+        $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE = $proxyLockPublishContinue
+        $env:CLAUDEX_TEST_FORCE_HARDLINK_FAILURE = '1'
         $stateHashBefore = (Get-FileHash -LiteralPath (Join-Path $testConfig '.claude.json') -Algorithm SHA256).Hash
         $shellPath = (Get-Process -Id $PID).Path
         $parentCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('Start-Sleep -Seconds 15'))
@@ -1012,6 +1259,14 @@ process.stdout.write(JSON.stringify({
         $watcher = Start-Process -FilePath $shellPath -ArgumentList $watchArguments -PassThru -WindowStyle Hidden `
             -RedirectStandardOutput $watcherOutputLog -RedirectStandardError $watcherStandardErrorLog
         try {
+            foreach ($attempt in 1..100) {
+                if (Test-Path -LiteralPath $proxyLockPublishReady -PathType Leaf) { break }
+                Start-Sleep -Milliseconds 100
+            }
+            Assert-True (Test-Path -LiteralPath $proxyLockPublishReady -PathType Leaf) 'Windows proxy publishes its filesystem lock before startup'
+            Assert-True (Test-Path -LiteralPath (Join-Path $testConfig 'run\proxy-start.lock\generation') -PathType Leaf) 'Windows proxy fallback publishes a generation marker'
+            Assert-True (Test-Path -LiteralPath (Join-Path $testConfig 'run\proxy-start.lock\owner') -PathType Leaf) 'Windows proxy fallback publishes an owner record'
+            [IO.File]::WriteAllText($proxyLockPublishContinue, "continue`n", $utf8)
             foreach ($attempt in 1..100) {
                 if ((Test-Path -LiteralPath $proxyReady -PathType Leaf) -and
                     (Test-Path -LiteralPath $proxyStartLog -PathType Leaf)) { break }
@@ -1044,6 +1299,9 @@ process.stdout.write(JSON.stringify({
             Remove-Item Env:FAKE_PROXY_START_LOG -ErrorAction SilentlyContinue
             Remove-Item Env:CLAUDEX_TEST_PROXY_REACHABLE_FILE -ErrorAction SilentlyContinue
             Remove-Item Env:CLAUDEX_TEST_PROXY_WATCH_ERROR_FILE -ErrorAction SilentlyContinue
+            foreach ($name in @('CLAUDEX_TEST_LOCK_MATCH', 'CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY', 'CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE', 'CLAUDEX_TEST_FORCE_HARDLINK_FAILURE')) {
+                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+            }
         }
 
         $neverReadyFile = Join-Path $temporary 'windows-proxy-never-ready'
@@ -1153,6 +1411,15 @@ process.stdout.write(JSON.stringify({
     Assert-True ($watchLoopSource.Contains('Ensure-Proxy') -and -not $watchLoopSource.Contains('Ensure-ProxyForLaunch')) 'background proxy recovery remains prompt-free'
     Assert-True ($windowsLauncher.Contains("if (`$routeCandidate -eq 'opusplan') { @('gpt-5.6-sol', 'gpt-5.6-terra') }")) 'Solplan health checks its two concrete backing models'
     Assert-True ($windowsLauncher.Contains('ConvertTo-WindowsCommandLineArgument')) 'Windows native argv serializer is installed'
+    Assert-True ($windowsLauncher.Contains('function Acquire-OwnedLock')) 'Windows state and update locks publish owned generations'
+    Assert-True ($windowsLauncher.Contains("Join-Path (Join-Path `$configDir 'run') 'auto-mode.lock'")) 'Windows auto-mode composition is serialized'
+    Assert-True ($windowsLauncher.Contains("'-ClaudexInternalClaudeUpdate'")) 'Windows Claude updater uses a detached narrow worker mode'
+    $claudeUpdateStart = $windowsLauncher.IndexOf('function Start-ClaudeUpdateCheck')
+    $claudexUpdateStart = $windowsLauncher.IndexOf('function Start-ClaudexUpdateCheck', $claudeUpdateStart)
+    $claudeUpdateSource = $windowsLauncher.Substring($claudeUpdateStart, $claudexUpdateStart - $claudeUpdateStart)
+    Assert-True ($claudeUpdateSource.Contains('Start-Process') -and -not $claudeUpdateSource.Contains('Start-Job')) 'Windows Claude updater survives the launcher host'
+    $internalTuple = (& (Join-Path $root 'claudex.ps1') -ClaudexInternalClaudeUpdate user-command user-directory 60 user-sentinel | Out-String)
+    Assert-True ($internalTuple.Contains('-ClaudexInternalClaudeUpdate user-command user-directory 60 user-sentinel')) 'unauthenticated internal-looking argv is forwarded unchanged'
     Assert-True ($windowsLauncher.Contains('CopyToAsync([IO.Stream]::Null)')) 'Windows background watchers drain output without contaminating the Claude TUI'
     Assert-True ($windowsLauncher.Contains('if ($null -eq $Value -or $Value.Length -eq 0) { return ''""'' }')) 'Windows native argv serializer preserves empty arguments'
     Assert-True ($windowsLauncher.Contains('if ($character -eq ''"'')')) 'Windows native argv serializer escapes embedded quotes'
@@ -1188,13 +1455,464 @@ process.stdout.write(JSON.stringify({
     Assert-True ($windowsLauncher.Contains("CLAUDEX_ALLOW_REMOTE_PROXY=1")) 'Windows launcher documents the explicit trusted HTTPS proxy opt-in'
     Assert-True ($windowsLauncher.Contains('Stop-RecordedManagedProxy')) 'Windows launcher limits authentication recovery to recorded managed proxies'
     Assert-True ($windowsLauncher.Contains('Stop-NewlySpawnedProxy')) 'Windows launcher cleans up a proxy that never becomes ready'
+    $proxyEnsureStart = $windowsLauncher.IndexOf('function Ensure-Proxy(')
+    $proxyEnsureEnd = $windowsLauncher.IndexOf('function Test-InteractiveCodexLoginAllowed', $proxyEnsureStart)
+    $proxyEnsureSource = $windowsLauncher.Substring($proxyEnsureStart, $proxyEnsureEnd - $proxyEnsureStart)
+    Assert-True ($proxyEnsureSource.Contains('Acquire-OwnedLock $lockDir 1 0 120')) 'Windows proxy startup always acquires the filesystem generation lock'
+    Assert-True ($proxyEnsureSource.Contains('Release-OwnedLock $lockDir $lockNonce')) 'Windows proxy startup releases only its owned generation'
+    Assert-True (-not $proxyEnsureSource.Contains('Remove-Item -LiteralPath $lockDir -Recurse')) 'Windows proxy startup never recursively deletes a competing lock generation'
+
+    if ($isWindowsPlatform) {
+        $runDirectory = Join-Path $testConfig 'run'
+        $modelLock = Join-Path $runDirectory 'model-display.lock'
+        Remove-Item -LiteralPath $modelLock -Recurse -Force -ErrorAction SilentlyContinue
+        [IO.Directory]::CreateDirectory($modelLock) | Out-Null
+        $testProcessIdentity = [string] (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks
+        [IO.File]::WriteAllText((Join-Path $modelLock 'owner'), "pid=$PID`nidentity=$testProcessIdentity`nnonce=live-windows-state-owner`n", $utf8)
+        (Get-Item -LiteralPath $modelLock).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
+        $shellPath = (Get-Process -Id $PID).Path
+        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+        Assert-True (([IO.File]::ReadAllText((Join-Path $modelLock 'owner'))).Contains('nonce=live-windows-state-owner')) 'Windows old live state owner is not stolen'
+        Remove-Item -LiteralPath $modelLock -Recurse -Force
+
+        $savedForcedLockSkipUpdate = $env:CLAUDEX_SKIP_AUTO_UPDATE
+        $env:CLAUDEX_SKIP_AUTO_UPDATE = '1'
+        $env:CLAUDEX_TEST_FORCE_HARDLINK_FAILURE = '1'
+        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+        Remove-Item Env:CLAUDEX_TEST_FORCE_HARDLINK_FAILURE
+        if ($null -eq $savedForcedLockSkipUpdate) { Remove-Item Env:CLAUDEX_SKIP_AUTO_UPDATE -ErrorAction SilentlyContinue } else { $env:CLAUDEX_SKIP_AUTO_UPDATE = $savedForcedLockSkipUpdate }
+        Assert-True (-not (Test-Path -LiteralPath $modelLock)) 'Windows exclusive-create fallback publishes and releases state locks'
+        Assert-True (@(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows exclusive-create fallback leaves no partial generation'
+
+        $env:CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE = '1'
+        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+        Remove-Item Env:CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE
+        Assert-True (-not (Test-Path -LiteralPath $modelLock)) 'Windows publication failure removes its incomplete lock'
+        Assert-True (@(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows publication failure leaves no quarantine barrier'
+
+        $lockLauncherArguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            ('"' + (Join-Path $root 'claudex.ps1') + '"'), '--version')
+        $env:CLAUDEX_TEST_LOCK_MATCH = 'model-display.lock'
+        $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY = Join-Path $temporary 'windows-aba-a-mkdir'
+        $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE = Join-Path $temporary 'windows-aba-a-continue'
+        $abaA = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
+        Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE')
+        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-aba-a-mkdir')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        (Get-Item -LiteralPath $modelLock).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
+        $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY = Join-Path $temporary 'windows-aba-b-publish'
+        $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE = Join-Path $temporary 'windows-aba-b-continue'
+        $abaB = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
+        Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE')
+        for ($attempt = 0; $attempt -lt 300 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-aba-b-publish')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        $abaBNonce = ([IO.File]::ReadAllLines((Join-Path $modelLock 'owner')) | Where-Object { $_.StartsWith('nonce=') })[0]
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-a-continue'), "continue`n", $utf8)
+        Assert-True ($abaA.WaitForExit(10000)) 'Windows publication ABA creator exits'
+        Assert-True (([IO.File]::ReadAllText((Join-Path $modelLock 'owner'))).Contains($abaBNonce)) 'Windows paused creator cannot overwrite B generation'
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-b-continue'), "continue`n", $utf8)
+        Assert-True ($abaB.WaitForExit(10000)) 'Windows publication ABA owner exits'
+
+        Remove-Item -LiteralPath $modelLock -Recurse -Force -ErrorAction SilentlyContinue
+        [IO.Directory]::CreateDirectory($modelLock) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $modelLock 'generation'), "x`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $modelLock 'owner'), "pid=2147483000`nidentity=dead`nnonce=x`n", $utf8)
+        (Get-Item -LiteralPath $modelLock).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
+        $env:CLAUDEX_TEST_LOCK_BEFORE_RENAME_READY = Join-Path $temporary 'windows-aba-x-before'
+        $env:CLAUDEX_TEST_LOCK_BEFORE_RENAME_CONTINUE = Join-Path $temporary 'windows-aba-x-before-continue'
+        $env:CLAUDEX_TEST_LOCK_AFTER_RENAME_READY = Join-Path $temporary 'windows-aba-x-after'
+        $env:CLAUDEX_TEST_LOCK_AFTER_RENAME_CONTINUE = Join-Path $temporary 'windows-aba-x-after-continue'
+        $abaX = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
+        foreach ($name in @('CLAUDEX_TEST_LOCK_BEFORE_RENAME_READY', 'CLAUDEX_TEST_LOCK_BEFORE_RENAME_CONTINUE', 'CLAUDEX_TEST_LOCK_AFTER_RENAME_READY', 'CLAUDEX_TEST_LOCK_AFTER_RENAME_CONTINUE')) { Remove-Item -LiteralPath "Env:$name" }
+        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-aba-x-before')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY = Join-Path $temporary 'windows-aba-y-publish'
+        $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE = Join-Path $temporary 'windows-aba-y-continue'
+        $abaY = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
+        Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE')
+        for ($attempt = 0; $attempt -lt 300 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-aba-y-publish')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        $abaYNonce = ([IO.File]::ReadAllLines((Join-Path $modelLock 'owner')) | Where-Object { $_.StartsWith('nonce=') })[0]
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-x-before-continue'), "continue`n", $utf8)
+        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-aba-x-after')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        $abaZ = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
+        Assert-True ($abaZ.WaitForExit(10000)) 'Windows Z contender finishes behind quarantine barrier'
+        Assert-True (([IO.File]::ReadAllText((Join-Path $modelLock 'owner'))).Contains($abaYNonce)) 'Windows rename ABA restores Y and excludes Z'
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-x-after-continue'), "continue`n", $utf8)
+        Assert-True ($abaX.WaitForExit(10000)) 'Windows stale remover exits'
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-y-continue'), "continue`n", $utf8)
+        Assert-True ($abaY.WaitForExit(10000)) 'Windows Y owner exits'
+
+        Remove-Item -LiteralPath $modelLock -Recurse -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+        [IO.Directory]::CreateDirectory($modelLock) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $modelLock 'generation'), "x-self`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $modelLock 'owner'), "pid=2147483000`nidentity=dead`nnonce=x-self`n", $utf8)
+        (Get-Item -LiteralPath $modelLock).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
+        $env:CLAUDEX_TEST_LOCK_BEFORE_RENAME_READY = Join-Path $temporary 'windows-self-x-before'
+        $env:CLAUDEX_TEST_LOCK_BEFORE_RENAME_CONTINUE = Join-Path $temporary 'windows-self-x-before-continue'
+        $env:CLAUDEX_TEST_LOCK_AFTER_RENAME_READY = Join-Path $temporary 'windows-self-x-after'
+        $env:CLAUDEX_TEST_LOCK_AFTER_RENAME_CONTINUE = Join-Path $temporary 'windows-self-x-after-continue'
+        $selfX = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
+        foreach ($name in @('CLAUDEX_TEST_LOCK_BEFORE_RENAME_READY', 'CLAUDEX_TEST_LOCK_BEFORE_RENAME_CONTINUE', 'CLAUDEX_TEST_LOCK_AFTER_RENAME_READY', 'CLAUDEX_TEST_LOCK_AFTER_RENAME_CONTINUE')) { Remove-Item -LiteralPath "Env:$name" }
+        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-self-x-before')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY = Join-Path $temporary 'windows-self-y-publish'
+        $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE = Join-Path $temporary 'windows-self-y-continue'
+        $env:CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE = Join-Path $temporary 'windows-self-y-recovered'
+        $selfY = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
+        Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE', 'Env:CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE')
+        for ($attempt = 0; $attempt -lt 300 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-self-y-publish')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-self-x-before-continue'), "continue`n", $utf8)
+        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-self-x-after')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-self-y-continue'), "continue`n", $utf8)
+        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-self-y-recovered')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Assert-True (Test-Path -LiteralPath (Join-Path $temporary 'windows-self-y-recovered')) 'Windows owner restores its own moved generation'
+        Assert-True ($selfY.WaitForExit(10000)) 'Windows recovered owner exits without lock timeout'
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-self-x-after-continue'), "continue`n", $utf8)
+        Assert-True ($selfX.WaitForExit(10000)) 'Windows paused remover exits after owner recovery'
+        Assert-True (-not (Test-Path -LiteralPath $modelLock) -and @(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows self recovery leaves no lock generation'
+
+        $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY = Join-Path $temporary 'windows-legacy-a-mkdir'
+        $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE = Join-Path $temporary 'windows-legacy-a-continue'
+        $legacyA = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
+        Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE')
+        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-a-mkdir')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Assert-True (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-a-mkdir')) 'Windows mixed-version creator pauses before publication'
+        Move-Item -LiteralPath $modelLock -Destination (Join-Path $temporary 'windows-legacy-a-empty')
+        [IO.Directory]::CreateDirectory($modelLock) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $modelLock 'owner-pid'), "$PID old-token`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-legacy-a-continue'), "continue`n", $utf8)
+        Assert-True ($legacyA.WaitForExit(10000)) 'Windows mixed-version creator withdraws'
+        Assert-True (([IO.File]::ReadAllText((Join-Path $modelLock 'owner-pid')).Trim() -eq "$PID old-token") -and
+            -not (Test-Path -LiteralPath (Join-Path $modelLock 'owner')) -and
+            -not (Test-Path -LiteralPath (Join-Path $modelLock 'generation'))) 'Windows prior-format replacement survives exact'
+        Remove-Item -LiteralPath $modelLock, (Join-Path $temporary 'windows-legacy-a-empty') -Recurse -Force
+
+        $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY = Join-Path $temporary 'windows-legacy-zero-mkdir'
+        $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE = Join-Path $temporary 'windows-legacy-zero-continue'
+        $legacyZero = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
+        Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE')
+        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-zero-mkdir')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Assert-True (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-zero-mkdir')) 'Windows zero-length owner-pid creator pauses before publication'
+        Move-Item -LiteralPath $modelLock -Destination (Join-Path $temporary 'windows-legacy-zero-created')
+        [IO.Directory]::CreateDirectory($modelLock) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $modelLock 'owner-pid'), '', $utf8)
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-legacy-zero-continue'), "continue`n", $utf8)
+        Assert-True ($legacyZero.WaitForExit(10000)) 'Windows zero-length owner-pid creator withdraws'
+        Assert-True ((Test-Path -LiteralPath (Join-Path $modelLock 'owner-pid') -PathType Leaf) -and
+            (Get-Item -LiteralPath (Join-Path $modelLock 'owner-pid')).Length -eq 0 -and
+            -not (Test-Path -LiteralPath (Join-Path $modelLock 'owner')) -and
+            -not (Test-Path -LiteralPath (Join-Path $modelLock 'generation'))) 'Windows zero-length owner-pid survives structured publication'
+        Remove-Item -LiteralPath $modelLock, (Join-Path $temporary 'windows-legacy-zero-created') -Recurse -Force
+
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-legacy-absent-after-continue'), "continue`n", $utf8)
+        $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY = Join-Path $temporary 'windows-legacy-absent-mkdir'
+        $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE = Join-Path $temporary 'windows-legacy-absent-continue'
+        $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY = Join-Path $temporary 'windows-legacy-absent-entered'
+        $env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE = Join-Path $temporary 'windows-legacy-absent-after-continue'
+        $env:CLAUDEX_TEST_LOCK_PRESERVE_FILE = Join-Path $temporary 'windows-legacy-absent-path-moved'
+        $legacyAbsent = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
+        Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE',
+            'Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE', 'Env:CLAUDEX_TEST_LOCK_PRESERVE_FILE')
+        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-absent-mkdir')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Assert-True (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-absent-mkdir')) 'Windows absent owner-pid creator pauses before replacement'
+        Move-Item -LiteralPath $modelLock -Destination (Join-Path $temporary 'windows-legacy-absent-created')
+        [IO.Directory]::CreateDirectory($modelLock) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-legacy-absent-continue'), "continue`n", $utf8)
+        Assert-True ($legacyAbsent.WaitForExit(10000)) 'Windows creator withdraws from empty replacement directory'
+        Assert-True ((Test-Path -LiteralPath $modelLock -PathType Container) -and
+            -not (Test-Path -LiteralPath (Join-Path $modelLock 'owner-pid')) -and
+            -not (Test-Path -LiteralPath (Join-Path $modelLock 'owner')) -and
+            -not (Test-Path -LiteralPath (Join-Path $modelLock 'generation')) -and
+            -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-absent-entered')) -and
+            -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-legacy-absent-path-moved'))) 'Windows file identity rejects an empty replacement without moving its path'
+        [IO.File]::WriteAllText((Join-Path $modelLock 'owner-pid'), "$PID old-token`n", $utf8)
+        Assert-True ([IO.File]::ReadAllText((Join-Path $modelLock 'owner-pid')).Trim() -eq "$PID old-token") 'Windows prior-format creator can finish after structured creator withdraws'
+        Remove-Item -LiteralPath $modelLock, (Join-Path $temporary 'windows-legacy-absent-created') -Recurse -Force
+
+        $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY = Join-Path $temporary 'windows-unknown-owner-mkdir'
+        $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE = Join-Path $temporary 'windows-unknown-owner-continue'
+        $unknownOwner = Start-Process -FilePath $shellPath -ArgumentList $lockLauncherArguments -PassThru -WindowStyle Hidden
+        Remove-Item -LiteralPath @('Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY', 'Env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE')
+        for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $temporary 'windows-unknown-owner-mkdir')); $attempt++) { Start-Sleep -Milliseconds 20 }
+        Assert-True (Test-Path -LiteralPath (Join-Path $temporary 'windows-unknown-owner-mkdir')) 'Windows future-format owner creator pauses before publication'
+        Move-Item -LiteralPath $modelLock -Destination (Join-Path $temporary 'windows-unknown-owner-created')
+        [IO.Directory]::CreateDirectory($modelLock) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $modelLock 'owner.json'), "future-owner`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $temporary 'windows-unknown-owner-continue'), "continue`n", $utf8)
+        Assert-True ($unknownOwner.WaitForExit(10000)) 'Windows future-format owner creator withdraws'
+        Assert-True (([IO.File]::ReadAllText((Join-Path $modelLock 'owner.json')).Trim() -eq 'future-owner') -and
+            -not (Test-Path -LiteralPath (Join-Path $modelLock 'owner')) -and
+            -not (Test-Path -LiteralPath (Join-Path $modelLock 'generation'))) 'Windows future-format owner survives structured publication'
+        Remove-Item -LiteralPath $modelLock, (Join-Path $temporary 'windows-unknown-owner-created') -Recurse -Force
+
+        $mixedBarrier = $modelLock + '.quarantine.mixed'
+        [IO.Directory]::CreateDirectory($mixedBarrier) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $mixedBarrier 'generation'), "injected-generation`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $mixedBarrier 'owner'), "pid=2147483000`nidentity=dead`nnonce=injected-generation`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $mixedBarrier 'owner-pid'), '', $utf8)
+        (Get-Item -LiteralPath $mixedBarrier).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
+        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+        Assert-True ((Test-Path -LiteralPath (Join-Path $modelLock 'owner-pid') -PathType Leaf) -and
+            (Get-Item -LiteralPath (Join-Path $modelLock 'owner-pid')).Length -eq 0 -and
+            -not (Test-Path -LiteralPath (Join-Path $modelLock 'owner')) -and
+            -not (Test-Path -LiteralPath (Join-Path $modelLock 'generation'))) 'Windows mixed legacy barrier restores owner and removes injected generation'
+        Remove-Item -LiteralPath $modelLock -Recurse -Force
+
+        $mixedDeadBarrier = $modelLock + '.quarantine.mixed-dead'
+        [IO.Directory]::CreateDirectory($mixedDeadBarrier) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $mixedDeadBarrier 'generation'), "injected-live`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $mixedDeadBarrier 'owner'), "pid=$PID`nidentity=`nnonce=injected-live`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $mixedDeadBarrier 'owner-pid'), "2147483000 old-token`n", $utf8)
+        (Get-Item -LiteralPath $mixedDeadBarrier).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
+        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+        Assert-True (-not (Test-Path -LiteralPath $modelLock) -and
+            @(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows dead legacy barrier ignores and removes live structured injection after grace'
+
+        [IO.Directory]::CreateDirectory($modelLock) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $modelLock 'generation'), "injected-live`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $modelLock 'owner'), "pid=$PID`nidentity=`nnonce=injected-live`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $modelLock 'owner-pid'), "2147483000 old-token`n", $utf8)
+        (Get-Item -LiteralPath $modelLock).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
+        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+        Assert-True (-not (Test-Path -LiteralPath $modelLock) -and
+            @(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows dead canonical legacy owner ignores and removes live structured injection after grace'
+        Remove-Item Env:CLAUDEX_TEST_LOCK_MATCH -ErrorAction SilentlyContinue
+
+        $updateDirectory = Join-Path $testConfig 'update'
+        Remove-Item -LiteralPath $updateDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        $updateLog = Join-Path $temporary 'windows-detached-update.log'
+        $updateEnvironmentLog = Join-Path $temporary 'windows-detached-update-env.log'
+        $updateReady = Join-Path $temporary 'windows-detached-update-ready'
+        $updateRelease = Join-Path $temporary 'windows-detached-update-release'
+        $updateDone = Join-Path $temporary 'windows-detached-update-done'
+        $updateAttempt = Join-Path $temporary 'windows-detached-update-attempt'
+        $savedSkipUpdate = $env:CLAUDEX_SKIP_AUTO_UPDATE
+        $savedProxyToken = $env:CLAUDEX_PROXY_TOKEN
+        $savedAuthToken = $env:ANTHROPIC_AUTH_TOKEN
+        $savedSubagentModel = $env:CLAUDE_CODE_SUBAGENT_MODEL
+        try {
+            $env:CLAUDEX_SKIP_AUTO_UPDATE = '0'
+            $env:CLAUDEX_PROXY_TOKEN = 'must-not-leak'
+            $env:ANTHROPIC_AUTH_TOKEN = 'must-not-leak'
+            $env:CLAUDE_CODE_SUBAGENT_MODEL = 'must-not-leak'
+            $env:FAKE_UPDATE_LOG = $updateLog
+            $env:FAKE_UPDATE_ENV_LOG = $updateEnvironmentLog
+            $env:FAKE_UPDATE_READY_FILE = $updateReady
+            $env:FAKE_UPDATE_WAIT_FILE = $updateRelease
+            $env:FAKE_UPDATE_DONE_FILE = $updateDone
+            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+            for ($attempt = 0; $attempt -lt 200 -and
+                (-not (Test-Path -LiteralPath $updateReady -PathType Leaf) -or
+                 -not (Test-Path -LiteralPath (Join-Path $updateDirectory 'lock\owner') -PathType Leaf)); $attempt++) {
+                Start-Sleep -Milliseconds 20
+            }
+            Assert-True (Test-Path -LiteralPath $updateReady -PathType Leaf) 'Windows detached Claude updater outlives launcher host'
+            (Get-Item -LiteralPath (Join-Path $updateDirectory 'lock')).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
+            $env:CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE = $updateAttempt
+            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+            for ($attempt = 0; $attempt -lt 200 -and
+                (-not (Test-Path -LiteralPath $updateAttempt) -or
+                 -not ([IO.File]::ReadAllText($updateAttempt).Contains('blocked '))); $attempt++) { Start-Sleep -Milliseconds 20 }
+            Assert-True ([IO.File]::ReadAllText($updateAttempt).Contains('blocked ')) 'Windows live owner contender reaches a deterministic blocked result'
+            Remove-Item Env:CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE
+            Assert-True (@(Get-Content -LiteralPath $updateLog).Count -eq 1) 'Windows old live update owner is not stolen'
+            [IO.File]::WriteAllText($updateRelease, "release`n", $utf8)
+            for ($attempt = 0; $attempt -lt 200 -and
+                (-not (Test-Path -LiteralPath $updateDone -PathType Leaf) -or
+                 -not (Test-Path -LiteralPath (Join-Path $updateDirectory 'last-success') -PathType Leaf)); $attempt++) {
+                Start-Sleep -Milliseconds 20
+            }
+            Assert-True (Test-Path -LiteralPath $updateDone -PathType Leaf) 'Windows detached Claude updater completes after launcher exit'
+            $updateEnvironment = [IO.File]::ReadAllText($updateEnvironmentLog)
+            Assert-True ($updateEnvironment.Contains("PROXY_TOKEN=`r`n") -or $updateEnvironment.Contains("PROXY_TOKEN=`n")) 'Windows updater does not inherit proxy token'
+            Assert-True ($updateEnvironment.Contains("AUTH_TOKEN=`r`n") -or $updateEnvironment.Contains("AUTH_TOKEN=`n")) 'Windows updater does not inherit provider token'
+            Assert-True ($updateEnvironment.Contains("SUBAGENT=`r`n") -or $updateEnvironment.Contains("SUBAGENT=`n")) 'Windows updater does not inherit subagent routing'
+
+            Remove-Item -LiteralPath $updateDirectory -Recurse -Force
+            Remove-Item -LiteralPath $updateLog -Force -ErrorAction SilentlyContinue
+            [IO.Directory]::CreateDirectory((Join-Path $updateDirectory 'lock')) | Out-Null
+            $legacyAttempt = Join-Path $temporary 'windows-legacy-update-attempt'
+            $env:CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE = $legacyAttempt
+            Remove-Item -LiteralPath @('Env:FAKE_UPDATE_WAIT_FILE', 'Env:FAKE_UPDATE_READY_FILE', 'Env:FAKE_UPDATE_DONE_FILE') -ErrorAction SilentlyContinue
+            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+            for ($attempt = 0; $attempt -lt 200 -and
+                (-not (Test-Path -LiteralPath $legacyAttempt) -or
+                 -not ([IO.File]::ReadAllText($legacyAttempt).Contains('blocked '))); $attempt++) { Start-Sleep -Milliseconds 20 }
+            Assert-True ([IO.File]::ReadAllText($legacyAttempt).Contains('blocked ')) 'Windows recent legacy ownerless update lock blocks a duplicate worker'
+            Assert-True (Test-Path -LiteralPath (Join-Path $updateDirectory 'lock') -PathType Container) 'Windows legacy ownerless lock is preserved for the transition hour'
+            Assert-True (-not (Test-Path -LiteralPath $updateLog)) 'Windows legacy ownerless lock prevents duplicate update execution'
+            Remove-Item Env:CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE
+
+            Remove-Item -LiteralPath $updateDirectory -Recurse -Force
+            Remove-Item -LiteralPath $updateLog, $updateReady, $updateRelease, $updateDone -Force -ErrorAction SilentlyContinue
+            [IO.Directory]::CreateDirectory((Join-Path $updateDirectory 'lock')) | Out-Null
+            [IO.File]::WriteAllText((Join-Path $updateDirectory 'lock\owner'), "pid=2147483000`nidentity=dead`nnonce=dead-windows-update-owner`n", $utf8)
+            (Get-Item -LiteralPath (Join-Path $updateDirectory 'lock')).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
+            Remove-Item Env:FAKE_UPDATE_WAIT_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:FAKE_UPDATE_READY_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:FAKE_UPDATE_DONE_FILE -ErrorAction SilentlyContinue
+            & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+            for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $updateDirectory 'last-success') -PathType Leaf); $attempt++) {
+                Start-Sleep -Milliseconds 20
+            }
+            Assert-True (Test-Path -LiteralPath (Join-Path $updateDirectory 'last-success') -PathType Leaf) 'Windows dead update owner is reclaimed'
+        } finally {
+            foreach ($name in @('FAKE_UPDATE_LOG', 'FAKE_UPDATE_ENV_LOG', 'FAKE_UPDATE_READY_FILE', 'FAKE_UPDATE_WAIT_FILE', 'FAKE_UPDATE_DONE_FILE', 'CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE')) {
+                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+            }
+            if ($null -eq $savedSkipUpdate) { Remove-Item Env:CLAUDEX_SKIP_AUTO_UPDATE -ErrorAction SilentlyContinue } else { $env:CLAUDEX_SKIP_AUTO_UPDATE = $savedSkipUpdate }
+            if ($null -eq $savedProxyToken) { Remove-Item Env:CLAUDEX_PROXY_TOKEN -ErrorAction SilentlyContinue } else { $env:CLAUDEX_PROXY_TOKEN = $savedProxyToken }
+            if ($null -eq $savedAuthToken) { Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue } else { $env:ANTHROPIC_AUTH_TOKEN = $savedAuthToken }
+            if ($null -eq $savedSubagentModel) { Remove-Item Env:CLAUDE_CODE_SUBAGENT_MODEL -ErrorAction SilentlyContinue } else { $env:CLAUDE_CODE_SUBAGENT_MODEL = $savedSubagentModel }
+            if ($null -eq $savedLockTestMode) { Remove-Item Env:CLAUDEX_TEST_MODE -ErrorAction SilentlyContinue } else { $env:CLAUDEX_TEST_MODE = $savedLockTestMode }
+            Remove-Item -LiteralPath $updateDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 
     Remove-Item -LiteralPath $resumeCapture -Force
     $env:FAKE_CLAUDE_RESUME = '1'
     $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
     $env:CLAUDEX_TEST_RESUME_CAPTURE_FILE = $resumeCapture
-    & (Join-Path $root 'claudex.ps1') --bg background-resume-test | Out-Null
+    $env:CLAUDEX_SKIP_AUTH_WATCHER = '1'
+    $env:CLAUDEX_SKIP_PROXY_WATCHER = '1'
+    try { & (Join-Path $root 'claudex.ps1') --bg background-resume-test | Out-Null }
+    finally {
+        Remove-Item Env:CLAUDEX_SKIP_AUTH_WATCHER -ErrorAction SilentlyContinue
+        Remove-Item Env:CLAUDEX_SKIP_PROXY_WATCHER -ErrorAction SilentlyContinue
+    }
     Assert-True (-not (Test-Path -LiteralPath $resumeCapture -PathType Leaf)) 'background launch does not claim a synchronous resume footer'
+
+    if ($isWindowsPlatform) {
+        $backgroundRegistry = Join-Path $temporary 'background-agent-registry.json'
+        $backgroundRegistryLog = Join-Path $temporary 'background-agent-registry.log'
+        $backgroundAuthPidFile = Join-Path $temporary 'background-auth-watcher.pid'
+        $backgroundProxyPidFile = Join-Path $temporary 'background-proxy-watcher.pid'
+        $backgroundAuthExit = Join-Path $temporary 'background-auth-watcher.exit'
+        $backgroundProxyExit = Join-Path $temporary 'background-proxy-watcher.exit'
+        $backgroundBridgeFile = Join-Path $testAuthDir 'codex-claudex-managed.json'
+        [IO.File]::WriteAllText($backgroundRegistry, '[{"id":"managed-bg-test","state":"working"}]', $utf8)
+        $env:CLAUDEX_TEST_MODE = '1'
+        $env:CLAUDEX_AUTH_WATCH_SECONDS = '1'
+        $env:FAKE_CLAUDE_AGENT_REGISTRY_FILE = $backgroundRegistry
+        $env:FAKE_CLAUDE_AGENT_REGISTRY_LOG = $backgroundRegistryLog
+        $env:CLAUDEX_TEST_AUTH_WATCH_PID_FILE = $backgroundAuthPidFile
+        $env:CLAUDEX_TEST_PROXY_WATCH_PID_FILE = $backgroundProxyPidFile
+        $env:CLAUDEX_TEST_AUTH_WATCH_EXIT_FILE = $backgroundAuthExit
+        $env:CLAUDEX_TEST_PROXY_WATCH_EXIT_FILE = $backgroundProxyExit
+        $backgroundAuthPid = 0
+        $backgroundProxyPid = 0
+        $reusedAuthWatcher = $null
+        $reusedProxyWatcher = $null
+        $registryPrivateEnvironment = @{}
+        $registryPrivateNames = @(
+            'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDEX_PROXY_TOKEN', 'CLAUDEX_PROXY_URL',
+            'CLAUDEX_PROXY_CONFIG', 'CLAUDEX_PROXY_BIN', 'CLAUDE_CODE_USE_BEDROCK',
+            'ANTHROPIC_BEDROCK_MANTLE_BASE_URL', 'ANTHROPIC_VERTEX_PROJECT_ID',
+            'ANTHROPIC_FOUNDRY_API_KEY', 'ANTHROPIC_CUSTOM_HEADERS', 'ANTHROPIC_MODEL',
+            'ANTHROPIC_DEFAULT_OPUS_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDEX_CODEX_AUTH_FILE'
+        )
+        try {
+            $backgroundLauncher = Start-Process -FilePath $shellPath -ArgumentList @(
+                '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                ('"' + (Join-Path $root 'claudex.ps1') + '"'), '--bg', 'background-lifecycle-test'
+            ) -PassThru
+            Assert-True ($backgroundLauncher.WaitForExit(15000)) 'Windows background launcher exits while detached watchers remain active'
+            Assert-True ($backgroundLauncher.ExitCode -eq 0) 'Windows background launcher returns after detaching Claude agent'
+            for ($attempt = 0; $attempt -lt 200; $attempt++) {
+                if ((Test-Path -LiteralPath $backgroundAuthPidFile -PathType Leaf) -and
+                    (Test-Path -LiteralPath $backgroundProxyPidFile -PathType Leaf) -and
+                    (Test-Path -LiteralPath $backgroundRegistryLog -PathType Leaf)) { break }
+                Start-Sleep -Milliseconds 50
+            }
+            Assert-True ((Test-Path -LiteralPath $backgroundAuthPidFile -PathType Leaf) -and
+                (Test-Path -LiteralPath $backgroundProxyPidFile -PathType Leaf) -and
+                (Test-Path -LiteralPath $backgroundRegistryLog -PathType Leaf)) 'Windows detached watchers query managed background registry'
+            $backgroundAuthPid = [int] [IO.File]::ReadAllText($backgroundAuthPidFile).Trim()
+            $backgroundProxyPid = [int] [IO.File]::ReadAllText($backgroundProxyPidFile).Trim()
+            Assert-True ($null -ne (Get-Process -Id $backgroundAuthPid -ErrorAction SilentlyContinue)) 'Windows detached auth watcher survives launcher exit'
+            Assert-True ($null -ne (Get-Process -Id $backgroundProxyPid -ErrorAction SilentlyContinue)) 'Windows detached proxy watcher survives launcher exit'
+            foreach ($line in @([IO.File]::ReadAllLines($backgroundRegistryLog))) {
+                Assert-True ($line -eq 'BASE= AUTH= PROXY= URL= CONFIG= BIN= BEDROCK= MANTLE= VERTEX= FOUNDRY= CUSTOM= MODEL= DEFAULT= SUBAGENT= CODEX=') 'Windows managed registry query scrubs every proxy, provider, model, and credential family'
+            }
+
+            [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"auth_mode":"chatgpt","tokens":{"access_token":"background-access","refresh_token":"background-refresh","account_id":"background-account"}}', $utf8)
+            $backgroundBridgeUpdated = $false
+            for ($attempt = 0; $attempt -lt 200; $attempt++) {
+                try {
+                    $backgroundBridge = Get-Content -LiteralPath $backgroundBridgeFile -Raw | ConvertFrom-Json
+                    if ([string] $backgroundBridge.account_id -eq 'background-account') { $backgroundBridgeUpdated = $true; break }
+                } catch { }
+                Start-Sleep -Milliseconds 50
+            }
+            Assert-True $backgroundBridgeUpdated 'Windows detached auth watcher synchronizes account changes'
+            [IO.File]::WriteAllText($backgroundRegistry, '{"sessions":[]}', $utf8)
+            Start-Sleep -Seconds 4
+            Assert-True ($null -ne (Get-Process -Id $backgroundAuthPid -ErrorAction SilentlyContinue)) 'Windows auth watcher retries an invalid registry root'
+            Assert-True ($null -ne (Get-Process -Id $backgroundProxyPid -ErrorAction SilentlyContinue)) 'Windows proxy watcher retries an invalid registry root'
+            Assert-True (-not (Test-Path -LiteralPath $backgroundAuthExit) -and
+                -not (Test-Path -LiteralPath $backgroundProxyExit)) 'Windows invalid registry root is not treated as empty'
+            [IO.File]::WriteAllText($backgroundRegistry, '[]', $utf8)
+            for ($attempt = 0; $attempt -lt 240; $attempt++) {
+                if ((Test-Path -LiteralPath $backgroundAuthExit -PathType Leaf) -and
+                    (Test-Path -LiteralPath $backgroundProxyExit -PathType Leaf)) { break }
+                Start-Sleep -Milliseconds 50
+            }
+            Assert-True ((Test-Path -LiteralPath $backgroundAuthExit -PathType Leaf) -and
+                (Test-Path -LiteralPath $backgroundProxyExit -PathType Leaf)) 'Windows detached watchers exit after registry is stably empty'
+
+            Remove-Item -LiteralPath $backgroundAuthExit, $backgroundProxyExit -Force -ErrorAction SilentlyContinue
+            foreach ($name in $registryPrivateNames) {
+                $registryPrivateEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            }
+            $env:ANTHROPIC_BASE_URL = 'https://registry-private.invalid'
+            $env:ANTHROPIC_AUTH_TOKEN = 'registry-auth-secret'
+            $env:CLAUDEX_PROXY_TOKEN = 'registry-proxy-secret'
+            $env:CLAUDEX_PROXY_URL = 'https://registry-proxy.invalid'
+            $env:CLAUDEX_PROXY_CONFIG = 'C:\registry-private\proxy.yaml'
+            $env:CLAUDEX_PROXY_BIN = 'C:\registry-private\proxy.exe'
+            $env:CLAUDE_CODE_USE_BEDROCK = '1'
+            $env:ANTHROPIC_BEDROCK_MANTLE_BASE_URL = 'https://registry-mantle.invalid'
+            $env:ANTHROPIC_VERTEX_PROJECT_ID = 'registry-vertex-project'
+            $env:ANTHROPIC_FOUNDRY_API_KEY = 'registry-foundry-secret'
+            $env:ANTHROPIC_CUSTOM_HEADERS = 'x-registry-secret: private'
+            $env:ANTHROPIC_MODEL = 'registry-private-model'
+            $env:ANTHROPIC_DEFAULT_OPUS_MODEL = 'registry-private-opus'
+            $env:CLAUDE_CODE_SUBAGENT_MODEL = 'registry-private-subagent'
+            $env:CLAUDEX_CODEX_AUTH_FILE = 'C:\registry-private\codex.json'
+            $reusedAuthWatcher = Start-Process -FilePath $shellPath -ArgumentList @(
+                '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                ('"' + (Join-Path $root 'codex-session.ps1') + '"'), 'watch',
+                '-ParentProcessId', [string] $PID, '-ParentProcessIdentity', '0', '-BackgroundWatch'
+            ) -PassThru
+            $reusedProxyWatcher = Start-Process -FilePath $shellPath -ArgumentList @(
+                '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                ('"' + (Join-Path $root 'claudex.ps1') + '"'),
+                '-ClaudexInternalProxyWatchParentProcessId', [string] $PID, '0', '1'
+            ) -PassThru
+            Assert-True ($reusedAuthWatcher.WaitForExit(10000) -and $reusedAuthWatcher.ExitCode -eq 0) 'Windows auth watcher rejects a live reused parent PID'
+            Assert-True ($reusedProxyWatcher.WaitForExit(10000) -and $reusedProxyWatcher.ExitCode -eq 0) 'Windows proxy watcher rejects a live reused parent PID'
+            Assert-True ((Test-Path -LiteralPath $backgroundAuthExit -PathType Leaf) -and
+                (Test-Path -LiteralPath $backgroundProxyExit -PathType Leaf)) 'Windows reused PID watcher exits are observable'
+            foreach ($line in @([IO.File]::ReadAllLines($backgroundRegistryLog))) {
+                Assert-True ($line -eq 'BASE= AUTH= PROXY= URL= CONFIG= BIN= BEDROCK= MANTLE= VERTEX= FOUNDRY= CUSTOM= MODEL= DEFAULT= SUBAGENT= CODEX=') 'Windows direct watcher registry query also scrubs inherited private families'
+            }
+        } finally {
+            foreach ($watcherToStop in @($reusedAuthWatcher, $reusedProxyWatcher)) {
+                if ($watcherToStop -and -not $watcherToStop.HasExited) { $watcherToStop.Kill() }
+            }
+            foreach ($pidToStop in @($backgroundAuthPid, $backgroundProxyPid)) {
+                if ($pidToStop -gt 0) { Stop-Process -Id $pidToStop -Force -ErrorAction SilentlyContinue }
+            }
+            foreach ($name in @(
+                'CLAUDEX_TEST_MODE', 'CLAUDEX_AUTH_WATCH_SECONDS', 'FAKE_CLAUDE_AGENT_REGISTRY_FILE',
+                'FAKE_CLAUDE_AGENT_REGISTRY_LOG', 'CLAUDEX_TEST_AUTH_WATCH_PID_FILE',
+                'CLAUDEX_TEST_PROXY_WATCH_PID_FILE', 'CLAUDEX_TEST_AUTH_WATCH_EXIT_FILE',
+                'CLAUDEX_TEST_PROXY_WATCH_EXIT_FILE'
+            )) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+            foreach ($name in $registryPrivateEnvironment.Keys) {
+                $value = $registryPrivateEnvironment[$name]
+                if ($null -eq $value) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+                else { [Environment]::SetEnvironmentVariable($name, [string] $value, 'Process') }
+            }
+        }
+    }
 
     $env:FAKE_CLAUDE_RESUME = '1'
     $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
@@ -1301,7 +2019,92 @@ process.stdout.write(JSON.stringify({
         Remove-Item Env:CLAUDEX_AUTH_WATCH_SECONDS -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDEX_AUTH_WATCH_READY_FILE -ErrorAction SilentlyContinue
     }
-    [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T03:00:00Z","tokens":{"access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"codex-source-id","account_id":"account-test"}}', $utf8)
+    $managedIdToken = 'eyJhbGciOiJub25lIn0.eyJlbWFpbCI6Im1hbmFnZWRAZXhhbXBsZS5jb20ifQ.sig'
+    [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), ('{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T03:00:00.123456Z","tokens":{"access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"' + $managedIdToken + '","account_id":"account-test"}}'), $utf8)
+    & (Join-Path $root 'codex-session.ps1') sync
+
+    # The file-backed Claudex session must remain usable when normal Codex is
+    # configured for the OS keyring. A bare status would fail this fixture.
+    $authArgsLog = Join-Path $temporary 'codex-auth-args.log'
+    $env:FAKE_CODEX_AUTH_ARGS_LOG = $authArgsLog
+    $env:FAKE_CODEX_DEFAULT_STATUS = '1'
+    $env:FAKE_CODEX_FILE_STATUS = '0'
+    try { & (Join-Path $root 'codex-session.ps1') status | Out-Null }
+    finally {
+        Remove-Item Env:FAKE_CODEX_AUTH_ARGS_LOG -ErrorAction SilentlyContinue
+        Remove-Item Env:FAKE_CODEX_DEFAULT_STATUS -ErrorAction SilentlyContinue
+        Remove-Item Env:FAKE_CODEX_FILE_STATUS -ErrorAction SilentlyContinue
+    }
+    $authArgs = [IO.File]::ReadAllText($authArgsLog).Trim()
+    Assert-True ($authArgs -eq 'file:login status') 'Codex status uses the Claudex file credential store'
+
+    # An existing same-token projection without identity metadata must be
+    # upgraded, and the projected email must support the documented selector.
+    [IO.File]::WriteAllText($bridgeAuthFile, ('{"type":"codex","access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"' + $managedIdToken + '","account_id":"account-test","last_refresh":"2026-07-15T03:00:00.123456Z","disabled":false,"expired":false}'), $utf8)
+    & (Join-Path $root 'codex-session.ps1') sync
+    $emailProjection = Get-Content -LiteralPath $bridgeAuthFile -Raw | ConvertFrom-Json
+    Assert-True ($emailProjection.email -eq 'managed@example.com') 'Codex ID-token email is projected into the managed credential'
+    $managedEmailSelection = (& (Join-Path $root 'usage-limit.ps1') -Account managed@example.com | Out-String)
+    Assert-True ($managedEmailSelection.Contains('Selected Codex usage account: managed@example.com')) 'managed Codex account can be selected by projected email'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $testConfig 'codex-usage-account')).Trim() -eq 'codex-claudex-managed.json') 'managed email selector persists the projected credential filename'
+    & (Join-Path $root 'usage-limit.ps1') -Account auto | Out-Null
+
+    $fractionalOlder = Join-Path $testAuthDir 'codex-frac-a.json'
+    $fractionalNewer = Join-Path $testAuthDir 'codex-frac-z.json'
+    [IO.File]::WriteAllText($fractionalOlder, '{"type":"codex","access_token":"fractional-older","account_id":"fractional-older","email":"fractional-older@example.com","last_refresh":"2026-07-15T02:00:00.900000Z"}', $utf8)
+    [IO.File]::WriteAllText($fractionalNewer, '{"type":"codex","access_token":"fractional-newer","account_id":"fractional-newer","email":"fractional-newer@example.com","last_refresh":"2026-07-15T04:00:00.100000Z"}', $utf8)
+    try {
+        $fractionalAccounts = (& (Join-Path $root 'usage-limit.ps1') -Accounts | Out-String)
+        Assert-True ($fractionalAccounts.IndexOf('fractional-newer@example.com') -lt $fractionalAccounts.IndexOf('managed@example.com')) 'Windows account ordering accepts current fractional RFC3339 timestamps'
+        Assert-True ($fractionalAccounts.IndexOf('managed@example.com') -lt $fractionalAccounts.IndexOf('fractional-older@example.com')) 'Windows fractional account ordering remains newest first'
+    } finally {
+        Remove-Item -LiteralPath $fractionalOlder, $fractionalNewer -Force -ErrorAction SilentlyContinue
+    }
+
+    # Destructive sync and logout paths share the successful publication lock.
+    # A stale invalid observation must preserve the active publisher's bridge,
+    # then re-read the repaired source after ownership transfers.
+    $sessionSyncLock = Join-Path $testAuthDir '.codex-session-sync.lock'
+    [IO.Directory]::CreateDirectory((Join-Path $testConfig 'usage-cache')) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\summary'), "preserved`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $testConfig 'codex-usage-account'), "codex-claudex-managed.json`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"auth_mode":"chatgpt","tokens":{"access_token":123,"refresh_token":"invalid","account_id":"account-test"}}', $utf8)
+    [IO.Directory]::CreateDirectory($sessionSyncLock) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $sessionSyncLock 'owner'), "$PID held-invalid-sync`n", $utf8)
+    $serializedSync = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedSessionHelper, 'sync') -PassThru
+    Start-Sleep -Milliseconds 250
+    Assert-True (Test-Path -LiteralPath $bridgeAuthFile -PathType Leaf) 'invalid sync preserves bridge while a live publisher owns the lock'
+    Assert-True (Test-Path -LiteralPath (Join-Path $testConfig 'usage-cache\summary') -PathType Leaf) 'invalid sync preserves usage state while a live publisher owns the lock'
+    [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), ('{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T03:00:01.123456Z","tokens":{"access_token":"codex-revalidated-access","refresh_token":"codex-source-refresh","id_token":"' + $managedIdToken + '","account_id":"account-test"}}'), $utf8)
+    Remove-Item -LiteralPath $sessionSyncLock -Recurse -Force
+    $serializedSync.WaitForExit()
+    Assert-True ($serializedSync.ExitCode -eq 0) 'invalid sync revalidates a repaired source after ownership transfer'
+    $serializedProjection = Get-Content -LiteralPath $bridgeAuthFile -Raw | ConvertFrom-Json
+    Assert-True ($serializedProjection.access_token -eq 'codex-revalidated-access') 'revalidated source replaces the stale invalid decision'
+
+    [IO.Directory]::CreateDirectory((Join-Path $testConfig 'usage-cache')) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\summary'), "preserved`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $testConfig 'codex-usage-account'), "codex-claudex-managed.json`n", $utf8)
+    [IO.Directory]::CreateDirectory($sessionSyncLock) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $sessionSyncLock 'owner'), "$PID held-logout`n", $utf8)
+    $serializedLogoutArgs = Join-Path $temporary 'serialized-logout-args.log'
+    $env:FAKE_CODEX_AUTH_ARGS_LOG = $serializedLogoutArgs
+    try {
+        $serializedLogout = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedSessionHelper, 'logout') -PassThru
+        Start-Sleep -Milliseconds 250
+        Assert-True (-not (Test-Path -LiteralPath $serializedLogoutArgs -PathType Leaf)) 'logout does not mutate the Codex source before publication ownership transfers'
+        Assert-True (Test-Path -LiteralPath $bridgeAuthFile -PathType Leaf) 'logout preserves bridge while a live publisher owns the lock'
+        Assert-True (Test-Path -LiteralPath (Join-Path $testConfig 'usage-cache\summary') -PathType Leaf) 'logout preserves usage state while a live publisher owns the lock'
+        Remove-Item -LiteralPath $sessionSyncLock -Recurse -Force
+        $serializedLogout.WaitForExit()
+    } finally {
+        Remove-Item Env:FAKE_CODEX_AUTH_ARGS_LOG -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $sessionSyncLock -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Assert-True ($serializedLogout.ExitCode -eq 0) 'logout completes after publication ownership transfers'
+    Assert-True ([IO.File]::ReadAllText($serializedLogoutArgs).Trim() -eq 'file:logout') 'serialized logout invokes the file credential store exactly once after lock release'
+    Assert-True (-not (Test-Path -LiteralPath $bridgeAuthFile -PathType Leaf)) 'serialized logout clears bridge after lock release'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $testConfig 'usage-cache\summary') -PathType Leaf)) 'serialized logout clears usage state after lock release'
     & (Join-Path $root 'codex-session.ps1') sync
 
     [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","tokens":{"access_token":123,"refresh_token":"codex-source-refresh","account_id":"account-test"}}', $utf8)
@@ -1318,6 +2121,9 @@ process.stdout.write(JSON.stringify({
     Assert-True ($repairedBridge.access_token -eq 'codex-source-access') 'disabled bridge credential repaired'
     Assert-True (-not [bool] $repairedBridge.disabled -and -not [bool] $repairedBridge.expired) 'repaired bridge credential enabled'
 
+    $logoutAuthArgsLog = Join-Path $temporary 'codex-logout-auth-args.log'
+    $env:FAKE_CODEX_AUTH_ARGS_LOG = $logoutAuthArgsLog
+    $env:FAKE_CODEX_DEFAULT_LOGOUT = '0'
     $env:FAKE_CODEX_LOGOUT_EXIT = '9'
     $savedErrorPreference = $ErrorActionPreference
     try {
@@ -1328,10 +2134,13 @@ process.stdout.write(JSON.stringify({
     } finally {
         $ErrorActionPreference = $savedErrorPreference
         Remove-Item Env:FAKE_CODEX_LOGOUT_EXIT -ErrorAction SilentlyContinue
+        Remove-Item Env:FAKE_CODEX_DEFAULT_LOGOUT -ErrorAction SilentlyContinue
+        Remove-Item Env:FAKE_CODEX_AUTH_ARGS_LOG -ErrorAction SilentlyContinue
     }
     Assert-True ($logoutExit -eq 9) 'failed Codex logout exit propagated'
     Assert-True (-not (Test-Path -LiteralPath $bridgeAuthFile)) 'failed Codex logout clears bridge credential'
     Assert-True (($logoutOutput | Out-String).Contains('Codex logout failed, but the local Claudex bridge session was cleared.')) 'failed logout diagnostic'
+    Assert-True ([IO.File]::ReadAllText($logoutAuthArgsLog).Trim() -eq 'file:logout') 'Codex logout uses the Claudex file credential store'
 
     if ($isWindowsPlatform) {
         $usageHelper = Join-Path $testConfig 'usage-limit.ps1'
@@ -1375,6 +2184,92 @@ process.stdout.write(JSON.stringify({
         }
         $loopbackCurlArguments = Get-Content -LiteralPath $loopbackCurlLog -Raw
         Assert-True ($loopbackCurlArguments.Contains("-- $loopbackUsageUrl")) 'loopback test usage URL follows curl argument terminator'
+
+        $usageRefreshLock = Join-Path $testConfig 'usage-cache\refresh.lock'
+        [IO.Directory]::CreateDirectory($usageRefreshLock) | Out-Null
+        $freshOwnerlessErrorLog = Join-Path $temporary 'fresh-ownerless-usage-lock-error.log'
+        $freshOwnerlessProcess = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedUsageHelper, '-RefreshCache') `
+            -RedirectStandardError $freshOwnerlessErrorLog -Wait -PassThru
+        $freshOwnerlessError = Get-Content -LiteralPath $freshOwnerlessErrorLog -Raw
+        Assert-True ($freshOwnerlessProcess.ExitCode -ne 0 -and $freshOwnerlessError.Contains('another usage refresh is already in progress.')) 'fresh ownerless usage lock keeps its owner-publication grace'
+        Assert-True (Test-Path -LiteralPath $usageRefreshLock -PathType Container) 'fresh ownerless usage lock is preserved'
+        (Get-Item -LiteralPath $usageRefreshLock).LastWriteTimeUtc = [DateTime]::UtcNow.AddSeconds(-60)
+        $staleOwnerlessProcess = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedUsageHelper, '-RefreshCache') `
+            -Wait -PassThru
+        Assert-True ($staleOwnerlessProcess.ExitCode -eq 0) 'stale ownerless usage lock is reclaimed after grace'
+        Assert-True (-not (Test-Path -LiteralPath $usageRefreshLock -PathType Container)) 'reclaimed ownerless usage lock is released after refresh'
+
+        $emptyReady = Join-Path $temporary 'usage-empty-b-ready'
+        $emptyContinue = Join-Path $temporary 'usage-empty-b-continue'
+        $env:CLAUDEX_TEST_MODE = '1'
+        $env:CLAUDEX_TEST_REFRESH_LOCK_AFTER_MKDIR_READY_FILE = $emptyReady
+        $env:CLAUDEX_TEST_REFRESH_LOCK_AFTER_MKDIR_CONTINUE_FILE = $emptyContinue
+        $emptyCreator = $null
+        try {
+            $emptyCreator = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedUsageHelper, '-RefreshCache') -PassThru
+            for ($attempt = 0; $attempt -lt 100 -and -not (Test-Path -LiteralPath $emptyReady -PathType Leaf); $attempt++) { Start-Sleep -Milliseconds 20 }
+            Assert-True (Test-Path -LiteralPath $emptyReady -PathType Leaf) 'new usage creator pauses before the empty replacement test'
+            Remove-Item -LiteralPath $usageRefreshLock -Recurse -Force
+            [IO.Directory]::CreateDirectory($usageRefreshLock) | Out-Null
+            [IO.File]::WriteAllText($emptyContinue, "continue`n", $utf8)
+            Assert-True ($emptyCreator.WaitForExit(10000)) 'usage creator terminates after an empty replacement'
+            Assert-True ($emptyCreator.ExitCode -ne 0) 'usage creator rejects an empty replacement directory'
+        } finally {
+            Remove-Item Env:CLAUDEX_TEST_MODE -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDEX_TEST_REFRESH_LOCK_AFTER_MKDIR_READY_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDEX_TEST_REFRESH_LOCK_AFTER_MKDIR_CONTINUE_FILE -ErrorAction SilentlyContinue
+            if ($emptyCreator -and -not $emptyCreator.HasExited) { $emptyCreator.Kill() }
+        }
+        Assert-True ((Test-Path -LiteralPath $usageRefreshLock -PathType Container) -and
+            -not (Test-Path -LiteralPath (Join-Path $usageRefreshLock 'generation')) -and
+            -not (Test-Path -LiteralPath (Join-Path $usageRefreshLock 'owner-pid'))) 'usage creator preserves B during its ownerless publication window'
+        Remove-Item -LiteralPath $usageRefreshLock -Recurse -Force
+
+        $legacyLiveRecord = "$PID legacy-live-owner-123"
+        $oldReady = Join-Path $temporary 'usage-old-b-ready'
+        $oldContinue = Join-Path $temporary 'usage-old-b-continue'
+        $env:CLAUDEX_TEST_MODE = '1'
+        $env:CLAUDEX_TEST_REFRESH_LOCK_AFTER_MKDIR_READY_FILE = $oldReady
+        $env:CLAUDEX_TEST_REFRESH_LOCK_AFTER_MKDIR_CONTINUE_FILE = $oldContinue
+        $oldCreator = $null
+        try {
+            $oldCreator = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedUsageHelper, '-RefreshCache') -PassThru
+            for ($attempt = 0; $attempt -lt 100 -and -not (Test-Path -LiteralPath $oldReady -PathType Leaf); $attempt++) { Start-Sleep -Milliseconds 20 }
+            Assert-True (Test-Path -LiteralPath $oldReady -PathType Leaf) 'new usage creator pauses after mkdir for mixed-version replacement test'
+            Remove-Item -LiteralPath $usageRefreshLock -Recurse -Force
+            [IO.Directory]::CreateDirectory($usageRefreshLock) | Out-Null
+            [IO.File]::WriteAllText((Join-Path $usageRefreshLock 'owner-pid'), "$legacyLiveRecord`n", $utf8)
+            [IO.File]::WriteAllText($oldContinue, "continue`n", $utf8)
+            Assert-True ($oldCreator.WaitForExit(10000)) 'mixed-version usage creator terminates after replacement'
+            Assert-True ($oldCreator.ExitCode -ne 0) 'mixed-version usage creator does not enter over legacy owner'
+        } finally {
+            Remove-Item Env:CLAUDEX_TEST_MODE -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDEX_TEST_REFRESH_LOCK_AFTER_MKDIR_READY_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDEX_TEST_REFRESH_LOCK_AFTER_MKDIR_CONTINUE_FILE -ErrorAction SilentlyContinue
+            if ($oldCreator -and -not $oldCreator.HasExited) { $oldCreator.Kill() }
+        }
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $usageRefreshLock 'generation') -PathType Leaf)) 'partial new generation removed from legacy replacement'
+        Assert-True ([IO.File]::ReadAllText((Join-Path $usageRefreshLock 'owner-pid')).Trim() -eq $legacyLiveRecord) 'legacy replacement owner restored exactly'
+
+        (Get-Item -LiteralPath $usageRefreshLock).LastWriteTimeUtc = [DateTime]::UtcNow.AddSeconds(-60)
+        $legacyLiveProcess = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedUsageHelper, '-RefreshCache') -Wait -PassThru
+        Assert-True ($legacyLiveProcess.ExitCode -ne 0) 'aged live legacy usage owner is never stolen'
+        Assert-True ([IO.File]::ReadAllText((Join-Path $usageRefreshLock 'owner-pid')).Trim() -eq $legacyLiveRecord) 'aged live legacy owner remains exact'
+
+        $legacyBarrier = $usageRefreshLock + '.quarantine.legacy-live'
+        Move-Item -LiteralPath $usageRefreshLock -Destination $legacyBarrier
+        [IO.File]::WriteAllText((Join-Path $legacyBarrier 'generation'), "injected-new-generation-123`n", $utf8)
+        (Get-Item -LiteralPath $legacyBarrier).LastWriteTimeUtc = [DateTime]::UtcNow.AddSeconds(-60)
+        $legacyBarrierProcess = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedUsageHelper, '-RefreshCache') -Wait -PassThru
+        Assert-True ($legacyBarrierProcess.ExitCode -ne 0) 'aged live legacy usage barrier is restored, not stolen'
+        Assert-True (Test-Path -LiteralPath $usageRefreshLock -PathType Container) 'live legacy usage barrier returns to canonical path'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $usageRefreshLock 'generation') -PathType Leaf)) 'injected generation stripped from restored legacy owner'
+
+        [IO.File]::WriteAllText((Join-Path $usageRefreshLock 'owner-pid'), "99999999 legacy-dead-owner-123`n", $utf8)
+        (Get-Item -LiteralPath $usageRefreshLock).LastWriteTimeUtc = [DateTime]::UtcNow.AddSeconds(-60)
+        $legacyDeadProcess = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedUsageHelper, '-RefreshCache') -Wait -PassThru
+        Assert-True ($legacyDeadProcess.ExitCode -eq 0) 'dead legacy usage owner is reclaimed after grace'
+        Assert-True (-not (Test-Path -LiteralPath $usageRefreshLock -PathType Container)) 'reclaimed legacy usage owner is released after refresh'
     }
 
     $usage = (& (Join-Path $root 'claudex.ps1') --usage-limit | Out-String)
@@ -1436,6 +2331,89 @@ process.stdout.write(JSON.stringify({
     Assert-True ($status.Contains('Codex 7d 18% left')) 'status usage limits'
     Assert-True (-not $status.Contains("$([char]27)]0;")) 'status line excludes terminal-title control sequence'
 
+    $hostileStatusJson = '{"session_id":"hostile-session","model":{"id":"hostile\u001b]0;MODEL-OSC\u0007\u009d0;MODEL-C1-OSC\u009c\u001b[31mMODEL-CSI\u001b[0m\u009b31mMODEL-C1\u061cMODEL-ALM\u200eMODEL-LRM\u200fMODEL-RLM\u202eMODEL-BIDI"},"effort":{"level":"high\u001b]8;;https://attacker.invalid\u0007max\u001b]8;;\u0007"},"context_window":{"used_percentage":5}}'
+    $env:CLAUDEX_USAGE_DISPLAY = 'off'
+    try { $hostileStatus = ($hostileStatusJson | & (Join-Path $root 'statusline.ps1') | Out-String) }
+    finally { Remove-Item Env:CLAUDEX_USAGE_DISPLAY -ErrorAction SilentlyContinue }
+    $expectedHostileStatus = "$([char]27)[38;5;81mClaudex$([char]27)[0m · $([char]27)[1mhostile$([char]27)[0m · high effort · 5% context"
+    Assert-True ($hostileStatus.TrimEnd() -ceq $expectedHostileStatus) 'status label sanitizer preserves only the safe semantic prefix and owned SGR'
+    foreach ($forbiddenStatusText in @('MODEL-OSC', 'MODEL-C1-OSC', 'https://attacker.invalid')) {
+        Assert-True (-not $hostileStatus.Contains($forbiddenStatusText)) "status sanitizer removes $forbiddenStatusText"
+    }
+    $hostileStatusUnstyled = [regex]::Replace($hostileStatus, "$([char]27)\[(?:0|1|38;5;81)m", '')
+    foreach ($forbiddenControl in @([string][char]27, [string][char]7, [string][char]0x009b, [string][char]0x061c, [string][char]0x200e, [string][char]0x200f, [string][char]0x202e)) {
+        Assert-True (-not $hostileStatusUnstyled.Contains($forbiddenControl)) 'status sanitizer removes unowned terminal controls'
+    }
+
+    $safeUnicodeStatusJson = '{"session_id":"safe-label-session","model":{"id":"safe-\u6a21\u578b"},"effort":{"level":"future-tier"},"context_window":{"used_percentage":6}}'
+    $env:CLAUDEX_USAGE_DISPLAY = 'off'
+    try { $safeUnicodeStatus = ($safeUnicodeStatusJson | & (Join-Path $root 'statusline.ps1') | Out-String) }
+    finally { Remove-Item Env:CLAUDEX_USAGE_DISPLAY -ErrorAction SilentlyContinue }
+    $expectedSafeUnicodeStatus = "$([char]27)[38;5;81mClaudex$([char]27)[0m · $([char]27)[1msafe-模型$([char]27)[0m · future-tier effort · 6% context"
+    Assert-True ($safeUnicodeStatus.TrimEnd() -ceq $expectedSafeUnicodeStatus) 'status label sanitizer preserves safe Unicode, future effort labels, and owned SGR'
+
+    $suffixOnlyStatusJson = '{"session_id":"suffix-only-session","model":{"id":"\u001b]0;ignored\u0007gpt-5.6-sol","display_name":"safe fallback"},"effort":{"level":"\u001b]0;ignored\u0007max"},"context_window":{"used_percentage":7}}'
+    $env:CLAUDEX_USAGE_DISPLAY = 'off'
+    try { $suffixOnlyStatus = ($suffixOnlyStatusJson | & (Join-Path $root 'statusline.ps1') | Out-String) }
+    finally { Remove-Item Env:CLAUDEX_USAGE_DISPLAY -ErrorAction SilentlyContinue }
+    $expectedSuffixOnlyStatus = "$([char]27)[38;5;81mClaudex$([char]27)[0m · $([char]27)[1msafe fallback$([char]27)[0m · adaptive effort · 7% context"
+    Assert-True ($suffixOnlyStatus.TrimEnd() -ceq $expectedSuffixOnlyStatus) 'status label sanitizer cannot select model or effort from a post-control suffix'
+
+    [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\summary'), "safe summary $([char]27)]0;CACHE-OSC$([char]7) $([char]0x009d)0;CACHE-C1-OSC$([char]0x009c) $([char]27)[31mCACHE-CSI$([char]27)[0m $([char]0x009b)31mCACHE-C1 $([char]0x202e)CACHE-BIDI`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\last-success'), "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())`n", $utf8)
+    $hostileCacheStatus = ('{"session_id":"hostile-cache","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":5}}' | & (Join-Path $root 'statusline.ps1') | Out-String)
+    Assert-True ($hostileCacheStatus.Contains('safe summary')) 'status cache sanitizer preserves legitimate text'
+    Assert-True (-not $hostileCacheStatus.Contains('CACHE-OSC') -and -not $hostileCacheStatus.Contains('CACHE-C1-OSC')) 'status cache sanitizer removes OSC payloads'
+    $hostileCacheUnstyled = [regex]::Replace($hostileCacheStatus, "$([char]27)\[(?:0|1|38;5;81)m", '')
+    foreach ($forbiddenControl in @([string][char]27, [string][char]7, [string][char]0x009b, [string][char]0x202e)) {
+        Assert-True (-not $hostileCacheUnstyled.Contains($forbiddenControl)) 'status cache sanitizer removes unowned terminal controls'
+    }
+
+    if ($isWindowsPlatform) {
+        $statusRefreshConfig = Join-Path $temporary 'status-refresh-private-env'
+        $statusRefreshHelper = Join-Path $temporary 'status-refresh-private-env-helper.ps1'
+        $statusRefreshLog = Join-Path $temporary 'status-refresh-private-env.log'
+        [IO.Directory]::CreateDirectory($statusRefreshConfig) | Out-Null
+        [IO.File]::WriteAllText($statusRefreshHelper, @'
+param([switch] $RefreshCache, [switch] $LockHeld, [string] $LockToken)
+[IO.File]::WriteAllLines($env:STATUS_REFRESH_PRIVATE_ENV_LOG, @(
+    "MANTLE=$env:ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
+    "VERTEX_PROJECT=$env:ANTHROPIC_VERTEX_PROJECT_ID",
+    "FOUNDRY_RESOURCE=$env:ANTHROPIC_FOUNDRY_RESOURCE",
+    "FOUNDRY_API_KEY=$env:ANTHROPIC_FOUNDRY_API_KEY"
+))
+'@, $utf8)
+        $statusRefreshEnvironment = @{}
+        foreach ($statusRefreshName in @(
+            'CLAUDE_CONFIG_DIR', 'CLAUDEX_USAGE_LIMIT_BIN', 'STATUS_REFRESH_PRIVATE_ENV_LOG',
+            'ANTHROPIC_BEDROCK_MANTLE_BASE_URL', 'ANTHROPIC_VERTEX_PROJECT_ID',
+            'ANTHROPIC_FOUNDRY_RESOURCE', 'ANTHROPIC_FOUNDRY_API_KEY'
+        )) {
+            $statusRefreshEnvironment[$statusRefreshName] = [Environment]::GetEnvironmentVariable($statusRefreshName, 'Process')
+        }
+        try {
+            $env:CLAUDE_CONFIG_DIR = $statusRefreshConfig
+            $env:CLAUDEX_USAGE_LIMIT_BIN = $statusRefreshHelper
+            $env:STATUS_REFRESH_PRIVATE_ENV_LOG = $statusRefreshLog
+            $env:ANTHROPIC_BEDROCK_MANTLE_BASE_URL = 'https://mantle.private.invalid'
+            $env:ANTHROPIC_VERTEX_PROJECT_ID = 'private-vertex-project'
+            $env:ANTHROPIC_FOUNDRY_RESOURCE = 'private-foundry-resource'
+            $env:ANTHROPIC_FOUNDRY_API_KEY = 'private-foundry-secret'
+            '{"session_id":"private-refresh","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":5}}' | & (Join-Path $root 'statusline.ps1') | Out-Null
+            for ($attempt = 0; $attempt -lt 100 -and -not (Test-Path -LiteralPath $statusRefreshLog -PathType Leaf); $attempt++) {
+                Start-Sleep -Milliseconds 20
+            }
+            $statusRefreshLines = @([IO.File]::ReadAllLines($statusRefreshLog))
+            Assert-True (($statusRefreshLines -join '|') -eq 'MANTLE=|VERTEX_PROJECT=|FOUNDRY_RESOURCE=|FOUNDRY_API_KEY=') 'status refresh helper receives no private cloud-provider environment'
+        } finally {
+            foreach ($statusRefreshName in $statusRefreshEnvironment.Keys) {
+                $statusRefreshValue = $statusRefreshEnvironment[$statusRefreshName]
+                if ($null -eq $statusRefreshValue) { Remove-Item -LiteralPath "Env:$statusRefreshName" -ErrorAction SilentlyContinue }
+                else { [Environment]::SetEnvironmentVariable($statusRefreshName, [string] $statusRefreshValue, 'Process') }
+            }
+        }
+    }
+
     [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\summary'), "Codex 7d 18% left $([char]0x00B7) Review 7d 9% left $([char]0x00B7) Extra-long-capacity-window 30d 8% left`n", $utf8)
     [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\last-success'), "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())`n", $utf8)
     $env:CLAUDEX_STATUSLINE_COLUMNS = '40'
@@ -1473,6 +2451,8 @@ process.stdout.write(JSON.stringify({
 
     & node (Join-Path $root 'scripts\check-preload.mjs')
     Assert-True ($LASTEXITCODE -eq 0) 'preload terminal regressions'
+    & node (Join-Path $root 'tests\windows-private-environment.test.cjs')
+    Assert-True ($LASTEXITCODE -eq 0) 'Windows private environment boundary regressions'
     & node (Join-Path $root 'tests\skill-bridge.test.cjs')
     Assert-True ($LASTEXITCODE -eq 0) 'skill bridge regressions'
     & node (Join-Path $root 'tests\skill-contract.test.cjs')
@@ -1541,6 +2521,41 @@ process.stdout.write(JSON.stringify({
     Assert-True ($installedProxyConfig.Contains('request-retry: 3')) 'proxy retries transient upstream failures before surfacing an API error'
     Assert-True ($installedProxyConfig.Contains('transient-error-cooldown-seconds: 1')) 'proxy transient cooldown stays bounded'
     Assert-True ($installedProxyConfig.Contains('bootstrap-retries: 2')) 'proxy retries pre-stream failures'
+
+    $primaryInstallerConfig = $env:CLAUDEX_CONFIG_DIR
+    $primaryInstallerBin = $env:CLAUDEX_BIN_DIR
+    $relativeInstallerRoot = Join-Path $temporary 'relative installer cwd'
+    $relativeInstallerConfig = Join-Path $relativeInstallerRoot 'relative-config'
+    $relativeInstallerBin = Join-Path $relativeInstallerRoot 'relative-bin'
+    $relativeInstallerElsewhere = Join-Path $relativeInstallerRoot 'elsewhere'
+    [IO.Directory]::CreateDirectory((Join-Path $relativeInstallerConfig 'bin')) | Out-Null
+    [IO.Directory]::CreateDirectory($relativeInstallerElsewhere) | Out-Null
+    try {
+        Push-Location $relativeInstallerRoot
+        try {
+            $env:CLAUDEX_CONFIG_DIR = 'relative-config'
+            $env:CLAUDEX_BIN_DIR = 'relative-bin'
+            $env:CLAUDEX_PROXY_TOKEN = 'relative-installer-token'
+            & (Join-Path $root 'install.ps1') | Out-Null
+        } finally { Pop-Location }
+        $relativeReceipt = Get-Content -LiteralPath (Join-Path $relativeInstallerConfig 'install.json') -Raw | ConvertFrom-Json
+        Assert-True ([IO.Path]::IsPathRooted([string] $relativeReceipt.binDir) -and
+            [IO.Path]::GetFullPath([string] $relativeReceipt.binDir) -eq [IO.Path]::GetFullPath($relativeInstallerBin)) `
+            'Windows relative installer root is persisted as an absolute launcher directory'
+        $relativeEnvironment = Get-Content -LiteralPath (Join-Path $relativeInstallerConfig 'env') -Raw
+        Assert-True ($relativeEnvironment.Contains("CLAUDEX_PROXY_CONFIG=$(Join-Path $relativeInstallerConfig 'cliproxyapi.yaml')")) `
+            'Windows relative config root publishes absolute managed paths'
+        $env:CLAUDEX_CONFIG_DIR = $relativeInstallerConfig
+        Push-Location $relativeInstallerElsewhere
+        try { $relativeInstallerStatus = (& (Join-Path $relativeInstallerBin 'claudex.ps1') self-update --status | Out-String) }
+        finally { Pop-Location }
+        Assert-True ($relativeInstallerStatus.Contains('Install method: git')) `
+            'Windows relative-root installation remains usable after changing directories'
+    } finally {
+        $env:CLAUDEX_CONFIG_DIR = $primaryInstallerConfig
+        $env:CLAUDEX_BIN_DIR = $primaryInstallerBin
+        $env:CLAUDEX_PROXY_TOKEN = 'installer-test-token'
+    }
 
     $specialInstallerToken = 'installer token = 100% ! & "quotes" \path'
     $env:CLAUDEX_PROXY_TOKEN = $specialInstallerToken

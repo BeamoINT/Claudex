@@ -105,57 +105,433 @@ function Write-JsonAtomic([string] $Path, $Value) {
     }
 }
 
-function Test-ProcessAlive([int] $ProcessId) {
-    if ($ProcessId -le 0) { return $false }
-    return $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+function Get-UpdateLockField([string] $OwnerFile, [string] $Field) {
+    if (-not (Test-Path -LiteralPath $OwnerFile -PathType Leaf)) { return '' }
+    try {
+        foreach ($line in [IO.File]::ReadAllLines($OwnerFile)) {
+            if ($line.StartsWith($Field + '=', [StringComparison]::Ordinal)) {
+                return $line.Substring($Field.Length + 1)
+            }
+        }
+    } catch { }
+    return ''
+}
+
+function Get-UpdateLockGeneration([string] $Directory) {
+    $path = Join-Path $Directory 'generation'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return '' }
+    try { return [IO.File]::ReadAllText($path).Trim() } catch { return '' }
+}
+
+function Get-UpdateLockBarriers {
+    if (-not (Test-Path -LiteralPath $script:UpdateDir -PathType Container)) { return @() }
+    return @(Get-ChildItem -LiteralPath $script:UpdateDir -Directory -Filter 'lock.quarantine.*' -ErrorAction SilentlyContinue | Sort-Object Name)
+}
+
+function Get-UpdateLockAge([string] $Path) {
+    try { return [Math]::Max(0, ([DateTime]::UtcNow - (Get-Item -LiteralPath $Path -ErrorAction Stop).LastWriteTimeUtc).TotalSeconds) }
+    catch { return 0 }
+}
+
+function Get-UpdateLockDirectoryIdentity([string] $Path) {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        if (-not ('Claudex.SelfUpdateDirectoryIdentity' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+namespace Claudex
+{
+    public static class SelfUpdateDirectoryIdentity
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation
+        {
+            public uint FileAttributes;
+            public uint CreationTimeLow;
+            public uint CreationTimeHigh;
+            public uint LastAccessTimeLow;
+            public uint LastAccessTimeHigh;
+            public uint LastWriteTimeLow;
+            public uint LastWriteTimeHigh;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFile(
+            string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes,
+            uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle file, out ByHandleFileInformation information);
+
+        public static string GetIdentity(string path)
+        {
+            const uint OpenExisting = 3;
+            const uint BackupSemantics = 0x02000000;
+            const uint ShareReadWriteDelete = 0x00000001 | 0x00000002 | 0x00000004;
+            try
+            {
+                using (SafeFileHandle handle = CreateFile(path, 0, ShareReadWriteDelete, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero))
+                {
+                    if (handle.IsInvalid) return "";
+                    ByHandleFileInformation information;
+                    if (!GetFileInformationByHandle(handle, out information)) return "";
+                    return information.VolumeSerialNumber.ToString("x8") + ":" +
+                        information.FileIndexHigh.ToString("x8") + information.FileIndexLow.ToString("x8");
+                }
+            }
+            catch { return ""; }
+        }
+    }
+}
+'@
+        }
+        try { return [Claudex.SelfUpdateDirectoryIdentity]::GetIdentity($Path) }
+        catch { return '' }
+    }
+
+    # PowerShell is also supported on Unix-like hosts. Use the filesystem object
+    # identity there instead of a mutable timestamp when a native stat is present.
+    $stat = Get-Command stat -ErrorAction SilentlyContinue
+    if (-not $stat) { return '' }
+    foreach ($arguments in @(@('-c', '%d:%i', '--', $Path), @('-f', '%d:%i', $Path))) {
+        try {
+            $result = @(& $stat.Source @arguments 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $result.Count -gt 0 -and ([string] $result[0]).Trim() -match '^[0-9]+:[0-9]+$') {
+                return ([string] $result[0]).Trim()
+            }
+        } catch { }
+    }
+    return ''
+}
+
+function Test-UpdateLockOwnerCurrent([string] $OwnerFile) {
+    $ownerPid = 0
+    if (-not [int]::TryParse((Get-UpdateLockField $OwnerFile 'pid'), [ref] $ownerPid) -or $ownerPid -le 0) { return $false }
+    $process = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+    if ($null -eq $process) { return $false }
+    $identity = Get-UpdateLockField $OwnerFile 'identity'
+    if ([string]::IsNullOrWhiteSpace($identity)) { return $true }
+    try { return $identity -eq [string] $process.StartTime.ToUniversalTime().Ticks }
+    catch { return $true }
+}
+
+function Test-LegacyUpdateLockOwnerAlive([string] $Directory) {
+    $legacyPath = Join-Path $Directory 'owner.json'
+    if (-not (Test-Path -LiteralPath $legacyPath -PathType Leaf)) { return $false }
+    try {
+        $legacy = Read-JsonFile $legacyPath
+        $property = if ($null -ne $legacy) { $legacy.PSObject.Properties['pid'] } else { $null }
+        $legacyPid = 0
+        return $null -ne $property -and [int]::TryParse([string]$property.Value, [ref] $legacyPid) -and
+            $legacyPid -gt 0 -and $null -ne (Get-Process -Id $legacyPid -ErrorAction SilentlyContinue)
+    } catch { return $false }
+}
+
+function Test-LegacyUpdateLockOwnerValid([string] $Directory) {
+    $legacyPath = Join-Path $Directory 'owner.json'
+    if (-not (Test-Path -LiteralPath $legacyPath -PathType Leaf)) { return $false }
+    try {
+        $legacy = Read-JsonFile $legacyPath
+        $pidProperty = if ($null -ne $legacy) { $legacy.PSObject.Properties['pid'] } else { $null }
+        $tokenProperty = if ($null -ne $legacy) { $legacy.PSObject.Properties['token'] } else { $null }
+        $legacyPid = 0
+        return $null -ne $pidProperty -and [int]::TryParse([string]$pidProperty.Value, [ref] $legacyPid) -and
+            $legacyPid -gt 0 -and $null -ne $tokenProperty -and -not [string]::IsNullOrWhiteSpace([string]$tokenProperty.Value)
+    } catch { return $false }
+}
+
+function Get-UpdateCompatibilityOwnerToken([string] $Directory) {
+    $path = Join-Path $Directory 'owner.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return '' }
+    try {
+        $owner = Read-JsonFile $path
+        $property = if ($null -ne $owner) { $owner.PSObject.Properties['token'] } else { $null }
+        if ($null -ne $property) { return [string] $property.Value }
+    } catch { }
+    return ''
+}
+
+function Invoke-UpdateLockTestPause([string] $Stage) {
+    if ($env:CLAUDEX_TEST_MODE -ne '1') { return }
+    $ready = [Environment]::GetEnvironmentVariable("CLAUDEX_TEST_UPDATE_LOCK_${Stage}_READY", 'Process')
+    $continue = [Environment]::GetEnvironmentVariable("CLAUDEX_TEST_UPDATE_LOCK_${Stage}_CONTINUE", 'Process')
+    if (-not $ready -or -not $continue) { return }
+    [IO.File]::WriteAllText($ready, "ready`n", $script:Utf8)
+    while (-not (Test-Path -LiteralPath $continue -PathType Leaf)) { Start-Sleep -Milliseconds 20 }
+}
+
+function Remove-UpdateLockDirectory([string] $Directory) {
+    Remove-Item -LiteralPath (Join-Path $Directory 'owner') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $Directory 'owner.json') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $Directory 'generation') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $Directory -Force -ErrorAction SilentlyContinue
+}
+
+function Publish-UpdateLockFile([string] $Source, [string] $Destination) {
+    if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE -eq '1') {
+        throw 'forced update lock publication failure'
+    }
+    if ($env:CLAUDEX_TEST_MODE -ne '1' -or $env:CLAUDEX_TEST_FORCE_HARDLINK_FAILURE -ne '1') {
+        try {
+            New-Item -ItemType HardLink -Path $Destination -Target $Source -ErrorAction Stop | Out-Null
+            return
+        } catch { }
+    }
+    $input = $null
+    $output = $null
+    try {
+        $input = [IO.File]::Open($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $output = [IO.FileStream]::new($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $input.CopyTo($output)
+        $output.Flush($true)
+    } finally {
+        if ($output) { $output.Dispose() }
+        if ($input) { $input.Dispose() }
+    }
+}
+
+function Restore-UpdateLockBarrier([string] $Barrier) {
+    foreach ($attempt in 1..250) {
+        if (-not (Test-Path -LiteralPath $script:LockPath)) {
+            try { Move-Item -LiteralPath $Barrier -Destination $script:LockPath -ErrorAction Stop; return $true }
+            catch { }
+        }
+        Start-Sleep -Milliseconds 20
+    }
+    return $false
+}
+
+function Remove-IncompleteUpdateLock {
+    if (-not (Test-Path -LiteralPath $script:LockPath -PathType Container)) { return $true }
+    $quarantine = "$($script:LockPath).quarantine.incomplete.$PID.$([guid]::NewGuid().ToString('N'))"
+    try { Move-Item -LiteralPath $script:LockPath -Destination $quarantine -ErrorAction Stop }
+    catch { return $false }
+    $generationNonce = Get-UpdateLockGeneration $quarantine
+    $ownerNonce = Get-UpdateLockField (Join-Path $quarantine 'owner') 'nonce'
+    if ($generationNonce -or $ownerNonce -or (Test-Path -LiteralPath (Join-Path $quarantine 'owner.json') -PathType Leaf)) {
+        [void] (Restore-UpdateLockBarrier $quarantine)
+        return $false
+    }
+    Remove-UpdateLockDirectory $quarantine
+    return -not (Test-Path -LiteralPath $quarantine)
+}
+
+function Recover-UpdateLockBarriers {
+    foreach ($barrierInfo in @(Get-UpdateLockBarriers)) {
+        $barrier = $barrierInfo.FullName
+        $ownerFile = Join-Path $barrier 'owner'
+        $ownerNonce = Get-UpdateLockField $ownerFile 'nonce'
+        $compatibilityToken = Get-UpdateCompatibilityOwnerToken $barrier
+        $generationNonce = Get-UpdateLockGeneration $barrier
+        $age = Get-UpdateLockAge $barrier
+        if ($ownerNonce -and $compatibilityToken -eq $ownerNonce -and (Test-UpdateLockOwnerCurrent $ownerFile)) {
+            if (-not (Test-Path -LiteralPath $script:LockPath)) {
+                try { Move-Item -LiteralPath $barrier -Destination $script:LockPath -ErrorAction Stop } catch { }
+            }
+        } elseif (Test-LegacyUpdateLockOwnerAlive $barrier) {
+            # A crashed new creator can leave its generation beside a live
+            # prior owner.json record. Quarantine makes this exact cleanup safe.
+            if ($generationNonce) { Remove-Item -LiteralPath (Join-Path $barrier 'generation') -Force -ErrorAction SilentlyContinue }
+            if ($ownerNonce -and $ownerNonce -eq $generationNonce) {
+                Remove-Item -LiteralPath $ownerFile -Force -ErrorAction SilentlyContinue
+            }
+            if (-not (Test-Path -LiteralPath $script:LockPath)) {
+                try { Move-Item -LiteralPath $barrier -Destination $script:LockPath -ErrorAction Stop } catch { }
+            }
+        } elseif ($ownerNonce -and (Test-UpdateLockOwnerCurrent $ownerFile)) {
+            if (-not (Test-Path -LiteralPath $script:LockPath)) {
+                try { Move-Item -LiteralPath $barrier -Destination $script:LockPath -ErrorAction Stop } catch { }
+            }
+        } elseif ($ownerNonce -and $age -ge 2) {
+            Remove-UpdateLockDirectory $barrier
+        } elseif ($generationNonce -and $age -ge 2) {
+            Remove-UpdateLockDirectory $barrier
+        } elseif (-not $generationNonce -and $age -ge 300 -and -not (Test-LegacyUpdateLockOwnerAlive $barrier)) {
+            Remove-UpdateLockDirectory $barrier
+        }
+    }
+}
+
+function Remove-UpdateLockGeneration([string] $ExpectedNonce) {
+    if ([string]::IsNullOrWhiteSpace($ExpectedNonce)) { return $false }
+    $currentNonce = Get-UpdateLockGeneration $script:LockPath
+    if (-not $currentNonce) { $currentNonce = Get-UpdateLockField (Join-Path $script:LockPath 'owner') 'nonce' }
+    if ($currentNonce -ne $ExpectedNonce) { return $false }
+    $quarantine = "$($script:LockPath).quarantine.$PID.$([guid]::NewGuid().ToString('N'))"
+    Invoke-UpdateLockTestPause 'BEFORE_RENAME'
+    try { Move-Item -LiteralPath $script:LockPath -Destination $quarantine -ErrorAction Stop }
+    catch { return $false }
+    Invoke-UpdateLockTestPause 'AFTER_RENAME'
+    if (-not (Test-Path -LiteralPath $quarantine -PathType Container)) { return $false }
+    $movedGeneration = Get-UpdateLockGeneration $quarantine
+    $movedOwnerNonce = Get-UpdateLockField (Join-Path $quarantine 'owner') 'nonce'
+    $compatibilityToken = Get-UpdateCompatibilityOwnerToken $quarantine
+    if ($movedGeneration -eq $ExpectedNonce -and
+            (Test-Path -LiteralPath (Join-Path $quarantine 'owner.json') -PathType Leaf) -and
+            $compatibilityToken -ne $ExpectedNonce) {
+        # A paused creator may resume in a replacement lock from the previous
+        # release. Withdraw only A's injected generation and restore B intact.
+        Remove-Item -LiteralPath (Join-Path $quarantine 'generation') -Force -ErrorAction SilentlyContinue
+        if ($movedOwnerNonce -eq $ExpectedNonce) {
+            Remove-Item -LiteralPath (Join-Path $quarantine 'owner') -Force -ErrorAction SilentlyContinue
+        }
+        [void] (Restore-UpdateLockBarrier $quarantine)
+        return $false
+    }
+    if ($movedGeneration -eq $ExpectedNonce -and
+            ([string]::IsNullOrWhiteSpace($movedOwnerNonce) -or $movedOwnerNonce -eq $ExpectedNonce) -and
+            (-not $compatibilityToken -or $compatibilityToken -eq $ExpectedNonce)) {
+        Remove-UpdateLockDirectory $quarantine
+        return $true
+    }
+    [void] (Restore-UpdateLockBarrier $quarantine)
+    return $false
+}
+
+function Recover-OwnedUpdateLock([string] $ExpectedNonce) {
+    foreach ($barrierInfo in @(Get-UpdateLockBarriers)) {
+        $barrier = $barrierInfo.FullName
+        $movedNonce = Get-UpdateLockGeneration $barrier
+        if (-not $movedNonce) { $movedNonce = Get-UpdateLockField (Join-Path $barrier 'owner') 'nonce' }
+        if ($movedNonce -ne $ExpectedNonce) { continue }
+        if ((Test-Path -LiteralPath (Join-Path $barrier 'owner.json') -PathType Leaf) -and
+                (Get-UpdateCompatibilityOwnerToken $barrier) -ne $ExpectedNonce) {
+            Remove-Item -LiteralPath (Join-Path $barrier 'generation') -Force -ErrorAction SilentlyContinue
+            if ((Get-UpdateLockField (Join-Path $barrier 'owner') 'nonce') -eq $ExpectedNonce) {
+                Remove-Item -LiteralPath (Join-Path $barrier 'owner') -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if (-not (Test-Path -LiteralPath $script:LockPath)) {
+            try { Move-Item -LiteralPath $barrier -Destination $script:LockPath -ErrorAction Stop } catch { }
+        }
+    }
+    $currentNonce = Get-UpdateLockGeneration $script:LockPath
+    if (-not $currentNonce) { $currentNonce = Get-UpdateLockField (Join-Path $script:LockPath 'owner') 'nonce' }
+    if ((Test-Path -LiteralPath (Join-Path $script:LockPath 'owner.json') -PathType Leaf) -and
+            (Get-UpdateCompatibilityOwnerToken $script:LockPath) -ne $ExpectedNonce) {
+        if ($currentNonce -eq $ExpectedNonce) {
+            Remove-Item -LiteralPath (Join-Path $script:LockPath 'generation') -Force -ErrorAction SilentlyContinue
+            if ((Get-UpdateLockField (Join-Path $script:LockPath 'owner') 'nonce') -eq $ExpectedNonce) {
+                Remove-Item -LiteralPath (Join-Path $script:LockPath 'owner') -Force -ErrorAction SilentlyContinue
+            }
+        }
+        return $false
+    }
+    if ($currentNonce -eq $ExpectedNonce -and @(Get-UpdateLockBarriers).Count -eq 0) {
+        if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_UPDATE_LOCK_SELF_RECOVERED_FILE) {
+            [IO.File]::WriteAllText($env:CLAUDEX_TEST_UPDATE_LOCK_SELF_RECOVERED_FILE, "recovered`n", $script:Utf8)
+        }
+        return $true
+    }
+    if ($currentNonce -eq $ExpectedNonce) { [void] (Remove-UpdateLockGeneration $ExpectedNonce) }
+    foreach ($barrierInfo in @(Get-UpdateLockBarriers)) {
+        $barrier = $barrierInfo.FullName
+        $movedNonce = Get-UpdateLockGeneration $barrier
+        if (-not $movedNonce) { $movedNonce = Get-UpdateLockField (Join-Path $barrier 'owner') 'nonce' }
+        if ($movedNonce -eq $ExpectedNonce) { Remove-UpdateLockDirectory $barrier }
+    }
+    return $false
 }
 
 function Acquire-UpdateLock {
     [IO.Directory]::CreateDirectory($script:UpdateDir) | Out-Null
-    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
-    while ([DateTimeOffset]::UtcNow -lt $deadline) {
+    $ownerFile = Join-Path $script:LockPath 'owner'
+    $attemptLimit = 100
+    $testAttempts = 0
+    if ($env:CLAUDEX_TEST_MODE -eq '1' -and [int]::TryParse($env:CLAUDEX_TEST_UPDATE_LOCK_ATTEMPTS, [ref] $testAttempts) -and
+            $testAttempts -ge 1 -and $testAttempts -le 100) { $attemptLimit = $testAttempts }
+    for ($attempt = 0; $attempt -lt $attemptLimit; $attempt++) {
+        Recover-UpdateLockBarriers
+        if (@(Get-UpdateLockBarriers).Count -gt 0) { Start-Sleep -Milliseconds 20; continue }
+        $created = $false
+        $createdIdentity = ''
+        $ownerTemporary = Join-Path $script:UpdateDir ('.lock-owner.' + [guid]::NewGuid().ToString('N') + '.tmp')
+        $generationTemporary = Join-Path $script:UpdateDir ('.lock-generation.' + [guid]::NewGuid().ToString('N') + '.tmp')
+        $compatibilityTemporary = Join-Path $script:UpdateDir ('.lock-compatibility-owner.' + [guid]::NewGuid().ToString('N') + '.tmp')
+        $nonce = [guid]::NewGuid().ToString('N')
+        $identity = [string] (Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().Ticks
+        [IO.File]::WriteAllText($ownerTemporary, "pid=$PID`nidentity=$identity`nnonce=$nonce`n", $script:Utf8)
+        [IO.File]::WriteAllText($generationTemporary, "$nonce`n", $script:Utf8)
+        $compatibilityOwner = [ordered]@{ pid = $PID; token = $nonce; startedAt = [DateTimeOffset]::UtcNow.ToString('o') }
+        [IO.File]::WriteAllText($compatibilityTemporary, (($compatibilityOwner | ConvertTo-Json -Compress) + "`n"), $script:Utf8)
         try {
             New-Item -ItemType Directory -Path $script:LockPath -ErrorAction Stop | Out-Null
-            $script:LockToken = [guid]::NewGuid().ToString('N')
-            Write-JsonAtomic (Join-Path $script:LockPath 'owner.json') ([ordered]@{
-                pid = $PID
-                token = $script:LockToken
-                startedAt = [DateTimeOffset]::UtcNow.ToString('o')
-            })
+            $created = $true
+            $createdIdentity = Get-UpdateLockDirectoryIdentity $script:LockPath
+            Invoke-UpdateLockTestPause 'AFTER_MKDIR'
+            if (-not $createdIdentity -or (Get-UpdateLockDirectoryIdentity $script:LockPath) -ne $createdIdentity) {
+                throw 'update lock directory changed during publication'
+            }
+            if (Test-Path -LiteralPath (Join-Path $script:LockPath 'owner.json') -PathType Leaf) {
+                throw 'legacy update lock owner appeared during publication'
+            }
+            Publish-UpdateLockFile $generationTemporary (Join-Path $script:LockPath 'generation')
+            if ((Get-UpdateLockDirectoryIdentity $script:LockPath) -ne $createdIdentity -or
+                    (Get-UpdateLockGeneration $script:LockPath) -ne $nonce) { throw 'update lock generation publication changed' }
+            Publish-UpdateLockFile $ownerTemporary $ownerFile
+            Publish-UpdateLockFile $compatibilityTemporary (Join-Path $script:LockPath 'owner.json')
+            if ((Get-UpdateLockDirectoryIdentity $script:LockPath) -ne $createdIdentity -or
+                    (Get-UpdateLockField $ownerFile 'nonce') -ne $nonce -or
+                    (Get-UpdateCompatibilityOwnerToken $script:LockPath) -ne $nonce -or
+                    @(Get-UpdateLockBarriers).Count -gt 0) {
+                throw 'update lock ownership publication changed'
+            }
+            Remove-Item -LiteralPath $ownerTemporary, $generationTemporary, $compatibilityTemporary -Force -ErrorAction SilentlyContinue
+            $script:LockToken = $nonce
+            Invoke-UpdateLockTestPause 'AFTER_PUBLISH'
+            if ((Get-UpdateLockDirectoryIdentity $script:LockPath) -ne $createdIdentity -or
+                    (Get-UpdateLockGeneration $script:LockPath) -ne $nonce -or
+                    (Get-UpdateCompatibilityOwnerToken $script:LockPath) -ne $nonce -or
+                    @(Get-UpdateLockBarriers).Count -gt 0) {
+                if (Recover-OwnedUpdateLock $nonce) { return }
+                $script:LockToken = $null
+                Start-Sleep -Milliseconds 20
+                continue
+            }
             return
         } catch {
-            $owner = $null
-            try { $owner = Read-JsonFile (Join-Path $script:LockPath 'owner.json') } catch { $owner = $null }
-            $ageSeconds = 0
-            try {
-                $ageSeconds = ([DateTimeOffset]::UtcNow - [DateTimeOffset](Get-Item -LiteralPath $script:LockPath).LastWriteTimeUtc).TotalSeconds
-            } catch { }
-            $ownerPid = 0
-            $ownerPidProperty = if ($null -ne $owner) { $owner.PSObject.Properties['pid'] } else { $null }
-            if ($null -ne $ownerPidProperty) { [void][int]::TryParse([string]$ownerPidProperty.Value, [ref]$ownerPid) }
-            if ($ageSeconds -ge 30 -and -not (Test-ProcessAlive $ownerPid)) {
-                $stale = "$($script:LockPath).stale.$PID.$([guid]::NewGuid().ToString('N'))"
-                try {
-                    Move-Item -LiteralPath $script:LockPath -Destination $stale -ErrorAction Stop
-                    Remove-Item -LiteralPath $stale -Recurse -Force -ErrorAction SilentlyContinue
-                    continue
-                } catch { }
+            if ($created -and $createdIdentity -and
+                    (Get-UpdateLockDirectoryIdentity $script:LockPath) -eq $createdIdentity) {
+                if (-not (Remove-UpdateLockGeneration $nonce)) { [void] (Remove-IncompleteUpdateLock) }
             }
-            Start-Sleep -Milliseconds 100
+        } finally {
+            Remove-Item -LiteralPath $ownerTemporary, $generationTemporary, $compatibilityTemporary -Force -ErrorAction SilentlyContinue
         }
+        $age = Get-UpdateLockAge $script:LockPath
+        $observedNonce = Get-UpdateLockField $ownerFile 'nonce'
+        if ($observedNonce) {
+            if ($age -ge 2 -and -not (Test-UpdateLockOwnerCurrent $ownerFile)) { [void] (Remove-UpdateLockGeneration $observedNonce) }
+        } elseif ((Get-UpdateLockGeneration $script:LockPath) -and $age -ge 2) {
+            [void] (Remove-UpdateLockGeneration (Get-UpdateLockGeneration $script:LockPath))
+        } elseif ($age -ge 300 -and -not (Test-LegacyUpdateLockOwnerAlive $script:LockPath) -and
+                (Test-Path -LiteralPath $script:LockPath -PathType Container)) {
+            $legacy = "$($script:LockPath).quarantine.legacy.$PID.$([guid]::NewGuid().ToString('N'))"
+            try { Move-Item -LiteralPath $script:LockPath -Destination $legacy -ErrorAction Stop }
+            catch { $legacy = '' }
+            if ($legacy) {
+                if ((Get-UpdateLockGeneration $legacy) -or (Get-UpdateLockField (Join-Path $legacy 'owner') 'nonce')) {
+                    [void] (Restore-UpdateLockBarrier $legacy)
+                } else { Remove-UpdateLockDirectory $legacy }
+            }
+        }
+        Start-Sleep -Milliseconds 20
     }
     throw 'timed out waiting for another Claudex update operation'
 }
 
 function Release-UpdateLock {
-    if (-not $script:LockToken) { return }
-    try {
-        $owner = Read-JsonFile (Join-Path $script:LockPath 'owner.json')
-        $tokenProperty = if ($null -ne $owner) { $owner.PSObject.Properties['token'] } else { $null }
-        if ($null -ne $tokenProperty -and [string]$tokenProperty.Value -eq $script:LockToken) {
-            Remove-Item -LiteralPath $script:LockPath -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    } catch { }
+    $nonce = $script:LockToken
+    if (-not $nonce) { return }
+    [void] (Remove-UpdateLockGeneration $nonce)
     $script:LockToken = $null
 }
 

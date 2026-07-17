@@ -3,7 +3,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { constants as osConstants, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   acquireSetupLock as acquireGenerationLock,
@@ -15,6 +15,16 @@ const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf
 const version = manifest.version;
 const packageName = manifest.name;
 const isWindows = process.platform === 'win32';
+const isInteractive = [process.stdin, process.stdout, process.stderr].some((stream) => stream.isTTY);
+const usesIsolatedProcessGroup = !isWindows && !isInteractive;
+const ownsInteractiveProcessGroup = !isWindows && isInteractive && (() => {
+  try {
+    process.kill(-process.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+})();
 const home = isWindows ? process.env.USERPROFILE || homedir() : process.env.HOME || homedir();
 const configDir = process.env.CLAUDEX_CONFIG_DIR || join(home, '.config', 'claudex');
 const markerPath = join(configDir, 'package-manager.json');
@@ -131,7 +141,7 @@ function acquireSetupLock(force) {
   return generation;
 }
 
-function ensurePackageSetup(login, force = false) {
+async function ensurePackageSetup(login, force = false) {
   // Every caller records the last completed attempt before it joins the lock
   // queue. If that generation changes to a failure while it waits, this caller
   // belongs to the same failure wave and must propagate the result instead of
@@ -146,7 +156,7 @@ function ensurePackageSetup(login, force = false) {
     if (isFailureForWave(completedWhileWaiting, baselineResult, joinedGeneration)) {
       status = completedWhileWaiting.status;
     } else if (force || needsSetup()) {
-      status = runInstaller(login);
+      status = await runInstaller(login);
       writeSetupResult(generation, status);
     }
   } finally {
@@ -155,21 +165,130 @@ function ensurePackageSetup(login, force = false) {
   if (status !== 0) process.exit(status);
 }
 
-function run(command, args, env = process.env) {
-  const result = spawnSync(command, args, {
-    env,
-    stdio: 'inherit',
-    windowsHide: true,
-  });
-  if (result.error) fail(`could not start ${command}: ${result.error.message}`);
-  if (result.signal) {
-    const signalNumber = osConstants.signals?.[result.signal];
-    fail(`${command} was interrupted by ${result.signal}`, signalNumber ? 128 + signalNumber : 130);
-  }
-  return result.status ?? 1;
+function signalExitCode(signal) {
+  const signalNumber = osConstants.signals?.[signal];
+  return signalNumber ? 128 + signalNumber : 130;
 }
 
-function runInstaller(login) {
+function startProcessGroupCleanupWatchdog(groupId, ownerPid) {
+  const watchdogSource = [
+    'const groupId = Number(process.argv[1]);',
+    'const ownerPid = Number(process.argv[2]);',
+    'const deadline = Date.now() + 10_000;',
+    'const timer = setInterval(() => {',
+    '  try { process.kill(ownerPid, 0); }',
+    '  catch (error) {',
+    "    if (error?.code !== 'ESRCH') process.exit(1);",
+    "    try { process.kill(-groupId, 'SIGKILL'); } catch (killError) {",
+    "      if (killError?.code !== 'ESRCH' && killError?.code !== 'EPERM') process.exit(1);",
+    '    }',
+    '    process.exit(0);',
+    '  }',
+    '  if (Date.now() >= deadline) process.exit(1);',
+    '}, 20);',
+  ].join('\n');
+  const watchdog = spawn(process.execPath, ['-e', watchdogSource, String(groupId), String(ownerPid)], {
+    detached: true,
+    env: { PATH: process.env.PATH || '' },
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  watchdog.unref();
+}
+
+function run(command, args, env = process.env) {
+  return new Promise((resolveStatus) => {
+    const child = spawn(command, args, {
+      // Interactive children must remain in the terminal's foreground process
+      // group so resize and job-control signals retain their native semantics.
+      // Non-interactive children get an isolated group that can be cleaned up
+      // without signaling the shell or automation process that launched us.
+      detached: usesIsolatedProcessGroup,
+      env,
+      stdio: 'inherit',
+      windowsHide: true,
+    });
+    let forwardedSignal = null;
+    let forceKillTimer = null;
+    let cleanupWatchdogStarted = false;
+    const signalHandlers = new Map();
+    const relayedSignals = new Set();
+
+    const signalChild = (signal) => {
+      try {
+        const target = usesIsolatedProcessGroup
+          ? -child.pid
+          : ownsInteractiveProcessGroup
+            ? -process.pid
+            : child.pid;
+        process.kill(target, signal);
+      } catch (error) {
+        if (error?.code !== 'ESRCH') throw error;
+      }
+    };
+    const cleanupSignalHandlers = () => {
+      for (const [signal, handler] of signalHandlers) process.off(signal, handler);
+      signalHandlers.clear();
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      forceKillTimer = null;
+    };
+
+    if (!isWindows) {
+      for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT']) {
+        const handler = () => {
+          if (relayedSignals.has(signal)) return;
+          if (!forwardedSignal) forwardedSignal = signal;
+          if (ownsInteractiveProcessGroup) {
+            relayedSignals.add(signal);
+            if (!cleanupWatchdogStarted) {
+              startProcessGroupCleanupWatchdog(process.pid, process.pid);
+              cleanupWatchdogStarted = true;
+            }
+          }
+          signalChild(signal);
+          if (!forceKillTimer) {
+            forceKillTimer = setTimeout(() => {
+              if (ownsInteractiveProcessGroup) process.exit(signalExitCode(forwardedSignal));
+              else signalChild('SIGKILL');
+            }, 2_000);
+          }
+        };
+        signalHandlers.set(signal, handler);
+        process.on(signal, handler);
+      }
+    }
+
+    child.once('error', (error) => {
+      cleanupSignalHandlers();
+      fail(`could not start ${command}: ${error.message}`);
+    });
+    child.once('exit', (status, childSignal) => {
+      cleanupSignalHandlers();
+      if (forwardedSignal) {
+        // The launcher may trap the forwarded signal and exit before one of
+        // its descendants. Remove anything still in its isolated group before
+        // this bootstrap returns the conventional 128+signal status.
+        if (usesIsolatedProcessGroup) {
+          try {
+            process.kill(-child.pid, 'SIGKILL');
+          } catch (error) {
+            // macOS may report EPERM while a just-killed process group contains
+            // only unreaped members. The original group signal already won.
+            if (error?.code !== 'ESRCH' && error?.code !== 'EPERM') throw error;
+          }
+        }
+        resolveStatus(signalExitCode(forwardedSignal));
+      } else if (childSignal) {
+        process.stderr.write(`claudex: ${command} was interrupted by ${childSignal}\n`);
+        resolveStatus(signalExitCode(childSignal));
+      } else {
+        resolveStatus(status ?? 1);
+      }
+    });
+  });
+}
+
+async function runInstaller(login) {
   process.stderr.write(`claudex: preparing ${packageName} ${version}...\n`);
   const installerEnvironment = {
     ...process.env,
@@ -188,11 +307,11 @@ function runInstaller(login) {
       join(packageRoot, 'install.ps1'),
     ];
     if (login) args.push('-Login');
-    status = run('powershell.exe', args, installerEnvironment);
+    status = await run('powershell.exe', args, installerEnvironment);
   } else {
     const args = [join(packageRoot, 'install.sh')];
     if (login) args.push('--login');
-    status = run('bash', args, installerEnvironment);
+    status = await run('bash', args, installerEnvironment);
   }
   if (status !== 0) return status;
   writeMarker();
@@ -255,16 +374,16 @@ if (args[0] === '--package-setup') {
   if (setupArgs.some((argument) => argument !== '--login')) {
     fail('--package-setup accepts only --login', 2);
   }
-  ensurePackageSetup(setupArgs.includes('--login'), true);
+  await ensurePackageSetup(setupArgs.includes('--login'), true);
   process.stdout.write('Claudex package setup is complete. Run: claudex\n');
   process.exit(0);
 }
 
-if (needsSetup()) ensurePackageSetup(false);
+if (needsSetup()) await ensurePackageSetup(false);
 
 let status;
 if (isWindows) {
-  status = run('powershell.exe', [
+  status = await run('powershell.exe', [
     '-NoLogo',
     '-NoProfile',
     '-ExecutionPolicy',
@@ -274,6 +393,6 @@ if (isWindows) {
     ...args,
   ]);
 } else {
-  status = run(launcherPath, args);
+  status = await run(launcherPath, args);
 }
 process.exit(status);

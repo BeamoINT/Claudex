@@ -127,12 +127,12 @@ try {
   const skillsDirectoryPlugin = path.join(claudeHome, 'skills', 'skills-directory-plugin');
   write(path.join(skillsDirectoryPlugin, '.claude-plugin', 'plugin.json'), JSON.stringify({
     name: 'skills-directory', defaultEnabled: true,
-    commands: ['./custom/deploy.md', './custom/release'],
+    commands: ['./custom'],
   }));
   writeSkill(skillsDirectoryPlugin, 'root-tool', 'ROOT_PLUGIN_BODY');
   writeSkill(path.join(skillsDirectoryPlugin, 'skills', 'nested'), 'nested', 'NESTED_PLUGIN_BODY');
   write(path.join(skillsDirectoryPlugin, 'custom', 'deploy.md'), '---\ndescription: Deploy directly\n---\n\nDIRECT_COMMAND_BODY\n');
-  writeSkill(path.join(skillsDirectoryPlugin, 'custom', 'release'), 'release-command', 'NESTED_COMMAND_BODY');
+  writeSkill(path.join(skillsDirectoryPlugin, 'custom', 'team', 'release'), 'release-command', 'NESTED_COMMAND_BODY');
   write(path.join(skillsDirectoryPlugin, 'Hooks', 'dangerous.js'), 'throw new Error("must not activate");\n');
   const rootFallbackPlugin = path.join(claudeHome, 'skills', 'root-fallback-plugin');
   write(path.join(rootFallbackPlugin, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'root-fallback' }));
@@ -402,9 +402,25 @@ try {
   const structuredRepo = path.join(temporary, 'structured repo');
   fs.mkdirSync(path.join(structuredRepo, '.git'), { recursive: true });
   const inlineDisabled = path.join(structuredHome, '.agents', 'skills', 'inline-disabled');
+  const inlineReenabled = path.join(structuredHome, '.agents', 'skills', 'inline-reenabled');
   writeSkill(inlineDisabled, 'inline-disabled');
-  write(path.join(structuredCodexHome, 'config.toml'),
-    `skills.config = [{ path = ${JSON.stringify(inlineDisabled)}, enabled = false }]\n`);
+  writeSkill(inlineReenabled, 'inline-reenabled');
+  write(path.join(structuredRepo, 'TEAM_GUIDE.md'), 'MULTILINE_FALLBACK_MARKER\n');
+  write(path.join(structuredCodexHome, 'config.toml'), [
+    'project_doc_fallback_filenames = [',
+    '  "TEAM_GUIDE.md", # valid multiline TOML array',
+    ']',
+    '[[skills.config]]',
+    `path = ${JSON.stringify(inlineDisabled)}`,
+    'enabled = false',
+    '[[skills.config]]',
+    `path = ${JSON.stringify(inlineReenabled)}`,
+    'enabled = false',
+    '[[skills.config]]',
+    `path = ${JSON.stringify(inlineReenabled)}`,
+    'enabled = true',
+    '',
+  ].join('\n'));
   const emptyInventory = path.join(temporary, 'empty-plugins.json');
   write(emptyInventory, '{"installed":[]}\n');
   const structured = invoke(
@@ -412,9 +428,32 @@ try {
     structuredRepo,
   );
 
-  check('structured TOML skills.config disables the referenced skill', () => {
+  const inlineHome = path.join(temporary, 'inline home');
+  const inlineConfig = path.join(inlineHome, '.config', 'claudex');
+  const inlineCodexHome = path.join(inlineHome, '.codex');
+  const inlineRepo = path.join(temporary, 'inline repo');
+  fs.mkdirSync(path.join(inlineRepo, '.git'), { recursive: true });
+  const independentlyInlineDisabled = path.join(inlineHome, '.agents', 'skills', 'independently-inline-disabled');
+  writeSkill(independentlyInlineDisabled, 'independently-inline-disabled');
+  write(path.join(inlineCodexHome, 'config.toml'),
+    `skills.config = [{ path = ${JSON.stringify(independentlyInlineDisabled)}, enabled = false }]\n`);
+  const inlineOnly = invoke(
+    environmentFor(inlineHome, inlineConfig, inlineCodexHome, emptyInventory),
+    inlineRepo,
+  );
+
+  check('repeated TOML array tables preserve textual last-wins ordering', () => {
     expect(!aliases(structured).has('inline-disabled'),
-      'valid dotted-key/inline-table skills.config was ignored');
+      'valid array-table skills.config was ignored');
+    expect(aliases(structured).has('inline-reenabled'),
+      'textually later array-table entry did not re-enable an earlier array-table disable');
+    expect(fs.readFileSync(path.join(structured.overlay, 'CLAUDE.md'), 'utf8').includes('MULTILINE_FALLBACK_MARKER'),
+      'multiline project_doc_fallback_filenames was ignored');
+  });
+
+  check('standalone inline-table TOML skills.config remains supported', () => {
+    expect(!aliases(inlineOnly).has('independently-inline-disabled'),
+      'valid dotted-key inline-table skills.config was ignored');
   });
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });

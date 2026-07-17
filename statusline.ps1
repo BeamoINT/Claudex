@@ -21,6 +21,55 @@ $contextWindowSize = 0
 $inputColumns = 0
 $sessionPersistenceEnabled = $env:CLAUDEX_NO_SESSION_PERSISTENCE -ne '1'
 
+function ConvertTo-TerminalSafeText([AllowNull()][string] $Value) {
+    if ($null -eq $Value) { return '' }
+    # Remove string-carrying protocols first so their payloads cannot become
+    # visible spoofing text, then neutralize CSI, C0/C1, and bidi formatting.
+    $safe = [regex]::Replace($Value, '(?:\x1B\]|\u009D)[^\x07\x1B\u009C]*(?:\x07|\x1B\\|\u009C)?', '')
+    $safe = [regex]::Replace($safe, '(?:\x1B\[|\u009B)[0-?]*[ -/]*[@-~]', '')
+    $safe = [regex]::Replace($safe, '(?:\x1B[P_^X]|[\u0090\u0098\u009E\u009F])[^\x1B\u009C]*(?:\x1B\\|\u009C)?', '')
+    $safe = [regex]::Replace($safe, '\x1B.', '')
+    return [regex]::Replace($safe, '[\x00-\x1F\x7F-\x9F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]', '')
+}
+
+function ConvertTo-TerminalSafeLabel([AllowNull()][string] $Value) {
+    if ($null -eq $Value) { return '' }
+    # Model and effort fields are semantic labels rather than free-form text.
+    # Keep only the prefix before the first terminal control or bidi formatter;
+    # otherwise text following a removed protocol could join or spoof a label.
+    # This script applies its owned SGR only after the label crosses this bound.
+    $unsafe = [regex]::Match($Value, '[\x00-\x1F\x7F-\x9F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]')
+    if ($unsafe.Success) { return $Value.Substring(0, $unsafe.Index) }
+    return $Value
+}
+
+function Start-UsageRefreshWithoutPrivateEnvironment([hashtable] $Parameters) {
+    $privateNames = @(
+        'CLAUDEX_PROXY_TOKEN', 'CLAUDEX_PROXY_URL', 'CLAUDEX_PROXY_CONFIG', 'CLAUDEX_PROXY_BIN',
+        'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK',
+        'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BEDROCK_BASE_URL',
+        'ANTHROPIC_BEDROCK_MANTLE_BASE_URL', 'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_VERTEX_PROJECT_ID',
+        'ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_FOUNDRY_RESOURCE', 'ANTHROPIC_FOUNDRY_API_KEY', 'ANTHROPIC_API_KEY',
+        'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS', 'ANTHROPIC_MODEL',
+        'ANTHROPIC_SMALL_FAST_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION',
+        'ANTHROPIC_CUSTOM_MODEL_OPTION', 'ANTHROPIC_CUSTOM_MODEL_OPTION_NAME',
+        'ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION'
+    )
+    $saved = @{}
+    foreach ($name in $privateNames) {
+        $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+    }
+    try { return Start-Process @Parameters }
+    finally {
+        foreach ($name in $saved.Keys) {
+            $value = $saved[$name]
+            if ($null -eq $value) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+            else { [Environment]::SetEnvironmentVariable($name, [string] $value, 'Process') }
+        }
+    }
+}
+
 function Remove-StaleStatuslineCache([string] $CacheDirectory, [string] $ProtectedFile) {
     if (-not (Test-Path -LiteralPath $CacheDirectory -PathType Container)) { return }
     $cutoff = [DateTime]::UtcNow.AddDays(-7)
@@ -35,25 +84,6 @@ function Remove-StaleStatuslineCache([string] $CacheDirectory, [string] $Protect
     foreach ($file in @($survivors | Where-Object { $_.FullName -ne $ProtectedFile } | Select-Object -Skip 127)) {
         Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
     }
-}
-
-function Move-StatuslineRefreshLockToQuarantine([string] $CacheDirectory, [string] $LockPath, [string] $ExpectedRecord) {
-    $quarantine = Join-Path $CacheDirectory ('.refresh.lock.quarantine.' + $PID + '.' + [guid]::NewGuid().ToString('N'))
-    try { Move-Item -LiteralPath $LockPath -Destination $quarantine -ErrorAction Stop } catch { return $false }
-    $movedOwnerPath = Join-Path $quarantine 'owner-pid'
-    $movedRecord = ''
-    if (Test-Path -LiteralPath $movedOwnerPath -PathType Leaf) {
-        try { $movedRecord = [IO.File]::ReadAllText($movedOwnerPath).Trim() } catch { $movedRecord = '' }
-    }
-    if ($movedRecord -eq $ExpectedRecord) {
-        Remove-Item -LiteralPath $movedOwnerPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $quarantine -Force -ErrorAction SilentlyContinue
-        return $true
-    }
-    if (-not (Test-Path -LiteralPath $LockPath)) {
-        try { Move-Item -LiteralPath $quarantine -Destination $LockPath -ErrorAction Stop } catch { }
-    }
-    return $false
 }
 
 if ($data) {
@@ -120,6 +150,10 @@ if (-not $effort) {
 }
 if (-not $effort) { $effort = 'adaptive' }
 if ($env:CLAUDEX_SESSION_MODE) { $effort = $env:CLAUDEX_SESSION_MODE }
+$modelId = ConvertTo-TerminalSafeLabel $modelId
+$displayName = ConvertTo-TerminalSafeLabel $displayName
+$effort = ConvertTo-TerminalSafeLabel $effort
+if (-not $effort) { $effort = 'adaptive' }
 
 $usageSummary = ''
 $usageDisplay = if ($env:CLAUDEX_USAGE_DISPLAY) { $env:CLAUDEX_USAGE_DISPLAY } else { 'on' }
@@ -144,71 +178,25 @@ if ($usageDisplay -ne 'off' -and (Test-Path -LiteralPath $usageHelper -PathType 
         $summaryPath = Join-Path $usageCacheDir 'summary'
         $lastAttemptPath = Join-Path $usageCacheDir 'last-attempt'
         $lastSuccessPath = Join-Path $usageCacheDir 'last-success'
-        $refreshLock = Join-Path $usageCacheDir 'refresh.lock'
-        $refreshOwnerPath = Join-Path $refreshLock 'owner-pid'
         $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
         $lastAttempt = 0L
         if (Test-Path -LiteralPath $lastAttemptPath -PathType Leaf) { [long]::TryParse(([IO.File]::ReadAllText($lastAttemptPath).Trim()), [ref] $lastAttempt) | Out-Null }
         if ($now - $lastAttempt -ge $refreshSeconds) {
             [IO.Directory]::CreateDirectory($usageCacheDir) | Out-Null
-            $started = $false
-            $ownerTemporary = $null
-            try {
-                New-Item -Path $refreshLock -ItemType Directory -ErrorAction Stop | Out-Null
-                $refreshToken = [guid]::NewGuid().ToString('N')
-                [IO.File]::WriteAllText($refreshOwnerPath, "$PID $refreshToken`n", $utf8)
-                [IO.File]::WriteAllText($lastAttemptPath, "$now`n", $utf8)
-                $powershell = (Get-Process -Id $PID).Path
-                $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $usageHelper + '"'), '-RefreshCache', '-LockHeld', '-LockToken', $refreshToken)
-                # Start-Process otherwise lets the refresh helper inherit the
-                # status-line protocol streams. Fixed per-lock files are
-                # truncated on each refresh; the helper's own response/error
-                # caps keep both files bounded.
-                $refreshStdout = Join-Path $usageCacheDir '.status-refresh.stdout.log'
-                $refreshStderr = Join-Path $usageCacheDir '.status-refresh.stderr.log'
-                $refreshProcess = Start-Process -FilePath $powershell -ArgumentList $arguments -WindowStyle Hidden -PassThru `
-                    -RedirectStandardOutput $refreshStdout -RedirectStandardError $refreshStderr
-                $ownerTemporary = Join-Path $refreshLock ('.owner.' + [guid]::NewGuid().ToString('N'))
-                [IO.File]::WriteAllText($ownerTemporary, "$($refreshProcess.Id) $refreshToken`n", $utf8)
-                $currentRecord = [IO.File]::ReadAllText($refreshOwnerPath).Trim()
-                $currentParts = @($currentRecord -split ' ', 2)
-                if ($currentParts.Count -eq 2 -and $currentParts[1] -eq $refreshToken) {
-                    Move-Item -LiteralPath $ownerTemporary -Destination $refreshOwnerPath -Force
-                    $ownerTemporary = $null
-                } else {
-                    Remove-Item -LiteralPath $ownerTemporary -Force -ErrorAction SilentlyContinue
-                    $ownerTemporary = $null
-                }
-                $started = $true
-            } catch {
-                if ($ownerTemporary) { Remove-Item -LiteralPath $ownerTemporary -Force -ErrorAction SilentlyContinue }
-                if (-not $started -and $now - $lastAttempt -ge ($refreshSeconds * 2) -and (Test-Path -LiteralPath $refreshLock -PathType Container)) {
-                    $observedRecord = ''
-                    if (Test-Path -LiteralPath $refreshOwnerPath -PathType Leaf) {
-                        $observedRecord = [IO.File]::ReadAllText($refreshOwnerPath).Trim()
-                    }
-                    $ownerParts = @($observedRecord -split ' ', 2)
-                    $refreshOwner = 0
-                    if ($ownerParts.Count -gt 0) { [int]::TryParse($ownerParts[0], [ref] $refreshOwner) | Out-Null }
-                    $ownerIsDead = $refreshOwner -gt 0 -and -not (Get-Process -Id $refreshOwner -ErrorAction SilentlyContinue)
-                    $ownerlessIsStale = $false
-                    if ($refreshOwner -le 0) {
-                        try {
-                            $lockAge = ([DateTime]::UtcNow - (Get-Item -LiteralPath $refreshLock).LastWriteTimeUtc).TotalSeconds
-                            $ownerlessIsStale = $lockAge -ge 2
-                        } catch { $ownerlessIsStale = $false }
-                    }
-                    if ($ownerIsDead -or $ownerlessIsStale) {
-                        $currentRecord = ''
-                        if (Test-Path -LiteralPath $refreshOwnerPath -PathType Leaf) {
-                            $currentRecord = [IO.File]::ReadAllText($refreshOwnerPath).Trim()
-                        }
-                        if ($currentRecord -eq $observedRecord) {
-                            [void] (Move-StatuslineRefreshLockToQuarantine $usageCacheDir $refreshLock $observedRecord)
-                        }
-                    }
-                }
+            [IO.File]::WriteAllText($lastAttemptPath, "$now`n", $utf8)
+            # The helper owns the complete generation-safe lock protocol. A
+            # losing helper exits quickly without touching the current owner.
+            $powershell = (Get-Process -Id $PID).Path
+            $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $usageHelper + '"'), '-RefreshCache')
+            $refreshParameters = @{
+                FilePath = $powershell
+                ArgumentList = $arguments
+                WindowStyle = 'Hidden'
+                PassThru = $true
+                RedirectStandardOutput = (Join-Path $usageCacheDir '.status-refresh.stdout.log')
+                RedirectStandardError = (Join-Path $usageCacheDir '.status-refresh.stderr.log')
             }
+            [void] (Start-UsageRefreshWithoutPrivateEnvironment $refreshParameters)
         }
         $lastSuccess = 0L
         if (Test-Path -LiteralPath $lastSuccessPath -PathType Leaf) { [long]::TryParse(([IO.File]::ReadAllText($lastSuccessPath).Trim()), [ref] $lastSuccess) | Out-Null }
@@ -217,6 +205,7 @@ if ($usageDisplay -ne 'off' -and (Test-Path -LiteralPath $usageHelper -PathType 
         }
     } catch { $usageSummary = '' }
 }
+$usageSummary = ConvertTo-TerminalSafeText $usageSummary
 
 $modelName = switch -Wildcard ($modelId) {
     'gpt-5.6-sol' { 'GPT-5.6 Sol'; break }
@@ -247,6 +236,7 @@ if (-not $selectedModelMode) {
     }
 }
 if ($selectedModelMode -eq 'solplan') { $modelName = 'GPT-5.6 Solplan' }
+$modelName = ConvertTo-TerminalSafeLabel $modelName
 
 $statuslineColumns = 0
 foreach ($candidate in @($env:CLAUDEX_STATUSLINE_COLUMNS, $inputColumns, $env:COLUMNS)) {

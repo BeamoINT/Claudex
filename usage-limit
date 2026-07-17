@@ -71,74 +71,333 @@ read_usage_generation() {
   printf '%s\n' "$generation"
 }
 
-new_lock_token() {
-  printf '%s-%s-%s\n' "$(date +%s)" "$$" "${RANDOM:-0}"
-}
-
-read_refresh_owner() {
-  local owner_dir="${1:-$refresh_lock}" owner_record="" owner_file
-  owner_file="$owner_dir/owner-pid"
-  if [[ -r "$owner_file" ]]; then
-    IFS= read -r owner_record < "$owner_file" || owner_record=""
-  fi
-  printf '%s\n' "$owner_record"
-}
-
-quarantine_refresh_lock() {
-  local expected_record="$1" quarantine moved_record
-  quarantine="$cache_dir/.refresh.lock.quarantine.$$.$RANDOM"
-  mv "$refresh_lock" "$quarantine" 2>/dev/null || return 1
-  moved_record=$(read_refresh_owner "$quarantine")
-  if [[ "$moved_record" == "$expected_record" ]]; then
-    rm -f "$quarantine/owner-pid"
-    rmdir "$quarantine" 2>/dev/null || true
+process_start_identity() {
+  local pid="$1" started checksum
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_REFRESH_PROCESS_IDENTITY:-}" ]]; then
+    printf '%s\n' "$CLAUDEX_TEST_REFRESH_PROCESS_IDENTITY"
     return 0
   fi
-  # We moved a newer generation. Restore it if the canonical path is still
-  # free; otherwise preserve the quarantined directory for recovery rather
-  # than deleting a lock we do not own.
-  if [[ ! -e "$refresh_lock" ]]; then
-    mv "$quarantine" "$refresh_lock" 2>/dev/null || true
+  started=$(/bin/ps -p "$pid" -o lstart= 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]][[:space:]]*/ /g') || return 1
+  [[ -n "$started" ]] || return 1
+  checksum=$(printf '%s' "$started" | cksum) || return 1
+  printf '%s-%s\n' "${checksum%% *}" "${checksum##* }"
+}
+
+refresh_lock_age_seconds() {
+  local path="${1:-$refresh_lock}" now mtime=0
+  now=$(date +%s)
+  if stat -f '%m' "$path" >/dev/null 2>&1; then
+    mtime=$(stat -f '%m' "$path" 2>/dev/null || printf 0)
+  else
+    mtime=$(stat -c '%Y' "$path" 2>/dev/null || printf 0)
   fi
+  if [[ "$now" =~ ^[0-9]+$ && "$mtime" =~ ^[0-9]+$ ]] && (( now >= mtime )); then
+    printf '%s\n' "$(( now - mtime ))"
+  else
+    printf '%s\n' 0
+  fi
+}
+
+read_refresh_lock_field() {
+  local file="$1" field="$2" line legacy_pid legacy_identity legacy_nonce
+  [[ -r "$file" ]] || return 0
+  while IFS= read -r line; do
+    [[ "$line" == "$field="* ]] || continue
+    printf '%s\n' "${line#*=}"
+    return 0
+  done < "$file"
+  IFS= read -r line < "$file" || line=""
+  if [[ "$line" =~ ^([0-9]+)[[:space:]]+([^@[:space:]]+)@([^@[:space:]]+)$ ]]; then
+    legacy_pid="${BASH_REMATCH[1]}"
+    legacy_identity="${BASH_REMATCH[2]}"
+    legacy_nonce="${BASH_REMATCH[3]}"
+    case "$field" in
+      pid) printf '%s\n' "$legacy_pid" ;;
+      identity) [[ "$legacy_identity" == - ]] || printf '%s\n' "$legacy_identity" ;;
+      nonce) printf '%s\n' "$legacy_nonce" ;;
+    esac
+  fi
+}
+
+read_refresh_generation_nonce() {
+  local directory="${1:-$refresh_lock}" nonce=""
+  [[ -r "$directory/generation" ]] || return 0
+  IFS= read -r nonce < "$directory/generation" || nonce=""
+  printf '%s\n' "$nonce"
+}
+
+refresh_lock_barrier_exists() {
+  local barrier
+  for barrier in "$refresh_lock".quarantine.*; do [[ -e "$barrier" ]] && return 0; done
+  return 1
+}
+
+refresh_lock_directory_identity() {
+  local directory="${1:-$refresh_lock}" identity=""
+  if stat -c '%d:%i' -- "$directory" >/dev/null 2>&1; then
+    identity=$(stat -c '%d:%i' -- "$directory" 2>/dev/null || true)
+  else
+    identity=$(stat -f '%d:%i' "$directory" 2>/dev/null || true)
+  fi
+  [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  printf '%s\n' "$identity"
+}
+
+refresh_lock_test_pause() {
+  local stage="$1" ready_variable continue_variable ready_file continue_file
+  [[ "${CLAUDEX_TEST_MODE:-0}" == 1 ]] || return 0
+  ready_variable="CLAUDEX_TEST_REFRESH_LOCK_${stage}_READY_FILE"
+  continue_variable="CLAUDEX_TEST_REFRESH_LOCK_${stage}_CONTINUE_FILE"
+  ready_file="${!ready_variable:-}"
+  continue_file="${!continue_variable:-}"
+  [[ -n "$ready_file" && -n "$continue_file" ]] || return 0
+  : > "$ready_file"
+  while [[ ! -e "$continue_file" ]]; do sleep 0.02; done
+}
+
+refresh_owner_is_current() {
+  local owner_file="$1" pid identity current
+  pid=$(read_refresh_lock_field "$owner_file" pid)
+  identity=$(read_refresh_lock_field "$owner_file" identity)
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  current=$(process_start_identity "$pid" 2>/dev/null || true)
+  [[ -z "$identity" || -z "$current" || "$current" == "$identity" ]]
+}
+
+legacy_refresh_owner_is_current() {
+  local record="$1" pid token
+  pid="${record%% *}"
+  token="${record#* }"
+  [[ "$record" == *" "* && "$pid" =~ ^[0-9]+$ && -n "$token" && "$token" != *[[:space:]]* ]] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+publish_refresh_lock_file() {
+  local source="$1" destination="$2"
+  [[ "${CLAUDEX_TEST_MODE:-0}" != 1 || "${CLAUDEX_TEST_FORCE_REFRESH_PUBLICATION_FAILURE:-0}" != 1 ]] || return 1
+  if [[ "${CLAUDEX_TEST_MODE:-0}" != 1 || "${CLAUDEX_TEST_FORCE_REFRESH_HARDLINK_FAILURE:-0}" != 1 ]]; then
+    ln "$source" "$destination" 2>/dev/null && return 0
+  fi
+  (set -C; umask 077; exec 9> "$destination" || exit 1; cat "$source" >&9) 2>/dev/null
+}
+
+remove_refresh_lock_files() {
+  rm -f "$1/owner-pid" "$1/generation" 2>/dev/null || true
+  rmdir "$1" 2>/dev/null || true
+}
+
+restore_refresh_lock_barrier() {
+  local barrier="$1" attempt
+  for attempt in {1..250}; do
+    if [[ ! -e "$refresh_lock" ]] && mv "$barrier" "$refresh_lock" 2>/dev/null; then return 0; fi
+    sleep 0.02
+  done
+  return 1
+}
+
+recover_refresh_lock_barriers() {
+  local barrier age nonce legacy_record legacy_seconds=$(( timeout_seconds * 3 + 10 ))
+  for barrier in "$refresh_lock".quarantine.*; do
+    [[ -d "$barrier" ]] || continue
+    nonce=$(read_refresh_lock_field "$barrier/owner-pid" nonce)
+    legacy_record=$(read_legacy_refresh_owner "$barrier")
+    age=$(refresh_lock_age_seconds "$barrier")
+    if [[ -n "$nonce" ]] && refresh_owner_is_current "$barrier/owner-pid"; then
+      [[ -e "$refresh_lock" ]] || mv "$barrier" "$refresh_lock" 2>/dev/null || true
+    elif [[ -n "$legacy_record" ]] && legacy_refresh_owner_is_current "$legacy_record"; then
+      rm -f "$barrier/generation" 2>/dev/null || true
+      [[ -e "$refresh_lock" ]] || mv "$barrier" "$refresh_lock" 2>/dev/null || true
+    elif [[ -n "$nonce" && "$age" -ge 2 ]]; then
+      remove_refresh_lock_files "$barrier"
+    elif [[ -n "$(read_refresh_generation_nonce "$barrier")" && "$age" -ge 2 ]]; then
+      remove_refresh_lock_files "$barrier"
+    else
+      if [[ -n "$legacy_record" && "$age" -ge 2 ]]; then
+        remove_refresh_lock_files "$barrier"
+      elif [[ -z "$legacy_record" && "$age" -ge "$legacy_seconds" ]]; then
+        remove_refresh_lock_files "$barrier"
+      fi
+    fi
+  done
+}
+
+remove_owned_refresh_generation() {
+  local expected_nonce="$1" quarantine moved_generation moved_owner_nonce current_generation current_owner_nonce
+  current_generation=$(read_refresh_generation_nonce)
+  current_owner_nonce=$(read_refresh_lock_field "$refresh_owner_file" nonce)
+  [[ -n "$expected_nonce" ]] || return 1
+  { [[ "$current_generation" == "$expected_nonce" ]] || [[ "$current_owner_nonce" == "$expected_nonce" ]]; } || return 1
+  quarantine="$refresh_lock.quarantine.$$.$RANDOM"
+  refresh_lock_test_pause BEFORE_RENAME
+  mv "$refresh_lock" "$quarantine" 2>/dev/null || return 1
+  refresh_lock_test_pause AFTER_RENAME
+  moved_generation=$(read_refresh_generation_nonce "$quarantine")
+  moved_owner_nonce=$(read_refresh_lock_field "$quarantine/owner-pid" nonce)
+  if [[ "$moved_generation" == "$expected_nonce" && "$moved_owner_nonce" == "$expected_nonce" ]]; then
+    remove_refresh_lock_files "$quarantine"
+    return 0
+  fi
+  if [[ "$moved_generation" == "$expected_nonce" && "$moved_owner_nonce" != "$expected_nonce" ]]; then
+    rm -f "$quarantine/generation" 2>/dev/null || true
+  fi
+  restore_refresh_lock_barrier "$quarantine" || true
+  return 1
+}
+
+recover_owned_refresh_generation() {
+  local expected_nonce="$1" barrier moved_nonce current_nonce
+  for barrier in "$refresh_lock".quarantine.*; do
+    [[ -d "$barrier" ]] || continue
+    moved_nonce=$(read_refresh_generation_nonce "$barrier")
+    [[ -n "$moved_nonce" ]] || moved_nonce=$(read_refresh_lock_field "$barrier/owner-pid" nonce)
+    [[ "$moved_nonce" == "$expected_nonce" ]] || continue
+    [[ -e "$refresh_lock" ]] || mv "$barrier" "$refresh_lock" 2>/dev/null || true
+  done
+  current_nonce=$(read_refresh_generation_nonce)
+  [[ -n "$current_nonce" ]] || current_nonce=$(read_refresh_lock_field "$refresh_owner_file" nonce)
+  [[ "$current_nonce" == "$expected_nonce" ]] && ! refresh_lock_barrier_exists
+}
+
+remove_incomplete_refresh_lock() {
+  local quarantine moved_nonce legacy_record
+  [[ -d "$refresh_lock" ]] || return 0
+  quarantine="$refresh_lock.quarantine.incomplete.$$.$RANDOM"
+  mv "$refresh_lock" "$quarantine" 2>/dev/null || return 1
+  moved_nonce=$(read_refresh_generation_nonce "$quarantine")
+  [[ -n "$moved_nonce" ]] || moved_nonce=$(read_refresh_lock_field "$quarantine/owner-pid" nonce)
+  legacy_record=$(read_legacy_refresh_owner "$quarantine")
+  if [[ -n "$moved_nonce" || -n "$legacy_record" ]]; then restore_refresh_lock_barrier "$quarantine" || true; return 1; fi
+  remove_refresh_lock_files "$quarantine"
+}
+
+read_legacy_refresh_owner() {
+  local directory="${1:-$refresh_lock}" record=""
+  [[ -r "$directory/owner-pid" ]] || return 0
+  IFS= read -r record < "$directory/owner-pid" || record=""
+  printf '%s\n' "$record"
+}
+
+remove_legacy_refresh_lock() {
+  local expected_record="$1" quarantine moved_record
+  quarantine="$refresh_lock.quarantine.legacy.$$.$RANDOM"
+  mv "$refresh_lock" "$quarantine" 2>/dev/null || return 1
+  moved_record=$(read_legacy_refresh_owner "$quarantine")
+  if [[ "$moved_record" == "$expected_record" && -z "$(read_refresh_generation_nonce "$quarantine")" ]]; then
+    remove_refresh_lock_files "$quarantine"
+    return 0
+  fi
+  restore_refresh_lock_barrier "$quarantine" || true
+  return 1
+}
+
+acquire_refresh_lock() {
+  local attempt age observed_nonce owner_identity generation_nonce generation_tmp owner_tmp quarantine legacy_seconds
+  local created_directory_identity current_directory_identity
+  local legacy_record
+  (( lock_held == 0 )) || {
+    observed_nonce=$(read_refresh_generation_nonce)
+    [[ -n "$observed_nonce" ]] || observed_nonce=$(read_refresh_lock_field "$refresh_owner_file" nonce)
+    [[ "$observed_nonce" == "$lock_token" ]] && ! refresh_lock_barrier_exists || {
+      fail 'the inherited usage refresh lock is no longer owned by this generation.'
+      return 1
+    }
+    return 0
+  }
+  mkdir -p "$cache_dir"
+  chmod 700 "$cache_dir" 2>/dev/null || true
+  legacy_seconds=$(( timeout_seconds * 3 + 10 ))
+  for attempt in {1..100}; do
+    recover_refresh_lock_barriers
+    if refresh_lock_barrier_exists; then
+      if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE:-}" ]]; then
+        (umask 077; printf '%s\n' ready > "$CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE")
+      fi
+      sleep 0.02
+      continue
+    fi
+    owner_identity=$(process_start_identity "$$" 2>/dev/null || true)
+    [[ -n "$owner_identity" ]] || owner_identity="-"
+    generation_nonce="$$.$(date +%s).${RANDOM}.${RANDOM}"
+    generation_tmp=$(mktemp "$cache_dir/.refresh-generation.XXXXXX")
+    owner_tmp=$(mktemp "$cache_dir/.refresh-owner.XXXXXX")
+    printf '%s\n' "$generation_nonce" > "$generation_tmp"
+    # Keep the whole file valid for pre-generation releases while current
+    # readers decode the process identity and exact generation from the token.
+    printf '%s %s@%s\n' "$$" "$owner_identity" "$generation_nonce" > "$owner_tmp"
+    chmod 600 "$generation_tmp" "$owner_tmp" 2>/dev/null || true
+    if mkdir "$refresh_lock" 2>/dev/null; then
+      # Keep the created directory referenced until publication finishes so an
+      # unlink and recreate cannot reuse its inode and masquerade as the same
+      # directory during the identity checks below.
+      if ! exec 8< "$refresh_lock"; then
+        rm -f "$generation_tmp" "$owner_tmp"
+        sleep 0.02
+        continue
+      fi
+      created_directory_identity=$(refresh_lock_directory_identity "$refresh_lock" || true)
+      refresh_lock_test_pause AFTER_MKDIR
+      current_directory_identity=$(refresh_lock_directory_identity "$refresh_lock" || true)
+      if [[ -n "$created_directory_identity" && "$current_directory_identity" == "$created_directory_identity" ]] \
+          && publish_refresh_lock_file "$generation_tmp" "$refresh_lock/generation" \
+          && [[ "$(refresh_lock_directory_identity "$refresh_lock" || true)" == "$created_directory_identity" ]] \
+          && [[ "$(read_refresh_generation_nonce)" == "$generation_nonce" ]] \
+          && publish_refresh_lock_file "$owner_tmp" "$refresh_owner_file" \
+          && [[ "$(refresh_lock_directory_identity "$refresh_lock" || true)" == "$created_directory_identity" ]] \
+          && [[ "$(read_refresh_lock_field "$refresh_owner_file" nonce)" == "$generation_nonce" ]] \
+          && ! refresh_lock_barrier_exists; then
+        rm -f "$generation_tmp" "$owner_tmp"
+        lock_token="$generation_nonce"
+        lock_held=1
+        refresh_lock_test_pause AFTER_PUBLISH
+        if [[ "$(refresh_lock_directory_identity "$refresh_lock" || true)" != "$created_directory_identity" ]] \
+            || [[ "$(read_refresh_generation_nonce)" != "$generation_nonce" ]] || refresh_lock_barrier_exists; then
+          recover_owned_refresh_generation "$generation_nonce" \
+            || { exec 8<&-; lock_held=0; lock_token=""; sleep 0.02; continue; }
+          [[ "$(refresh_lock_directory_identity "$refresh_lock" || true)" == "$created_directory_identity" ]] \
+            || { exec 8<&-; lock_held=0; lock_token=""; sleep 0.02; continue; }
+        fi
+        exec 8<&-
+        return 0
+      fi
+      rm -f "$generation_tmp" "$owner_tmp"
+      if [[ -n "$created_directory_identity" \
+          && "$(refresh_lock_directory_identity "$refresh_lock" || true)" == "$created_directory_identity" ]]; then
+        remove_owned_refresh_generation "$generation_nonce" || remove_incomplete_refresh_lock || true
+      fi
+      exec 8<&-
+      sleep 0.02
+      continue
+    fi
+    if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE:-}" ]]; then
+      (umask 077; printf '%s\n' ready > "$CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE")
+    fi
+    rm -f "$generation_tmp" "$owner_tmp"
+    age=$(refresh_lock_age_seconds)
+    observed_nonce=$(read_refresh_lock_field "$refresh_owner_file" nonce)
+    if [[ -n "$observed_nonce" ]]; then
+      if ! refresh_owner_is_current "$refresh_owner_file" && (( age >= 2 )); then remove_owned_refresh_generation "$observed_nonce" || true; fi
+    elif [[ -n "$(read_refresh_generation_nonce)" && "$age" -ge 2 ]]; then
+      remove_owned_refresh_generation "$(read_refresh_generation_nonce)" || true
+    else
+      legacy_record=$(read_legacy_refresh_owner)
+      if [[ -n "$legacy_record" ]] && ! legacy_refresh_owner_is_current "$legacy_record" && (( age >= 2 )); then
+        remove_legacy_refresh_lock "$legacy_record" || true
+      elif [[ -z "$legacy_record" ]] && (( age >= legacy_seconds )); then
+        remove_legacy_refresh_lock "$legacy_record" || true
+      fi
+    fi
+    sleep 0.02
+  done
+  fail 'another usage refresh is already in progress.'
   return 1
 }
 
 release_refresh_lock() {
-  local current_record=""
   (( lock_held )) && [[ -n "$lock_token" ]] || return 0
-  current_record=$(read_refresh_owner)
-  [[ "${current_record#* }" == "$lock_token" ]] || return 0
-  quarantine_refresh_lock "$current_record" || return 0
+  remove_owned_refresh_generation "$lock_token" || true
   lock_held=0
-}
-
-acquire_refresh_lock() {
-  local refresh_owner="" refresh_pid="" observed_record=""
-  (( lock_held == 0 )) || return 0
-  mkdir -p "$cache_dir"
-  chmod 700 "$cache_dir" 2>/dev/null || true
-  if ! mkdir "$refresh_lock" 2>/dev/null; then
-    observed_record=$(read_refresh_owner)
-    refresh_pid="${observed_record%% *}"
-    refresh_owner="${observed_record#* }"
-    if [[ "$refresh_pid" =~ ^[0-9]+$ && -n "$refresh_owner" ]] && ! kill -0 "$refresh_pid" 2>/dev/null; then
-      # Recheck the generation before reclaiming so a stale observer cannot
-      # remove a lock whose ownership record changed while it was inspecting.
-      if [[ "$(read_refresh_owner)" == "$observed_record" ]]; then
-        quarantine_refresh_lock "$observed_record" || true
-      fi
-      mkdir "$refresh_lock" 2>/dev/null || {
-        fail 'another usage refresh is already in progress.'
-        return 1
-      }
-    else
-      fail 'another usage refresh is already in progress.'
-      return 1
-    fi
-  fi
-  lock_token=$(new_lock_token)
-  lock_held=1
-  (umask 077; printf '%s %s\n' "$$" "$lock_token" > "$refresh_owner_file")
+  lock_token=""
 }
 
 usage() {
@@ -177,14 +436,6 @@ if (( lock_held )) && [[ ! "$lock_token" =~ ^[A-Za-z0-9._-]{8,128}$ ]]; then
   fail '--lock-held requires a valid --lock-token generation.'
   exit 2
 fi
-if (( lock_held )); then
-  inherited_lock_record=$(read_refresh_owner)
-  if [[ -z "$inherited_lock_record" || "${inherited_lock_record#* }" != "$lock_token" ]]; then
-    fail 'the inherited usage refresh lock is no longer owned by this generation.'
-    exit 1
-  fi
-fi
-
 if [[ ! "$refresh_seconds" =~ ^[0-9]+$ ]] || (( refresh_seconds < 60 || refresh_seconds > 3600 )); then
   fail 'CLAUDEX_USAGE_REFRESH_SECONDS must be an integer from 60 to 3600.'
   exit 2
@@ -298,6 +549,9 @@ cleanup() {
   terminate_appserver
   [[ -z "$temporary_appserver_dir" ]] || rm -rf "$temporary_appserver_dir"
   release_refresh_lock
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_USAGE_REFRESH_EXIT_FILE:-}" ]]; then
+    (umask 077; printf '%s\n' exited > "$CLAUDEX_TEST_USAGE_REFRESH_EXIT_FILE")
+  fi
 }
 trap cleanup EXIT
 
@@ -334,12 +588,23 @@ ordered_auth_files() {
     jq -e '.type == "codex" and (.access_token | type == "string" and length > 0)' \
       "$candidate" >/dev/null 2>&1 || continue
     refresh_key=$(jq -r '
-      (.last_refresh // "") as $value
-      | if ($value | type) == "number" then $value
-        elif (($value | type) == "string" and ($value | length) > 0) then
-          (try ($value | fromdateiso8601) catch 0)
+      def refresh_key:
+        if type == "number" then (. * 1000000)
+        elif type == "string" and length > 0 then
+          (try (
+            capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<fraction>[0-9]+))?(?<zone>Z|[+-][0-9]{2}:[0-9]{2})$")
+            | . as $stamp
+            | ($stamp.whole + "Z" | fromdateiso8601) as $local_epoch
+            | ($stamp.zone | if . == "Z" then 0 else
+                 ((.[1:3] | tonumber) * 3600 + (.[4:6] | tonumber) * 60)
+                 * (if startswith("-") then -1 else 1 end)
+               end) as $offset
+            | ((($stamp.fraction // "") + "000000")[0:6] | tonumber) as $micros
+            | (($local_epoch - $offset) * 1000000 + $micros)
+          ) catch (try (tonumber * 1000000) catch 0))
         else 0 end
-      | floor | tostring
+        | floor | tostring;
+      (.last_refresh // "") | refresh_key
     ' "$candidate" 2>/dev/null || printf 0)
     [[ "$refresh_key" =~ ^[0-9]+$ ]] || refresh_key=0
     name="${candidate##*/}"

@@ -24,8 +24,13 @@ function digest(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
-function invoke(command, environment, cwd) {
-  const result = childProcess.spawnSync(process.execPath, [helper, command, '--project', cwd], {
+function isWithinForTest(candidate, parent) {
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function invoke(command, environment, cwd, extraArguments = []) {
+  const result = childProcess.spawnSync(process.execPath, [helper, command, '--project', cwd, ...extraArguments], {
     encoding: 'utf8', env: { ...process.env, ...environment }, maxBuffer: 16 * 1024 * 1024,
   });
   assert.strictEqual(result.status, 0, result.stderr || result.stdout);
@@ -57,6 +62,10 @@ try {
   write(path.join(claudeAlpha, 'SKILL.md'), '---\nname: alpha\ndescription: Claude alpha\nmodel: claude-sonnet-9-9\n---\n\nUse assets/sample.txt.\n');
   const originalAlphaHash = digest(path.join(claudeAlpha, 'SKILL.md'));
   write(path.join(claudeHome, 'commands', 'old-command.md'), '---\ndescription: Legacy Claude command\n---\n\nRun the legacy workflow.\n');
+  const backendDeploy = path.join(claudeHome, 'commands', 'backend', 'deploy.md');
+  const frontendDeploy = path.join(claudeHome, 'commands', 'frontend', 'deploy.md');
+  write(backendDeploy, '---\ndescription: Backend deploy command\n---\n\nBACKEND_DEPLOY_BODY\n');
+  write(frontendDeploy, '---\ndescription: Frontend deploy command\n---\n\nFRONTEND_DEPLOY_BODY\n');
 
   const codexAlpha = path.join(home, '.agents', 'skills', 'alpha');
   skill(codexAlpha, 'alpha', 'Codex alpha instructions.');
@@ -137,10 +146,97 @@ try {
   for (const expected of ['claude-alpha', 'codex-alpha', 'old-command', 'root-skill', 'nested-skill', 'legacy-codex', 'system-codex', 'claude-plugin:plugin-skill', 'codex-plugin:plugin-task']) {
     assert(aliases.has(expected), `missing bridged alias ${expected}`);
   }
-  assert(!aliases.has('alpha'), 'an imported personal skill must not claim a native project skill short alias through --add-dir');
+  assert(aliases.has('alpha'), 'a personal Claude skill must retain its documented precedence over a project skill');
   assert(aliases.has('claude-alpha'), 'a personal/project collision must keep a deterministic imported alias');
+  for (const expected of ['deploy', 'claude-command-deploy', 'claude-command-deploy-2']) {
+    assert(aliases.has(expected), `same-basename nested commands lost deterministic alias ${expected}`);
+  }
+  assert(!aliases.has('backend-deploy') && !aliases.has('frontend-deploy'),
+    'Claude command subdirectories are provenance only and must not change the documented basename command identity');
+  const deployRecords = first.skills.filter((entry) => entry.kind === 'claude-command' && path.basename(entry.source) === 'deploy.md');
+  assert.strictEqual(new Set(deployRecords.map((entry) => path.resolve(entry.source))).size, 2,
+    'same-basename nested command discovery lost a source command');
+  const collisionDeploys = deployRecords.filter((entry) => entry.collisionAlias);
+  assert.deepStrictEqual(collisionDeploys.map((entry) => path.resolve(entry.source)).sort(),
+    [path.resolve(backendDeploy), path.resolve(frontendDeploy)].sort(),
+    'deterministic collision aliases must retain exact nested command provenance');
   assert(!aliases.has('disabled'), 'disabled Codex skill must stay disabled');
   assert(!aliases.has('outside-repo'), 'project discovery must stop at repository root');
+
+  const dirtyOriginal = path.join(temporary, 'dirty-original');
+  const cleanWorktree = path.join(temporary, 'clean-worktree');
+  fs.mkdirSync(path.join(dirtyOriginal, '.git'), { recursive: true });
+  fs.mkdirSync(path.join(cleanWorktree, '.git'), { recursive: true });
+  write(path.join(dirtyOriginal, 'AGENTS.md'), 'DIRTY_ORIGINAL_INSTRUCTIONS\n');
+  write(path.join(cleanWorktree, 'AGENTS.md'), 'CLEAN_WORKTREE_INSTRUCTIONS\n');
+  skill(path.join(dirtyOriginal, '.agents', 'skills', 'dirty-only'), 'dirty-only', 'DIRTY_ONLY_SKILL\n');
+  write(path.join(dirtyOriginal, '.claude', 'settings.json'), '{"skillOverrides":{"alpha":false}}\n');
+  const projectPlugin = path.join(temporary, 'project-plugin');
+  write(path.join(projectPlugin, '.claude-plugin', 'plugin.json'), '{"name":"project-only"}\n');
+  skill(path.join(projectPlugin, 'skills', 'project-only-skill'), 'project-only-skill');
+  const claudeRegistryFile = path.join(claudeHome, 'plugins', 'installed_plugins.json');
+  const claudeRegistry = JSON.parse(fs.readFileSync(claudeRegistryFile, 'utf8'));
+  claudeRegistry.plugins['project-only@market'] = [{
+    scope: 'project', projectPath: dirtyOriginal, installPath: projectPlugin, version: '1.0.0',
+  }];
+  write(claudeRegistryFile, `${JSON.stringify(claudeRegistry)}\n`);
+
+  const dirtyProjectResult = invoke('sync', environment, dirtyOriginal);
+  const dirtyProjectAliases = new Set(dirtyProjectResult.skills.map((entry) => entry.alias));
+  assert(dirtyProjectAliases.has('dirty-only'), 'ordinary bridge mode must remain project aware');
+  assert(dirtyProjectResult.instructions.some((entry) => entry.source === path.join(dirtyOriginal, 'AGENTS.md')),
+    'ordinary bridge mode must retain project instructions');
+  assert(dirtyProjectResult.skills.some((entry) => entry.kind === 'claude-plugin'
+      && entry.source.startsWith(projectPlugin)),
+  'ordinary bridge mode must retain a matching project scoped Claude plugin');
+  assert(!dirtyProjectResult.skills.some((entry) => path.resolve(entry.source) === path.resolve(claudeAlpha)),
+    'ordinary bridge mode must honor project Claude settings');
+
+  const dirtyGlobalResult = invoke('sync', environment, dirtyOriginal, ['--global-only']);
+  const cleanGlobalResult = invoke('sync', environment, cleanWorktree, ['--global-only']);
+  const globalAliases = new Set(dirtyGlobalResult.skills.map((entry) => entry.alias));
+  assert(!globalAliases.has('dirty-only'), 'global-only bridge mode leaked an untracked project skill');
+  assert(!dirtyGlobalResult.instructions.some((entry) => entry.scope === 'project'),
+    'global-only bridge mode leaked project instructions');
+  const globalInstructions = fs.readFileSync(path.join(dirtyGlobalResult.overlay, 'CLAUDE.md'), 'utf8');
+  assert(globalInstructions.includes('GLOBAL_OVERRIDE_INSTRUCTIONS')
+      && !globalInstructions.includes('DIRTY_ORIGINAL_INSTRUCTIONS')
+      && !globalInstructions.includes('CLEAN_WORKTREE_INSTRUCTIONS'),
+  'global-only bridge mode must retain only global instructions across worktree creation');
+  assert(dirtyGlobalResult.skills.some((entry) => path.resolve(entry.source) === path.resolve(claudeAlpha)),
+    'global-only bridge mode must ignore project Claude settings while retaining personal skills');
+  assert(!dirtyGlobalResult.skills.some((entry) => entry.source.startsWith(projectPlugin)),
+    'global-only bridge mode leaked a project scoped Claude plugin');
+  assert.strictEqual(dirtyGlobalResult.overlay, cleanGlobalResult.overlay,
+    'global-only cache identity must not depend on the original or new worktree path');
+  assert.notStrictEqual(dirtyGlobalResult.overlay, dirtyProjectResult.overlay,
+    'project-aware and global-only snapshots must use separate cache identities');
+  if (process.platform !== 'win32') {
+    const fakeCodexBin = path.join(temporary, 'fake-codex-bin');
+    const fakeCodex = path.join(fakeCodexBin, 'codex');
+    const codexCwdLog = path.join(temporary, 'codex-plugin-cwd.log');
+    write(fakeCodex, '#!/bin/sh\npwd -P > "$CLAUDEX_TEST_CODEX_PLUGIN_CWD_LOG"\nprintf \'%s\\n\' \'{"installed":[]}\'\n');
+    fs.chmodSync(fakeCodex, 0o755);
+    const neutralEnvironment = {
+      ...environment,
+      CLAUDEX_CONFIG_DIR: path.join(temporary, 'neutral-config'),
+      CLAUDEX_TEST_CODEX_PLUGIN_LIST_FILE: '',
+      CLAUDEX_TEST_CODEX_PLUGIN_CWD_LOG: codexCwdLog,
+      PATH: `${fakeCodexBin}${path.delimiter}${process.env.PATH || ''}`,
+    };
+    invoke('sync', neutralEnvironment, dirtyOriginal, ['--global-only']);
+    const inventoryCwd = fs.readFileSync(codexCwdLog, 'utf8').trim();
+    assert(!isWithinForTest(inventoryCwd, dirtyOriginal) && !isWithinForTest(inventoryCwd, cleanWorktree),
+      'global-only Codex plugin inventory ran from an original or generated worktree');
+    let inventoryCursor = path.resolve(inventoryCwd);
+    while (true) {
+      assert(!fs.existsSync(path.join(inventoryCursor, '.git')),
+        'global-only Codex plugin inventory cwd is inside a Git repository');
+      const parent = path.dirname(inventoryCursor);
+      if (parent === inventoryCursor) break;
+      inventoryCursor = parent;
+    }
+  }
 
   const overlaySkills = path.join(first.overlay, '.claude', 'skills');
   const alphaMarkdown = fs.readFileSync(path.join(overlaySkills, 'claude-alpha', 'SKILL.md'), 'utf8');
@@ -335,6 +431,9 @@ try {
   assert(mixedModelMetadata.markdown.includes('model: gpt-5.6-luna'));
   assert(mixedModelMetadata.markdown.includes('  model: opus'),
     'top-level model remapping must leave nested metadata unchanged');
+  const quotedModelMetadata = api.remapClaudeModel('---\n"model": "opus" # quoted key\n---\n');
+  assert.strictEqual(quotedModelMetadata.mappings.length, 1, 'quoted top-level YAML model keys must be remapped');
+  assert(quotedModelMetadata.markdown.includes('"model": "gpt-5.6-sol" # quoted key'));
   for (const model of ['opus[1m]', 'sonnet[1m]', 'opusplan[1m]', 'claude-opus-4-8[1m]', 'best']) {
     const mapped = api.remapClaudeModel(`---\nmodel: ${model}\n---\n`);
     assert.strictEqual(mapped.mappings.length, 1, `${model} should map to a managed OpenAI model`);

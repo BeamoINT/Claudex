@@ -45,6 +45,7 @@ $usageSource = if ($env:CLAUDEX_USAGE_SOURCE) { $env:CLAUDEX_USAGE_SOURCE } else
 if ($usageSource -notin @('auto', 'web', 'app-server')) { throw 'CLAUDEX_USAGE_SOURCE must be auto, web, or app-server.' }
 $ownsRefreshLock = $false
 $ownedRefreshToken = ''
+$legacyRefreshLockMaxAgeSeconds = [Math]::Max(30, ($timeoutSeconds * 3) + 10)
 $isWindowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 if ($LockHeld -and ($LockToken -notmatch '^[A-Za-z0-9._-]{8,128}$')) {
     throw '-LockHeld requires a valid -LockToken generation.'
@@ -120,70 +121,306 @@ function Get-UsageGeneration {
     try { return [IO.File]::ReadAllText($usageGenerationFile).Trim() } catch { return 'missing' }
 }
 
-function Read-RefreshOwnerRecord([string] $OwnerDirectory = $refreshLock) {
-    $ownerPath = Join-Path $OwnerDirectory 'owner-pid'
-    if (-not (Test-Path -LiteralPath $ownerPath -PathType Leaf)) { return '' }
-    try { return [IO.File]::ReadAllText($ownerPath).Trim() } catch { return '' }
+function Get-RefreshLockField([string] $OwnerFile, [string] $Field) {
+    if (-not (Test-Path -LiteralPath $OwnerFile -PathType Leaf)) { return '' }
+    try {
+        $lines = [IO.File]::ReadAllLines($OwnerFile)
+        foreach ($line in $lines) {
+            if ($line.StartsWith($Field + '=', [StringComparison]::Ordinal)) { return $line.Substring($Field.Length + 1) }
+        }
+        if ($lines.Count -gt 0 -and $lines[0] -match '^(?<pid>\d+)\s+(?<identity>[^\s@]+)@(?<nonce>[^\s@]+)$') {
+            if ($Field -eq 'identity' -and [string] $Matches.identity -eq '-') { return '' }
+            if ($Field -in @('pid', 'identity', 'nonce')) { return [string] $Matches[$Field] }
+        }
+    } catch { }
+    return ''
 }
 
-function Move-RefreshLockToQuarantine([string] $ExpectedRecord) {
-    $quarantine = Join-Path $cacheDir ('.refresh.lock.quarantine.' + $PID + '.' + [guid]::NewGuid().ToString('N'))
-    try { Move-Item -LiteralPath $refreshLock -Destination $quarantine -ErrorAction Stop } catch { return $false }
-    $movedRecord = Read-RefreshOwnerRecord $quarantine
-    if ($movedRecord -eq $ExpectedRecord) {
-        Remove-Item -LiteralPath (Join-Path $quarantine 'owner-pid') -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $quarantine -Force -ErrorAction SilentlyContinue
-        return $true
+function Get-RefreshGenerationNonce([string] $Directory = $refreshLock) {
+    $file = Join-Path $Directory 'generation'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return '' }
+    try { return [IO.File]::ReadAllText($file).Trim() } catch { return '' }
+}
+
+function Get-RefreshLockBarriers {
+    if (-not (Test-Path -LiteralPath $cacheDir -PathType Container)) { return @() }
+    return @(Get-ChildItem -LiteralPath $cacheDir -Directory -Filter 'refresh.lock.quarantine.*' -ErrorAction SilentlyContinue | Sort-Object Name)
+}
+
+function Get-RefreshLockDirectoryIdentity([string] $Directory = $refreshLock) {
+    if (-not (Test-Path -LiteralPath $Directory -PathType Container)) { return '' }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        if (-not ('ClaudexNativeDirectoryIdentity' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class ClaudexNativeDirectoryIdentity {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTime { public uint Low; public uint High; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation {
+        public uint Attributes;
+        public FileTime CreationTime;
+        public FileTime LastAccessTime;
+        public FileTime LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
     }
-    if (-not (Test-Path -LiteralPath $refreshLock)) {
-        try { Move-Item -LiteralPath $quarantine -Destination $refreshLock -ErrorAction Stop } catch { }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr security,
+        uint creation, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(IntPtr handle, out ByHandleFileInformation information);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static string GetIdentity(string path) {
+        const uint ShareAll = 1u | 2u | 4u;
+        const uint OpenExisting = 3u;
+        const uint BackupSemantics = 0x02000000u;
+        IntPtr handle = CreateFile(path, 0u, ShareAll, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) return String.Empty;
+        try {
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information)) return String.Empty;
+            ulong index = ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow;
+            return information.VolumeSerialNumber.ToString("X8") + ":" + index.ToString("X16");
+        } finally { CloseHandle(handle); }
+    }
+}
+'@
+        }
+        try { return [ClaudexNativeDirectoryIdentity]::GetIdentity($Directory) } catch { return '' }
+    }
+    $stat = Get-Command stat -ErrorAction SilentlyContinue
+    if (-not $stat) { return '' }
+    try { $identity = (& $stat.Source -c '%d:%i' -- $Directory 2>$null | Select-Object -First 1).Trim() } catch { $identity = '' }
+    if ($identity -notmatch '^[0-9]+:[0-9]+$') {
+        try { $identity = (& $stat.Source -f '%d:%i' $Directory 2>$null | Select-Object -First 1).Trim() } catch { $identity = '' }
+    }
+    if ($identity -match '^[0-9]+:[0-9]+$') { return $identity }
+    return ''
+}
+
+function Invoke-RefreshLockTestPause([string] $Stage) {
+    if ($env:CLAUDEX_TEST_MODE -ne '1') { return }
+    $ready = [Environment]::GetEnvironmentVariable("CLAUDEX_TEST_REFRESH_LOCK_${Stage}_READY_FILE", 'Process')
+    $continue = [Environment]::GetEnvironmentVariable("CLAUDEX_TEST_REFRESH_LOCK_${Stage}_CONTINUE_FILE", 'Process')
+    if (-not $ready -or -not $continue) { return }
+    [IO.File]::WriteAllText($ready, "ready`n", $utf8)
+    while (-not (Test-Path -LiteralPath $continue -PathType Leaf)) { Start-Sleep -Milliseconds 20 }
+}
+
+function Remove-RefreshLockFiles([string] $Directory) {
+    Remove-Item -LiteralPath (Join-Path $Directory 'owner-pid') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $Directory 'generation') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $Directory -Force -ErrorAction SilentlyContinue
+}
+
+function Publish-RefreshLockFile([string] $Source, [string] $Destination) {
+    if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_FORCE_REFRESH_PUBLICATION_FAILURE -eq '1') { throw 'forced refresh lock publication failure' }
+    if ($env:CLAUDEX_TEST_MODE -ne '1' -or $env:CLAUDEX_TEST_FORCE_REFRESH_HARDLINK_FAILURE -ne '1') {
+        try { New-Item -ItemType HardLink -Path $Destination -Target $Source -ErrorAction Stop | Out-Null; return } catch { }
+    }
+    $input = $null; $output = $null
+    try {
+        $input = [IO.File]::Open($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $output = [IO.FileStream]::new($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $input.CopyTo($output); $output.Flush($true)
+    } finally { if ($output) { $output.Dispose() }; if ($input) { $input.Dispose() } }
+}
+
+function Restore-RefreshLockBarrier([string] $Barrier) {
+    foreach ($attempt in 1..250) {
+        if (-not (Test-Path -LiteralPath $refreshLock)) {
+            try { Move-Item -LiteralPath $Barrier -Destination $refreshLock -ErrorAction Stop; return $true } catch { }
+        }
+        Start-Sleep -Milliseconds 20
     }
     return $false
 }
 
+function Get-RefreshLockAgeSeconds([string] $Directory = $refreshLock) {
+    try { return [Math]::Max(0, ([DateTime]::UtcNow - (Get-Item -LiteralPath $Directory -ErrorAction Stop).LastWriteTimeUtc).TotalSeconds) }
+    catch { return 0 }
+}
+
+function Test-RefreshOwnerCurrent([string] $OwnerFile) {
+    $ownerPid = 0
+    if (-not [int]::TryParse((Get-RefreshLockField $OwnerFile 'pid'), [ref] $ownerPid) -or $ownerPid -le 0) { return $false }
+    $process = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+    if ($null -eq $process) { return $false }
+    $identity = Get-RefreshLockField $OwnerFile 'identity'
+    if ([string]::IsNullOrWhiteSpace($identity)) { return $true }
+    try { return $identity -eq [string] $process.StartTime.ToUniversalTime().Ticks } catch { return $true }
+}
+
+function Get-LegacyRefreshOwnerRecord([string] $Directory = $refreshLock) {
+    $owner = Join-Path $Directory 'owner-pid'
+    if (-not (Test-Path -LiteralPath $owner -PathType Leaf)) { return '' }
+    try {
+        $record = [IO.File]::ReadAllText($owner).Trim()
+        if ($record -match '^\d+\s+\S+$') { return $record }
+    } catch { }
+    return ''
+}
+
+function Test-LegacyRefreshOwnerCurrent([string] $Record) {
+    if ($Record -notmatch '^(?<pid>\d+)\s+(?<token>\S+)$') { return $false }
+    try { return $null -ne (Get-Process -Id ([int] $Matches.pid) -ErrorAction Stop) } catch { return $false }
+}
+
+function Remove-LegacyRefreshLock([string] $ExpectedRecord) {
+    $quarantine = $refreshLock + '.quarantine.legacy.' + $PID + '.' + [guid]::NewGuid().ToString('N')
+    try { Move-Item -LiteralPath $refreshLock -Destination $quarantine -ErrorAction Stop } catch { return $false }
+    $moved = Get-LegacyRefreshOwnerRecord $quarantine
+    if ($moved -eq $ExpectedRecord -and -not (Get-RefreshGenerationNonce $quarantine) -and
+        -not (Get-RefreshLockField (Join-Path $quarantine 'owner-pid') 'nonce')) {
+        Remove-RefreshLockFiles $quarantine
+        return $true
+    }
+    [void] (Restore-RefreshLockBarrier $quarantine)
+    return $false
+}
+
+function Recover-RefreshLockBarriers {
+    foreach ($info in @(Get-RefreshLockBarriers)) {
+        $barrier = $info.FullName; $owner = Join-Path $barrier 'owner-pid'
+        $nonce = Get-RefreshLockField $owner 'nonce'; $generation = Get-RefreshGenerationNonce $barrier
+        $legacy = Get-LegacyRefreshOwnerRecord $barrier
+        $age = Get-RefreshLockAgeSeconds $barrier
+        if ($nonce -and (Test-RefreshOwnerCurrent $owner)) {
+            if (-not (Test-Path -LiteralPath $refreshLock)) { try { Move-Item -LiteralPath $barrier -Destination $refreshLock -ErrorAction Stop } catch { } }
+        } elseif ($legacy -and (Test-LegacyRefreshOwnerCurrent $legacy)) {
+            Remove-Item -LiteralPath (Join-Path $barrier 'generation') -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $refreshLock)) { try { Move-Item -LiteralPath $barrier -Destination $refreshLock -ErrorAction Stop } catch { } }
+        } elseif (($nonce -or $generation) -and $age -ge 2) { Remove-RefreshLockFiles $barrier }
+        else {
+            if ($legacy -and $age -ge 2) { Remove-RefreshLockFiles $barrier }
+            elseif (-not $legacy -and $age -ge $legacyRefreshLockMaxAgeSeconds) { Remove-RefreshLockFiles $barrier }
+        }
+    }
+}
+
+function Remove-OwnedRefreshGeneration([string] $ExpectedNonce) {
+    if ([string]::IsNullOrWhiteSpace($ExpectedNonce)) { return $false }
+    $currentGeneration = Get-RefreshGenerationNonce
+    $currentOwner = Get-RefreshLockField $refreshOwnerFile 'nonce'
+    if ($currentGeneration -ne $ExpectedNonce -and $currentOwner -ne $ExpectedNonce) { return $false }
+    $quarantine = $refreshLock + '.quarantine.' + $PID + '.' + [guid]::NewGuid().ToString('N')
+    Invoke-RefreshLockTestPause 'BEFORE_RENAME'
+    try { Move-Item -LiteralPath $refreshLock -Destination $quarantine -ErrorAction Stop } catch { return $false }
+    Invoke-RefreshLockTestPause 'AFTER_RENAME'
+    $movedGeneration = Get-RefreshGenerationNonce $quarantine
+    $movedOwner = Get-RefreshLockField (Join-Path $quarantine 'owner-pid') 'nonce'
+    if ($movedGeneration -eq $ExpectedNonce -and $movedOwner -eq $ExpectedNonce) { Remove-RefreshLockFiles $quarantine; return $true }
+    if ($movedGeneration -eq $ExpectedNonce -and $movedOwner -ne $ExpectedNonce) {
+        Remove-Item -LiteralPath (Join-Path $quarantine 'generation') -Force -ErrorAction SilentlyContinue
+    }
+    [void] (Restore-RefreshLockBarrier $quarantine)
+    return $false
+}
+
+function Recover-OwnedRefreshGeneration([string] $ExpectedNonce) {
+    foreach ($info in @(Get-RefreshLockBarriers)) {
+        $moved = Get-RefreshGenerationNonce $info.FullName
+        if (-not $moved) { $moved = Get-RefreshLockField (Join-Path $info.FullName 'owner-pid') 'nonce' }
+        if ($moved -eq $ExpectedNonce -and -not (Test-Path -LiteralPath $refreshLock)) {
+            try { Move-Item -LiteralPath $info.FullName -Destination $refreshLock -ErrorAction Stop } catch { }
+        }
+    }
+    $current = Get-RefreshGenerationNonce
+    if (-not $current) { $current = Get-RefreshLockField $refreshOwnerFile 'nonce' }
+    return $current -eq $ExpectedNonce -and @(Get-RefreshLockBarriers).Count -eq 0
+}
+
+function Remove-IncompleteRefreshLock {
+    if (-not (Test-Path -LiteralPath $refreshLock -PathType Container)) { return $true }
+    $quarantine = $refreshLock + '.quarantine.incomplete.' + $PID + '.' + [guid]::NewGuid().ToString('N')
+    try { Move-Item -LiteralPath $refreshLock -Destination $quarantine -ErrorAction Stop } catch { return $false }
+    $moved = Get-RefreshGenerationNonce $quarantine
+    if (-not $moved) { $moved = Get-RefreshLockField (Join-Path $quarantine 'owner-pid') 'nonce' }
+    $legacy = Get-LegacyRefreshOwnerRecord $quarantine
+    if ($moved -or $legacy) { [void] (Restore-RefreshLockBarrier $quarantine); return $false }
+    Remove-RefreshLockFiles $quarantine
+    return $true
+}
+
 function Acquire-RefreshLock {
     if ($LockHeld) {
-        $script:ownsRefreshLock = $true
-        $script:ownedRefreshToken = $LockToken
-        return
+        $current = Get-RefreshGenerationNonce
+        if (-not $current) { $current = Get-RefreshLockField $refreshOwnerFile 'nonce' }
+        if ($current -ne $LockToken -or @(Get-RefreshLockBarriers).Count -gt 0) { throw 'the inherited usage refresh lock is no longer owned by this generation.' }
+        $script:ownsRefreshLock = $true; $script:ownedRefreshToken = $LockToken; return
     }
-    [IO.Directory]::CreateDirectory($cacheDir) | Out-Null
-    Protect-PrivatePath $cacheDir $true
-    $created = $false
-    if (Test-Path -LiteralPath $refreshLock -PathType Container) {
-        $observedRecord = Read-RefreshOwnerRecord
-        $ownerParts = @($observedRecord -split ' ', 2)
-        $owner = 0
-        if ($ownerParts.Count -gt 0) { [int]::TryParse($ownerParts[0], [ref] $owner) | Out-Null }
-        $ownerToken = if ($ownerParts.Count -eq 2) { $ownerParts[1] } else { $ownerParts[0] }
-        $ownerIsDead = $owner -gt 0 -and -not (Get-Process -Id $owner -ErrorAction SilentlyContinue)
-        $ownerlessIsStale = $false
-        if ($owner -le 0) {
-            try {
-                $lockAge = ([DateTime]::UtcNow - (Get-Item -LiteralPath $refreshLock).LastWriteTimeUtc).TotalSeconds
-                $ownerlessIsStale = $lockAge -ge 2
-            } catch { $ownerlessIsStale = $false }
+    [IO.Directory]::CreateDirectory($cacheDir) | Out-Null; Protect-PrivatePath $cacheDir $true
+    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        Recover-RefreshLockBarriers
+        if (@(Get-RefreshLockBarriers).Count -gt 0) {
+            if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE) {
+                [IO.File]::WriteAllText($env:CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE, "ready`n", $utf8)
+            }
+            Start-Sleep -Milliseconds 20
+            continue
         }
-        if ($ownerIsDead -or $ownerlessIsStale) {
-            if ((Read-RefreshOwnerRecord) -eq $observedRecord) {
-                [void] (Move-RefreshLockToQuarantine $observedRecord)
+        $nonce = [guid]::NewGuid().ToString('N'); $created = $false; $createdDirectoryIdentity = ''
+        $ownerTemporary = Join-Path $cacheDir ('.refresh-owner.' + [guid]::NewGuid().ToString('N') + '.tmp')
+        $generationTemporary = Join-Path $cacheDir ('.refresh-generation.' + [guid]::NewGuid().ToString('N') + '.tmp')
+        $identity = [string] (Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().Ticks
+        # The complete record remains a valid PID and token for pre-generation
+        # releases while current readers decode identity and nonce from it.
+        [IO.File]::WriteAllText($ownerTemporary, "${PID} ${identity}@${nonce}`n", $utf8)
+        [IO.File]::WriteAllText($generationTemporary, "$nonce`n", $utf8)
+        try {
+            New-Item -Path $refreshLock -ItemType Directory -ErrorAction Stop | Out-Null; $created = $true
+            $createdDirectoryIdentity = Get-RefreshLockDirectoryIdentity
+            Invoke-RefreshLockTestPause 'AFTER_MKDIR'
+            if (-not $createdDirectoryIdentity -or (Get-RefreshLockDirectoryIdentity) -ne $createdDirectoryIdentity) { throw 'refresh lock directory identity changed' }
+            Publish-RefreshLockFile $generationTemporary (Join-Path $refreshLock 'generation')
+            if ((Get-RefreshLockDirectoryIdentity) -ne $createdDirectoryIdentity -or (Get-RefreshGenerationNonce) -ne $nonce) { throw 'refresh lock generation publication changed' }
+            Publish-RefreshLockFile $ownerTemporary $refreshOwnerFile
+            if ((Get-RefreshLockDirectoryIdentity) -ne $createdDirectoryIdentity -or
+                (Get-RefreshLockField $refreshOwnerFile 'nonce') -ne $nonce -or @(Get-RefreshLockBarriers).Count -gt 0) { throw 'refresh lock ownership publication changed' }
+            Protect-PrivatePath $refreshOwnerFile $false; Protect-PrivatePath (Join-Path $refreshLock 'generation') $false
+            Remove-Item -LiteralPath $ownerTemporary, $generationTemporary -Force -ErrorAction SilentlyContinue
+            Invoke-RefreshLockTestPause 'AFTER_PUBLISH'
+            if ((Get-RefreshLockDirectoryIdentity) -ne $createdDirectoryIdentity -or
+                (Get-RefreshGenerationNonce) -ne $nonce -or @(Get-RefreshLockBarriers).Count -gt 0) {
+                if (-not (Recover-OwnedRefreshGeneration $nonce)) { Start-Sleep -Milliseconds 20; continue }
+                if ((Get-RefreshLockDirectoryIdentity) -ne $createdDirectoryIdentity) { Start-Sleep -Milliseconds 20; continue }
+            }
+            $script:ownsRefreshLock = $true; $script:ownedRefreshToken = $nonce; return
+        } catch {
+            if (-not $created -and $env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE) {
+                [IO.File]::WriteAllText($env:CLAUDEX_TEST_REFRESH_LOCK_CONTENDED_READY_FILE, "ready`n", $utf8)
+            }
+            if ($created -and $createdDirectoryIdentity -and (Get-RefreshLockDirectoryIdentity) -eq $createdDirectoryIdentity -and
+                -not (Remove-OwnedRefreshGeneration $nonce)) { [void] (Remove-IncompleteRefreshLock) }
+        } finally { Remove-Item -LiteralPath $ownerTemporary, $generationTemporary -Force -ErrorAction SilentlyContinue }
+        $age = Get-RefreshLockAgeSeconds; $observed = Get-RefreshLockField $refreshOwnerFile 'nonce'
+        if ($observed -and $age -ge 2 -and -not (Test-RefreshOwnerCurrent $refreshOwnerFile)) { [void] (Remove-OwnedRefreshGeneration $observed) }
+        elseif ((Get-RefreshGenerationNonce) -and $age -ge 2) { [void] (Remove-OwnedRefreshGeneration (Get-RefreshGenerationNonce)) }
+        else {
+            $legacyRecord = Get-LegacyRefreshOwnerRecord
+            if ($legacyRecord -and $age -ge 2 -and -not (Test-LegacyRefreshOwnerCurrent $legacyRecord)) {
+                [void] (Remove-LegacyRefreshLock $legacyRecord)
+            } elseif (-not $legacyRecord -and $age -ge $legacyRefreshLockMaxAgeSeconds -and
+                (Test-Path -LiteralPath $refreshLock -PathType Container)) {
+                [void] (Remove-LegacyRefreshLock '')
             }
         }
+        Start-Sleep -Milliseconds 20
     }
-    try {
-        New-Item -Path $refreshLock -ItemType Directory -ErrorAction Stop | Out-Null
-        $created = $true
-        $script:ownedRefreshToken = [guid]::NewGuid().ToString('N')
-        [IO.File]::WriteAllText($refreshOwnerFile, "$PID $ownedRefreshToken`n", $utf8)
-        Protect-PrivatePath $refreshOwnerFile $false
-        $script:ownsRefreshLock = $true
-    } catch {
-        if ($created) {
-            Remove-Item -LiteralPath $refreshOwnerFile -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $refreshLock -Force -ErrorAction SilentlyContinue
-        }
-        throw 'another usage refresh is already in progress.'
-    }
+    throw 'another usage refresh is already in progress.'
 }
 
 function Test-UsableCodexCredential($Credential) {
@@ -782,12 +1019,10 @@ try {
     if ($RefreshCache) { [Console]::Error.WriteLine("usage-limit: $($_.Exception.Message)") }
 } finally {
     if ($ownsRefreshLock -and (Test-Path -LiteralPath $refreshLock -PathType Container)) {
-        $currentRecord = Read-RefreshOwnerRecord
-        $currentParts = @($currentRecord -split ' ', 2)
-        $currentToken = if ($currentParts.Count -eq 2) { $currentParts[1] } else { '' }
-        if ($ownedRefreshToken -and $currentToken -eq $ownedRefreshToken) {
-            [void] (Move-RefreshLockToQuarantine $currentRecord)
-        }
+        if ($ownedRefreshToken) { [void] (Remove-OwnedRefreshGeneration $ownedRefreshToken) }
+    }
+    if ($env:CLAUDEX_TEST_MODE -eq '1' -and $env:CLAUDEX_TEST_USAGE_REFRESH_EXIT_FILE) {
+        [IO.File]::WriteAllText($env:CLAUDEX_TEST_USAGE_REFRESH_EXIT_FILE, "exited`n", $utf8)
     }
 }
 

@@ -19,50 +19,390 @@ fail() {
   printf 'claudex: %s\n' "$*" >&2
 }
 
-read_session_sync_owner() {
-  local owner_file="${1:-$session_sync_lock}/owner" owner=""
-  [[ -r "$owner_file" ]] || return 0
-  IFS= read -r owner < "$owner_file" || owner=""
-  printf '%s\n' "$owner"
+current_shell_pid() {
+  local destination="$1"
+  sh -c 'printf "%s\n" "$PPID" > "$1"' claudex-session-pid "$destination"
 }
 
-session_lock_mtime() {
-  if stat -f '%m' "$1" >/dev/null 2>&1; then stat -f '%m' "$1"
-  else stat -c '%Y' "$1" 2>/dev/null
-  fi
-}
-
-quarantine_session_sync_lock() {
-  local expected="$1" quarantine moved=""
-  quarantine="$bridge_auth_dir/.codex-session-sync.lock.quarantine.$$.$RANDOM"
-  mv "$session_sync_lock" "$quarantine" 2>/dev/null || return 1
-  moved=$(read_session_sync_owner "$quarantine")
-  if [[ "$moved" == "$expected" ]]; then
-    rm -rf "$quarantine"
+process_identity() {
+  local pid="$1" identity="" stat_line=""
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_PROCESS_IDENTITY:-}" ]]; then
+    printf '%s\n' "$CLAUDEX_TEST_PROCESS_IDENTITY"
     return 0
   fi
-  if [[ ! -e "$session_sync_lock" ]]; then
-    mv "$quarantine" "$session_sync_lock" 2>/dev/null || true
+  if [[ -r "/proc/$pid/stat" ]]; then
+    IFS= read -r stat_line < "/proc/$pid/stat" || stat_line=""
+    stat_line="${stat_line##*) }"
+    if [[ -n "$stat_line" ]]; then
+      set -- $stat_line
+      if (( $# >= 20 )) && [[ "${20}" =~ ^[0-9]+$ ]]; then
+        printf 'proc:%s\n' "${20}"
+        return 0
+      fi
+    fi
   fi
+  identity=$(ps -p "$pid" -o lstart= 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]][[:space:]]*/ /g' || true)
+  [[ -n "$identity" ]] || return 1
+  printf '%s\n' "$identity"
+}
+
+lock_directory_identity() {
+  local path="$1" identity=""
+  if identity=$(stat -f '%d:%i' "$path" 2>/dev/null); then :
+  elif identity=$(stat -c '%d:%i' "$path" 2>/dev/null); then :
+  else return 1; fi
+  [[ -n "$identity" ]] || return 1
+  printf '%s\n' "$identity"
+}
+
+lock_age_seconds() {
+  local path="$1" mtime=0 now
+  if stat -f '%m' "$path" >/dev/null 2>&1; then mtime=$(stat -f '%m' "$path")
+  else mtime=$(stat -c '%Y' "$path" 2>/dev/null || printf 0); fi
+  now=$(date +%s)
+  if [[ "$mtime" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]]; then printf '%s\n' "$(( now - mtime ))"
+  else printf '%s\n' 0; fi
+}
+
+read_lock_field() {
+  local owner_file="$1" field="$2"
+  awk -F= -v field="$field" '$1 == field { sub(/^[^=]*=/, ""); print; exit }' "$owner_file" 2>/dev/null
+}
+
+read_legacy_lock_owner() {
+  local owner_file="$1" owner=""
+  [[ -r "$owner_file" ]] || return 0
+  IFS= read -r owner < "$owner_file" || owner=""
+  if [[ "$owner" =~ ^[0-9]+[[:space:]]+[^[:space:]]+$ ]]; then printf '%s\n' "$owner"; fi
+}
+
+legacy_lock_owner_is_current() {
+  local owner_file="$1" owner pid
+  owner=$(read_legacy_lock_owner "$owner_file")
+  [[ -n "$owner" ]] || return 1
+  pid="${owner%%[[:space:]]*}"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+lock_owner_is_current() {
+  local owner_file="$1" pid identity current
+  pid=$(read_lock_field "$owner_file" pid)
+  identity=$(read_lock_field "$owner_file" identity)
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ -n "$identity" ]] || return 0
+  current=$(process_identity "$pid" || true)
+  [[ -z "$current" || "$current" == "$identity" ]]
+}
+
+lock_barrier_exists() {
+  local barrier
+  for barrier in "$1".quarantine.*; do [[ -e "$barrier" ]] && return 0; done
   return 1
 }
 
-release_session_sync_lock() {
-  local current
-  (( session_sync_owned )) || return 0
-  current=$(read_session_sync_owner)
-  if [[ "${current#* }" == "$session_sync_token" ]]; then
-    quarantine_session_sync_lock "$current" || true
+lock_test_pause() {
+  local stage="$1" lock_dir="$2" ready_variable continue_variable ready_file continue_file
+  [[ "${CLAUDEX_TEST_MODE:-0}" == 1 ]] || return 0
+  [[ -z "${CLAUDEX_TEST_LOCK_MATCH:-}" || "$lock_dir" == *"$CLAUDEX_TEST_LOCK_MATCH"* ]] || return 0
+  ready_variable="CLAUDEX_TEST_LOCK_${stage}_READY"
+  continue_variable="CLAUDEX_TEST_LOCK_${stage}_CONTINUE"
+  ready_file="${!ready_variable:-}"
+  continue_file="${!continue_variable:-}"
+  [[ -n "$ready_file" && -n "$continue_file" ]] || return 0
+  : > "$ready_file"
+  while [[ ! -e "$continue_file" ]]; do sleep 0.02; done
+}
+
+read_generation_nonce() {
+  local generation_file="$1/generation" nonce=""
+  [[ -r "$generation_file" ]] || return 0
+  IFS= read -r nonce < "$generation_file" || nonce=""
+  printf '%s\n' "$nonce"
+}
+
+remove_lock_directory_files() {
+  local directory="$1"
+  rm -f "$directory/owner" "$directory/generation" 2>/dev/null || true
+  rmdir "$directory" 2>/dev/null || true
+}
+
+publish_lock_file() {
+  local source="$1" destination="$2"
+  [[ "${CLAUDEX_TEST_MODE:-0}" != 1 || "${CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE:-0}" != 1 ]] || return 1
+  if [[ "${CLAUDEX_TEST_MODE:-0}" != 1 || "${CLAUDEX_TEST_FORCE_HARDLINK_FAILURE:-0}" != 1 ]]; then
+    ln "$source" "$destination" 2>/dev/null && return 0
   fi
+  (
+    set -C
+    umask 077
+    exec 9> "$destination" || exit 1
+    cat "$source" >&9
+  ) 2>/dev/null
+}
+
+restore_lock_barrier() {
+  local lock_dir="$1" barrier="$2" attempt
+  for attempt in {1..250}; do
+    if [[ ! -e "$lock_dir" ]] && mv "$barrier" "$lock_dir" 2>/dev/null; then return 0; fi
+    sleep 0.02
+  done
+  return 1
+}
+
+remove_legacy_lock_generation() {
+  local lock_dir="$1" expected_owner="$2" quarantine moved_owner
+  [[ -n "$expected_owner" && "$(read_legacy_lock_owner "$lock_dir/owner")" == "$expected_owner" ]] || return 1
+  quarantine="$lock_dir.quarantine.legacy.$$.$RANDOM"
+  lock_test_pause BEFORE_RENAME "$lock_dir"
+  mv "$lock_dir" "$quarantine" 2>/dev/null || return 1
+  lock_test_pause AFTER_RENAME "$lock_dir"
+  moved_owner=$(read_legacy_lock_owner "$quarantine/owner")
+  if [[ "$moved_owner" == "$expected_owner" && -z "$(read_generation_nonce "$quarantine")" && -z "$(read_lock_field "$quarantine/owner" nonce)" ]]; then
+    remove_lock_directory_files "$quarantine"
+    return 0
+  fi
+  restore_lock_barrier "$lock_dir" "$quarantine" || true
+  return 1
+}
+
+remove_legacy_lock_barrier() {
+  local barrier="$1" expected_owner="$2" disposal moved_owner
+  [[ -n "$expected_owner" && "$(read_legacy_lock_owner "$barrier/owner")" == "$expected_owner" ]] || return 1
+  disposal="$barrier.dispose.$$.$RANDOM"
+  mv "$barrier" "$disposal" 2>/dev/null || return 1
+  moved_owner=$(read_legacy_lock_owner "$disposal/owner")
+  if [[ "$moved_owner" == "$expected_owner" && -z "$(read_generation_nonce "$disposal")" && -z "$(read_lock_field "$disposal/owner" nonce)" ]]; then
+    remove_lock_directory_files "$disposal"
+    return 0
+  fi
+  restore_lock_barrier "$barrier" "$disposal" || true
+  return 1
+}
+
+withdraw_legacy_lock_generation() {
+  local lock_dir="$1" expected_owner="$2" expected_generation="$3" quarantine moved_owner moved_generation
+  [[ -n "$expected_owner" && -n "$expected_generation" ]] || return 1
+  [[ "$(read_legacy_lock_owner "$lock_dir/owner")" == "$expected_owner" && "$(read_generation_nonce "$lock_dir")" == "$expected_generation" ]] || return 1
+  quarantine="$lock_dir.quarantine.legacy-generation.$$.$RANDOM"
+  mv "$lock_dir" "$quarantine" 2>/dev/null || return 1
+  moved_owner=$(read_legacy_lock_owner "$quarantine/owner")
+  moved_generation=$(read_generation_nonce "$quarantine")
+  if [[ "$moved_owner" == "$expected_owner" && "$moved_generation" == "$expected_generation" ]]; then
+    rm -f "$quarantine/generation" 2>/dev/null || true
+    restore_lock_barrier "$lock_dir" "$quarantine" || true
+    return 0
+  fi
+  restore_lock_barrier "$lock_dir" "$quarantine" || true
+  return 1
+}
+
+withdraw_legacy_barrier_generation() {
+  local barrier="$1" expected_owner="$2" expected_generation="$3" disposal moved_owner moved_generation
+  [[ -n "$expected_owner" && -n "$expected_generation" ]] || return 1
+  [[ "$(read_legacy_lock_owner "$barrier/owner")" == "$expected_owner" && "$(read_generation_nonce "$barrier")" == "$expected_generation" ]] || return 1
+  disposal="$barrier.withdraw.$$.$RANDOM"
+  mv "$barrier" "$disposal" 2>/dev/null || return 1
+  moved_owner=$(read_legacy_lock_owner "$disposal/owner")
+  moved_generation=$(read_generation_nonce "$disposal")
+  if [[ "$moved_owner" == "$expected_owner" && "$moved_generation" == "$expected_generation" ]]; then
+    rm -f "$disposal/generation" 2>/dev/null || true
+    restore_lock_barrier "$barrier" "$disposal" || true
+    return 0
+  fi
+  restore_lock_barrier "$barrier" "$disposal" || true
+  return 1
+}
+
+remove_incomplete_lock_directory() {
+  local lock_dir="$1" quarantine moved_nonce moved_legacy_owner
+  [[ -d "$lock_dir" ]] || return 0
+  quarantine="$lock_dir.quarantine.incomplete.$$.$RANDOM"
+  mv "$lock_dir" "$quarantine" 2>/dev/null || return 1
+  moved_nonce=$(read_generation_nonce "$quarantine")
+  [[ -n "$moved_nonce" ]] || moved_nonce=$(read_lock_field "$quarantine/owner" nonce)
+  moved_legacy_owner=$(read_legacy_lock_owner "$quarantine/owner")
+  if [[ -n "$moved_nonce" || -n "$moved_legacy_owner" ]]; then restore_lock_barrier "$lock_dir" "$quarantine" || true; return 1; fi
+  remove_lock_directory_files "$quarantine"
+  [[ ! -e "$quarantine" ]]
+}
+
+recover_lock_barriers() {
+  local lock_dir="$1" legacy_ownerless_seconds="$2" legacy_owner_seconds="$3" barrier age nonce legacy_owner generation_nonce
+  for barrier in "$lock_dir".quarantine.*; do
+    [[ -d "$barrier" ]] || continue
+    nonce=$(read_lock_field "$barrier/owner" nonce)
+    legacy_owner=$(read_legacy_lock_owner "$barrier/owner")
+    generation_nonce=$(read_generation_nonce "$barrier")
+    age=$(lock_age_seconds "$barrier")
+    if [[ -n "$legacy_owner" && -n "$generation_nonce" ]]; then
+      withdraw_legacy_barrier_generation "$barrier" "$legacy_owner" "$generation_nonce" || continue
+      generation_nonce=""
+    fi
+    if [[ -n "$nonce" ]] && lock_owner_is_current "$barrier/owner"; then
+      if [[ ! -e "$lock_dir" ]]; then mv "$barrier" "$lock_dir" 2>/dev/null || true; fi
+      continue
+    fi
+    if [[ -n "$nonce" && "$age" -ge 2 ]]; then remove_lock_directory_files "$barrier"
+    elif [[ -n "$legacy_owner" ]] && legacy_lock_owner_is_current "$barrier/owner"; then
+      if [[ ! -e "$lock_dir" ]]; then mv "$barrier" "$lock_dir" 2>/dev/null || true; fi
+    elif [[ -n "$legacy_owner" && "$age" -ge "$legacy_owner_seconds" ]]; then remove_legacy_lock_barrier "$barrier" "$legacy_owner" || true
+    elif [[ -n "$generation_nonce" && "$age" -ge 2 ]]; then remove_lock_directory_files "$barrier"
+    elif [[ -z "$generation_nonce" && "$age" -ge "$legacy_ownerless_seconds" ]]; then remove_lock_directory_files "$barrier"; fi
+  done
+}
+
+remove_owned_lock_generation() {
+  local lock_dir="$1" expected_nonce="$2" quarantine moved_generation moved_owner_nonce moved_legacy_owner current_nonce
+  current_nonce=$(read_generation_nonce "$lock_dir")
+  [[ -n "$current_nonce" ]] || current_nonce=$(read_lock_field "$lock_dir/owner" nonce)
+  [[ -n "$expected_nonce" && "$current_nonce" == "$expected_nonce" ]] || return 1
+  quarantine="$lock_dir.quarantine.$$.$RANDOM"
+  lock_test_pause BEFORE_RENAME "$lock_dir"
+  mv "$lock_dir" "$quarantine" 2>/dev/null || return 1
+  lock_test_pause AFTER_RENAME "$lock_dir"
+  [[ -d "$quarantine" ]] || return 1
+  moved_generation=$(read_generation_nonce "$quarantine")
+  moved_owner_nonce=$(read_lock_field "$quarantine/owner" nonce)
+  moved_legacy_owner=$(read_legacy_lock_owner "$quarantine/owner")
+  if [[ "$moved_generation" == "$expected_nonce" ]]; then
+    if [[ "$moved_owner_nonce" == "$expected_nonce" || ( -z "$moved_owner_nonce" && -z "$moved_legacy_owner" ) ]]; then
+      remove_lock_directory_files "$quarantine"
+      return 0
+    fi
+    # We published this generation into a directory that a mixed-version
+    # owner replaced before owner publication. Remove only our generation and
+    # restore the foreign owner behind the acquisition barrier.
+    rm -f "$quarantine/generation" 2>/dev/null || true
+    restore_lock_barrier "$lock_dir" "$quarantine" || true
+    return 1
+  fi
+  if [[ -z "$moved_generation" && "$moved_owner_nonce" == "$expected_nonce" ]]; then remove_lock_directory_files "$quarantine"; return 0; fi
+  restore_lock_barrier "$lock_dir" "$quarantine" || true
+  return 1
+}
+
+recover_owned_lock_generation() {
+  local lock_dir="$1" expected_nonce="$2" expected_directory_identity="${3:-}" barrier moved_nonce current_nonce current_directory_identity
+  for barrier in "$lock_dir".quarantine.*; do
+    [[ -d "$barrier" ]] || continue
+    moved_nonce=$(read_generation_nonce "$barrier")
+    [[ -n "$moved_nonce" ]] || moved_nonce=$(read_lock_field "$barrier/owner" nonce)
+    [[ "$moved_nonce" == "$expected_nonce" ]] || continue
+    [[ -z "$expected_directory_identity" || "$(lock_directory_identity "$barrier" || true)" == "$expected_directory_identity" ]] || continue
+    if [[ ! -e "$lock_dir" ]]; then mv "$barrier" "$lock_dir" 2>/dev/null || true; fi
+  done
+  current_nonce=$(read_generation_nonce "$lock_dir")
+  [[ -n "$current_nonce" ]] || current_nonce=$(read_lock_field "$lock_dir/owner" nonce)
+  current_directory_identity=$(lock_directory_identity "$lock_dir" || true)
+  if [[ "$current_nonce" == "$expected_nonce" && ( -z "$expected_directory_identity" || "$current_directory_identity" == "$expected_directory_identity" ) ]] && ! lock_barrier_exists "$lock_dir"; then
+    [[ "${CLAUDEX_TEST_MODE:-0}" != 1 || -z "${CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE:-}" ]] || : > "$CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE"
+    return 0
+  fi
+  if [[ "$current_nonce" == "$expected_nonce" && ( -z "$expected_directory_identity" || "$current_directory_identity" == "$expected_directory_identity" ) ]]; then remove_owned_lock_generation "$lock_dir" "$expected_nonce" || true; fi
+  for barrier in "$lock_dir".quarantine.*; do
+    [[ -d "$barrier" ]] || continue
+    moved_nonce=$(read_generation_nonce "$barrier")
+    [[ -n "$moved_nonce" ]] || moved_nonce=$(read_lock_field "$barrier/owner" nonce)
+    if [[ "$moved_nonce" == "$expected_nonce" && ( -z "$expected_directory_identity" || "$(lock_directory_identity "$barrier" || true)" == "$expected_directory_identity" ) ]]; then remove_lock_directory_files "$barrier"; fi
+  done
+  return 1
+}
+
+owned_lock_nonce=""
+acquire_owned_lock() {
+  local lock_dir="$1" attempts="${2:-100}" delay="${3:-0.02}" legacy_ownerless_seconds="${4:-60}" legacy_owner_seconds="${5:-60}"
+  local attempt owner_file observed_nonce age pid_file owner_pid owner_identity owner_tmp generation_tmp generation_nonce quarantine legacy_owner legacy_generation created_directory_identity current_directory_identity
+  owned_lock_nonce=""
+  owner_file="$lock_dir/owner"
+  mkdir -p "$(dirname "$lock_dir")"
+  for (( attempt=0; attempt<attempts; attempt++ )); do
+    recover_lock_barriers "$lock_dir" "$legacy_ownerless_seconds" "$legacy_owner_seconds"
+    if lock_barrier_exists "$lock_dir"; then sleep "$delay"; continue; fi
+    pid_file=$(mktemp "$(dirname "$lock_dir")/.lock-owner-pid.XXXXXX")
+    current_shell_pid "$pid_file"
+    read -r owner_pid < "$pid_file"
+    rm -f "$pid_file"
+    owner_identity=$(process_identity "$owner_pid" || true)
+    generation_nonce="${owner_pid}.$(date +%s).${RANDOM}.${RANDOM}"
+    generation_tmp=$(mktemp "$(dirname "$lock_dir")/.lock-generation.XXXXXX")
+    owner_tmp=$(mktemp "$(dirname "$lock_dir")/.lock-owner.XXXXXX")
+    printf '%s\n' "$generation_nonce" > "$generation_tmp"
+    { printf 'pid=%s\n' "$owner_pid"; printf 'identity=%s\n' "$owner_identity"; printf 'nonce=%s\n' "$generation_nonce"; } > "$owner_tmp"
+    chmod 600 "$generation_tmp" "$owner_tmp" 2>/dev/null || true
+    if mkdir "$lock_dir" 2>/dev/null; then
+      created_directory_identity=$(lock_directory_identity "$lock_dir" || true)
+      lock_test_pause AFTER_MKDIR "$lock_dir"
+      if [[ -n "$created_directory_identity" && "$(lock_directory_identity "$lock_dir" || true)" == "$created_directory_identity" ]] \
+          && publish_lock_file "$generation_tmp" "$lock_dir/generation" \
+          && [[ "$(lock_directory_identity "$lock_dir" || true)" == "$created_directory_identity" ]] \
+          && [[ "$(read_generation_nonce "$lock_dir")" == "$generation_nonce" ]] \
+          && [[ "$(lock_directory_identity "$lock_dir" || true)" == "$created_directory_identity" ]] \
+          && publish_lock_file "$owner_tmp" "$owner_file" \
+          && [[ "$(lock_directory_identity "$lock_dir" || true)" == "$created_directory_identity" ]] \
+          && [[ "$(read_lock_field "$owner_file" nonce)" == "$generation_nonce" ]] \
+          && [[ "$(lock_directory_identity "$lock_dir" || true)" == "$created_directory_identity" ]] \
+          && ! lock_barrier_exists "$lock_dir"; then
+        rm -f "$generation_tmp" "$owner_tmp"
+        owned_lock_nonce="$generation_nonce"
+        lock_test_pause AFTER_PUBLISH "$lock_dir"
+        current_directory_identity=$(lock_directory_identity "$lock_dir" || true)
+        if [[ "$current_directory_identity" != "$created_directory_identity" || "$(read_generation_nonce "$lock_dir")" != "$generation_nonce" ]] || lock_barrier_exists "$lock_dir"; then
+          if recover_owned_lock_generation "$lock_dir" "$generation_nonce" "$created_directory_identity"; then return 0; fi
+          owned_lock_nonce=""
+          sleep "$delay"
+          continue
+        fi
+        return 0
+      fi
+      rm -f "$generation_tmp" "$owner_tmp"
+      current_directory_identity=$(lock_directory_identity "$lock_dir" || true)
+      if [[ -n "$created_directory_identity" && "$current_directory_identity" == "$created_directory_identity" ]]; then
+        remove_owned_lock_generation "$lock_dir" "$generation_nonce" || remove_incomplete_lock_directory "$lock_dir" || true
+      fi
+      sleep "$delay"
+      continue
+    fi
+    rm -f "$generation_tmp" "$owner_tmp"
+    age=$(lock_age_seconds "$lock_dir")
+    observed_nonce=$(read_lock_field "$owner_file" nonce)
+    legacy_owner=$(read_legacy_lock_owner "$owner_file")
+    if [[ -n "$observed_nonce" ]]; then
+      if ! lock_owner_is_current "$owner_file" && (( age >= 2 )); then remove_owned_lock_generation "$lock_dir" "$observed_nonce" || true; fi
+    elif [[ -n "$legacy_owner" ]]; then
+      legacy_generation=$(read_generation_nonce "$lock_dir")
+      if [[ -n "$legacy_generation" ]]; then withdraw_legacy_lock_generation "$lock_dir" "$legacy_owner" "$legacy_generation" || true; fi
+      if ! legacy_lock_owner_is_current "$owner_file" && (( age >= legacy_owner_seconds )); then remove_legacy_lock_generation "$lock_dir" "$legacy_owner" || true; fi
+    elif [[ -n "$(read_generation_nonce "$lock_dir")" ]] && (( age >= 2 )); then
+      observed_nonce=$(read_generation_nonce "$lock_dir")
+      remove_owned_lock_generation "$lock_dir" "$observed_nonce" || true
+    elif (( age >= legacy_ownerless_seconds )); then
+      quarantine="$lock_dir.quarantine.legacy.$$.$RANDOM"
+      if mv "$lock_dir" "$quarantine" 2>/dev/null; then
+        if [[ -n "$(read_generation_nonce "$quarantine")" || -n "$(read_lock_field "$quarantine/owner" nonce)" ]]; then restore_lock_barrier "$lock_dir" "$quarantine" || true
+        else remove_lock_directory_files "$quarantine"; fi
+      fi
+    fi
+    sleep "$delay"
+  done
+  return 1
+}
+
+release_owned_lock() {
+  local lock_dir="$1" nonce="$2"
+  [[ -n "$lock_dir" && -n "$nonce" ]] || return 0
+  remove_owned_lock_generation "$lock_dir" "$nonce" || true
+}
+
+release_session_sync_lock() {
+  (( session_sync_owned )) || return 0
+  release_owned_lock "$session_sync_lock" "$session_sync_token"
   session_sync_owned=0
   session_sync_token=""
 }
 
 cleanup_sensitive_session_state() {
-  if [[ -n "$session_temporary" ]]; then
-    rm -f "$session_temporary" 2>/dev/null || true
-    session_temporary=""
-  fi
+  if [[ -n "$session_temporary" ]]; then rm -f "$session_temporary" 2>/dev/null || true; session_temporary=""; fi
   release_session_sync_lock
 }
 
@@ -78,42 +418,17 @@ trap 'exit_for_session_signal 130' INT
 trap 'exit_for_session_signal 143' TERM
 
 acquire_session_sync_lock() {
-  local attempt owner owner_pid age now mtime
   mkdir -p "$bridge_auth_dir"
   chmod 700 "$bridge_auth_dir" 2>/dev/null || true
-  for attempt in {1..250}; do
-    if mkdir "$session_sync_lock" 2>/dev/null; then
-      session_sync_token="$(date +%s)-$$-${RANDOM:-0}"
-      if ! (umask 077; printf '%s %s\n' "$$" "$session_sync_token" > "$session_sync_lock/owner"); then
-        rmdir "$session_sync_lock" 2>/dev/null || true
-        session_sync_token=""
-        return 1
-      fi
-      chmod 600 "$session_sync_lock/owner" 2>/dev/null || true
-      session_sync_owned=1
-      return 0
-    fi
-
-    owner=$(read_session_sync_owner)
-    owner_pid="${owner%% *}"
-    if [[ "$owner" == *" "* && "$owner_pid" =~ ^[0-9]+$ && -n "${owner#* }" ]]; then
-      if ! kill -0 "$owner_pid" 2>/dev/null && [[ "$(read_session_sync_owner)" == "$owner" ]]; then
-        quarantine_session_sync_lock "$owner" || true
-        continue
-      fi
-    elif [[ -d "$session_sync_lock" ]]; then
-      now=$(date +%s)
-      mtime=$(session_lock_mtime "$session_sync_lock" 2>/dev/null || printf '%s' "$now")
-      age=$(( now - mtime ))
-      if (( age >= 2 )) && [[ -z "$(read_session_sync_owner)" ]]; then
-        quarantine_session_sync_lock "" || true
-        continue
-      fi
-    fi
-    sleep 0.02
-  done
-  fail 'timed out waiting for another Codex credential synchronization.'
-  return 1
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_SESSION_SYNC_LOCK_WAIT_READY_FILE:-}" ]]; then
+    (umask 077; printf '%s\n' ready > "$CLAUDEX_TEST_SESSION_SYNC_LOCK_WAIT_READY_FILE")
+  fi
+  if ! acquire_owned_lock "$session_sync_lock" 250 0.02 2 60; then
+    fail 'timed out waiting for another Codex credential synchronization.'
+    return 1
+  fi
+  session_sync_token="$owned_lock_nonce"
+  session_sync_owned=1
 }
 
 json_fingerprint() {
@@ -127,10 +442,12 @@ json_fingerprint() {
 }
 
 clear_bridge_session() {
+  (( session_sync_owned )) || { fail 'internal error: bridge mutation requires credential synchronization ownership.'; return 1; }
   rm -f "$bridge_auth_file"
 }
 
 clear_account_scoped_state() {
+  (( session_sync_owned )) || { fail 'internal error: account-state mutation requires credential synchronization ownership.'; return 1; }
   rm -f "$usage_account_file" \
     "$usage_cache_dir/limits.json" \
     "$usage_cache_dir/summary" \
@@ -148,53 +465,98 @@ clear_account_scoped_state() {
   fi
 }
 
+clear_owned_session_state() {
+  clear_bridge_session && clear_account_scoped_state
+}
+
+source_session_is_valid() {
+  printf '%s' "$1" | jq -e '
+    .auth_mode == "chatgpt"
+    and (.tokens.access_token | type == "string" and length > 0)
+    and (.tokens.refresh_token | type == "string" and length > 0)
+    and (.tokens.account_id | type == "string" and length > 0)
+  ' >/dev/null 2>&1
+}
+
 codex_is_logged_in() {
-  command -v codex >/dev/null 2>&1 && codex login status >/dev/null 2>&1
+  command -v codex >/dev/null 2>&1 &&
+    codex -c 'cli_auth_credentials_store="file"' login status >/dev/null 2>&1
 }
 
 sync_session() {
   local source_json="" source_fingerprint="" current_json="" current_fingerprint=""
   local previous_account="" source_account should_write=1 attempt
-  command -v codex >/dev/null 2>&1 || {
-    clear_bridge_session
-    clear_account_scoped_state
-    fail 'Codex CLI was not found. Install Codex, run `codex login`, and retry.'
-    return 10
-  }
-  if ! codex_is_logged_in; then
-    clear_bridge_session
-    clear_account_scoped_state
-    fail 'Codex is logged out. Run `codex login` (or `claudex --login`) and retry.'
-    return 11
-  fi
-  command -v jq >/dev/null 2>&1 || {
-    clear_bridge_session
-    clear_account_scoped_state
-    fail 'jq is required for secure local Codex session synchronization.'
-    return 12
-  }
-  if [[ ! -r "$codex_auth_file" ]]; then
-    clear_bridge_session
-    clear_account_scoped_state
-    fail 'Codex is logged in, but its credentials are stored in the OS keyring.'
-    fail 'Run `claudex --login` once so Codex can create a reusable file-backed local session.'
-    return 13
-  fi
   mkdir -p "$bridge_auth_dir"
   chmod 700 "$bridge_auth_dir" 2>/dev/null || true
+
+  # Negative preflight observations are destructive only after this worker owns
+  # the same publication boundary as a successful sync. Revalidate after
+  # acquisition so a source repaired by the active publisher is never cleared
+  # from a stale logged-out, missing, or invalid decision.
+  while :; do
+    if ! command -v codex >/dev/null 2>&1; then
+      acquire_session_sync_lock || return $?
+      if command -v codex >/dev/null 2>&1; then release_session_sync_lock; continue; fi
+      clear_owned_session_state || { release_session_sync_lock; return 1; }
+      release_session_sync_lock
+      fail 'Codex CLI was not found. Install Codex, run `codex login`, and retry.'
+      return 10
+    fi
+    if ! codex_is_logged_in; then
+      acquire_session_sync_lock || return $?
+      if codex_is_logged_in; then release_session_sync_lock; continue; fi
+      clear_owned_session_state || { release_session_sync_lock; return 1; }
+      release_session_sync_lock
+      fail 'Codex is logged out. Run `codex login` (or `claudex --login`) and retry.'
+      return 11
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+      acquire_session_sync_lock || return $?
+      if command -v jq >/dev/null 2>&1; then release_session_sync_lock; continue; fi
+      clear_owned_session_state || { release_session_sync_lock; return 1; }
+      release_session_sync_lock
+      fail 'jq is required for secure local Codex session synchronization.'
+      return 12
+    fi
+    if [[ ! -r "$codex_auth_file" ]]; then
+      acquire_session_sync_lock || return $?
+      if [[ -r "$codex_auth_file" ]]; then release_session_sync_lock; continue; fi
+      clear_owned_session_state || { release_session_sync_lock; return 1; }
+      release_session_sync_lock
+      fail 'Codex is logged in, but its credentials are stored in the OS keyring.'
+      fail 'Run `claudex --login` once so Codex can create a reusable file-backed local session.'
+      return 13
+    fi
+    source_json=$(<"$codex_auth_file") || source_json=""
+    if ! source_session_is_valid "$source_json"; then
+      acquire_session_sync_lock || return $?
+      current_json=$(<"$codex_auth_file") || current_json=""
+      if source_session_is_valid "$current_json"; then
+        release_session_sync_lock
+        continue
+      fi
+      clear_owned_session_state || { release_session_sync_lock; return 1; }
+      release_session_sync_lock
+      fail 'Claudex requires Codex ChatGPT sign-in. Run `claudex --login` and choose ChatGPT.'
+      return 14
+    fi
+    break
+  done
 
   for attempt in 1 2 3; do
     # Consume one coherent snapshot, then fingerprint that exact content. The
     # source is checked again only after publication ownership is acquired.
     source_json=$(<"$codex_auth_file") || source_json=""
-    if ! printf '%s' "$source_json" | jq -e '
-      .auth_mode == "chatgpt"
-      and (.tokens.access_token | type == "string" and length > 0)
-      and (.tokens.refresh_token | type == "string" and length > 0)
-      and (.tokens.account_id | type == "string" and length > 0)
-    ' >/dev/null 2>&1; then
-      clear_bridge_session
-      clear_account_scoped_state
+    if ! source_session_is_valid "$source_json"; then
+      acquire_session_sync_lock || return $?
+      current_json=$(<"$codex_auth_file") || current_json=""
+      if source_session_is_valid "$current_json"; then
+        release_session_sync_lock
+        source_json="$current_json"
+        continue
+      fi
+      clear_owned_session_state || { release_session_sync_lock; return 1; }
+      release_session_sync_lock
       fail 'Claudex requires Codex ChatGPT sign-in. Run `claudex --login` and choose ChatGPT.'
       return 14
     fi
@@ -202,16 +564,38 @@ sync_session() {
 
     umask 077
     session_temporary=$(mktemp "$bridge_auth_dir/.codex-session.tmp.XXXXXX")
-    if ! printf '%s' "$source_json" | jq '{
-      type: "codex",
-      access_token: .tokens.access_token,
-      refresh_token: .tokens.refresh_token,
-      id_token: (.tokens.id_token // ""),
-      account_id: .tokens.account_id,
-      last_refresh: (.last_refresh // ""),
-      disabled: false,
-      expired: false
-    }' > "$session_temporary"; then
+    if ! printf '%s' "$source_json" | jq '
+      def id_token_email:
+        (try (
+          (.tokens.id_token | split(".")) as $parts
+          | if ($parts | length) < 2 then error("invalid JWT") else $parts[1] end
+          | gsub("-"; "+") | gsub("_"; "/")
+          | . as $body
+          | $body + (
+              if ($body | length) % 4 == 2 then "=="
+              elif ($body | length) % 4 == 3 then "="
+              elif ($body | length) % 4 == 0 then ""
+              else error("invalid base64url") end
+            )
+          | @base64d | fromjson | .email
+        ) catch null) as $email
+        | if (($email | type) == "string"
+              and ($email | length) > 0
+              and ($email | length) <= 320
+              and ($email | test("^[^@\\s\u0000-\u001f\u007f]+@[^@\\s\u0000-\u001f\u007f]+$")))
+          then $email else null end;
+      {
+        type: "codex",
+        access_token: .tokens.access_token,
+        refresh_token: .tokens.refresh_token,
+        id_token: (.tokens.id_token // ""),
+        account_id: .tokens.account_id,
+        last_refresh: (.last_refresh // ""),
+        disabled: false,
+        expired: false
+      }
+      + (id_token_email as $email | if $email == null then {} else {email: $email} end)
+    ' > "$session_temporary"; then
       cleanup_sensitive_session_state
       return 1
     fi
@@ -238,6 +622,7 @@ sync_session() {
       and .access_token == $source[0].access_token
       and .refresh_token == $source[0].refresh_token
       and (.id_token // "") == ($source[0].id_token // "")
+      and (.email // "") == ($source[0].email // "")
       and ((.disabled // false) != true)
       and ((.expired // false) != true)
       and ((.last_refresh // "") | tostring) >= (($source[0].last_refresh // "") | tostring)
@@ -278,8 +663,50 @@ auth_fingerprint() {
   fi
 }
 
+watch_parent_is_current() {
+  local parent_pid="$1" expected_identity="$2" current_identity
+  kill -0 "$parent_pid" 2>/dev/null || return 1
+  [[ -n "$expected_identity" ]] || return 0
+  current_identity=$(process_identity "$parent_pid" 2>/dev/null || true)
+  [[ -n "$current_identity" && "$current_identity" == "$expected_identity" ]]
+}
+
+managed_background_registry_state() {
+  local registry
+  command -v claude >/dev/null 2>&1 || return 2
+  registry=$(env \
+    -u BUN_OPTIONS -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
+    -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_CUSTOM_HEADERS \
+    -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY \
+    -u ANTHROPIC_BEDROCK_BASE_URL -u ANTHROPIC_BEDROCK_MANTLE_BASE_URL \
+    -u ANTHROPIC_VERTEX_BASE_URL -u ANTHROPIC_VERTEX_PROJECT_ID \
+    -u ANTHROPIC_FOUNDRY_BASE_URL -u ANTHROPIC_FOUNDRY_RESOURCE -u ANTHROPIC_FOUNDRY_API_KEY \
+    -u ANTHROPIC_MODEL -u ANTHROPIC_SMALL_FAST_MODEL -u ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION \
+    -u ANTHROPIC_CUSTOM_MODEL_OPTION -u ANTHROPIC_CUSTOM_MODEL_OPTION_NAME -u ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION \
+    -u ANTHROPIC_DEFAULT_FABLE_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_HAIKU_MODEL \
+    -u ANTHROPIC_DEFAULT_FABLE_MODEL_NAME -u ANTHROPIC_DEFAULT_OPUS_MODEL_NAME -u ANTHROPIC_DEFAULT_SONNET_MODEL_NAME -u ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME \
+    -u ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION -u ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION -u ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION -u ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION \
+    -u ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES -u ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES \
+    -u ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES -u ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES \
+    -u CLAUDE_CODE_AUTO_MODE_MODEL -u CLAUDE_CODE_BG_CLASSIFIER_MODEL -u CLAUDE_CODE_SUBAGENT_MODEL \
+    -u CLAUDE_CODE_ALWAYS_ENABLE_EFFORT -u CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY -u CLAUDE_CODE_MAX_RETRIES \
+    -u CLAUDE_CODE_MAX_CONTEXT_TOKENS -u CLAUDE_CODE_AUTO_COMPACT_WINDOW -u CLAUDE_CODE_DISABLE_1M_CONTEXT \
+    -u CLAUDEX_PROXY_TOKEN -u CLAUDEX_PROXY_URL -u CLAUDEX_PROXY_CONFIG -u CLAUDEX_PROXY_BIN \
+    -u CLAUDEX_CODEX_AUTH_FILE -u CLAUDEX_CODEX_SOURCE_AUTH_FILE -u CLAUDEX_MANAGED_SESSION \
+    -u CLAUDEX_CHATGPT_PLAN_LABEL -u CLAUDEX_SESSION_MODE -u CLAUDEX_MODEL_MODE -u CLAUDEX_INTERACTIVE_TUI \
+    -u CLAUDEX_NO_SESSION_PERSISTENCE -u CLAUDEX_INSTRUCTION_BRIDGE -u CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD \
+    -u CLAUDE_CODE_EFFORT_LEVEL -u CLAUDE_CODE_NO_FLICKER -u CLAUDE_CODE_ACCESSIBILITY \
+    claude agents --json 2>/dev/null) || return 2
+  printf '%s' "$registry" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
+  if printf '%s' "$registry" | jq -e 'length > 0' >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
 watch_session() {
-  local parent_pid="${1:-}" interval="${CLAUDEX_AUTH_WATCH_SECONDS:-2}" fingerprint next
+  local parent_pid="${1:-}" parent_identity="${2:-}" background="${3:-0}"
+  local interval="${CLAUDEX_AUTH_WATCH_SECONDS:-2}" fingerprint next registry_status empty_polls=0
   [[ "$parent_pid" =~ ^[0-9]+$ && "$parent_pid" -gt 1 ]] || {
     fail 'watch requires a valid parent process ID.'
     return 2
@@ -288,6 +715,12 @@ watch_session() {
     fail 'CLAUDEX_AUTH_WATCH_SECONDS must be an integer from 1 to 60.'
     return 2
   }
+  [[ "$background" == 0 || "$background" == 1 ]] || {
+    fail 'watch background mode must be 0 or 1.'
+    return 2
+  }
+  if [[ "$background" == 1 ]]; then trap '' HUP; fi
+  if [[ -z "$parent_identity" ]]; then parent_identity=$(process_identity "$parent_pid" 2>/dev/null || true); fi
   # Reconcile once before establishing the baseline. Otherwise an account
   # change between launcher startup and watcher initialization can be missed
   # until auth.json changes a second time.
@@ -296,7 +729,23 @@ watch_session() {
   if [[ -n "${CLAUDEX_AUTH_WATCH_READY_FILE:-}" ]]; then
     (umask 077; printf '%s\n' ready > "$CLAUDEX_AUTH_WATCH_READY_FILE")
   fi
-  while kill -0 "$parent_pid" 2>/dev/null; do
+  while :; do
+    if watch_parent_is_current "$parent_pid" "$parent_identity"; then
+      empty_polls=0
+    elif [[ "$background" == 1 ]]; then
+      registry_status=0
+      managed_background_registry_state || registry_status=$?
+      case "$registry_status" in
+        0) empty_polls=0 ;;
+        1)
+          empty_polls=$(( empty_polls + 1 ))
+          (( empty_polls < 3 )) || break
+          ;;
+        *) empty_polls=0 ;;
+      esac
+    else
+      break
+    fi
     sleep "$interval"
     next=$(auth_fingerprint)
     [[ "$next" != "$fingerprint" ]] || continue
@@ -307,6 +756,9 @@ watch_session() {
       fingerprint="$next"
     fi
   done
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_AUTH_WATCH_EXIT_FILE:-}" ]]; then
+    (umask 077; printf '%s\n' exited > "$CLAUDEX_TEST_AUTH_WATCH_EXIT_FILE")
+  fi
 }
 
 login() {
@@ -321,16 +773,21 @@ login() {
 }
 
 logout() {
-  command -v codex >/dev/null 2>&1 || {
-    clear_bridge_session
-    clear_account_scoped_state
+  local logout_status=0 clear_status=0 codex_found=1
+  acquire_session_sync_lock || return $?
+  if command -v codex >/dev/null 2>&1; then
+    codex -c 'cli_auth_credentials_store="file"' logout || logout_status=$?
+  else
+    codex_found=0
+    logout_status=10
+  fi
+  clear_owned_session_state || clear_status=$?
+  release_session_sync_lock
+  (( clear_status == 0 )) || return "$clear_status"
+  if (( ! codex_found )); then
     fail 'Codex CLI was not found; the local Claudex bridge session was cleared.'
     return 10
-  }
-  local logout_status=0
-  codex logout || logout_status=$?
-  clear_bridge_session
-  clear_account_scoped_state
+  fi
   if (( logout_status != 0 )); then
     fail 'Codex logout failed, but the local Claudex bridge session was cleared.'
     return "$logout_status"
@@ -350,9 +807,9 @@ status() {
 
 case "${1:-sync}" in
   sync) sync_session ;;
-  watch) watch_session "${2:-}" ;;
+  watch) watch_session "${2:-}" "${3:-}" "${4:-0}" ;;
   login) login ;;
   logout) logout ;;
   status) status ;;
-  *) fail 'usage: codex-session [sync|watch PARENT_PID|login|logout|status]'; exit 2 ;;
+  *) fail 'usage: codex-session [sync|watch PARENT_PID [PARENT_IDENTITY [BACKGROUND]]|login|logout|status]'; exit 2 ;;
 esac

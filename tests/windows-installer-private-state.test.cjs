@@ -19,6 +19,14 @@ function section(start, end) {
   return source.slice(startIndex, endIndex);
 }
 
+const pathNormalization = section('function Get-AbsoluteInstallDirectory', '$managedBinDir =');
+assert(pathNormalization.includes("$location.Provider.Name -ne 'FileSystem'") &&
+  pathNormalization.includes('[IO.Path]::GetFullPath($candidate)'),
+'Windows installer does not resolve custom roots against a filesystem location');
+assert(pathNormalization.indexOf('$binDir = Get-AbsoluteInstallDirectory') <
+  pathNormalization.indexOf('$configDir = Get-AbsoluteInstallDirectory'),
+  'Windows installer roots are not normalized before managed targets are derived');
+
 const acl = section('function Protect-PrivatePath', 'function Ensure-PrivateDirectory');
 assert.match(acl, /SetAccessRuleProtection\(\$true, \$false\)/,
   'private paths must discard inherited ACL entries');

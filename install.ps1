@@ -3,10 +3,24 @@ param([switch] $Login)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
+function Get-AbsoluteInstallDirectory([string] $Value, [string] $VariableName) {
+    try {
+        $location = Get-Location
+        if ($location.Provider.Name -ne 'FileSystem') { throw 'the current PowerShell location is not a filesystem directory' }
+        $candidate = if ([IO.Path]::IsPathRooted($Value)) { $Value } else { Join-Path $location.Path $Value }
+        return [IO.Path]::GetFullPath($candidate)
+    } catch {
+        [Console]::Error.WriteLine("install.ps1: $VariableName could not be resolved to an absolute filesystem path: $($_.Exception.Message)")
+        exit 1
+    }
+}
+
 $root = $PSScriptRoot
 $proxyVersion = '7.2.80'
-$binDir = if ($env:CLAUDEX_BIN_DIR) { $env:CLAUDEX_BIN_DIR } else { Join-Path $env:USERPROFILE '.local\bin' }
-$configDir = if ($env:CLAUDEX_CONFIG_DIR) { $env:CLAUDEX_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.config\claudex' }
+$requestedBinDir = if ($env:CLAUDEX_BIN_DIR) { $env:CLAUDEX_BIN_DIR } else { Join-Path $env:USERPROFILE '.local\bin' }
+$requestedConfigDir = if ($env:CLAUDEX_CONFIG_DIR) { $env:CLAUDEX_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.config\claudex' }
+$binDir = Get-AbsoluteInstallDirectory $requestedBinDir 'CLAUDEX_BIN_DIR'
+$configDir = Get-AbsoluteInstallDirectory $requestedConfigDir 'CLAUDEX_CONFIG_DIR'
 $managedBinDir = Join-Path $configDir 'bin'
 $managedNodeDir = Join-Path $configDir 'node'
 $managedProxy = Join-Path $managedBinDir "cliproxyapi-$proxyVersion.exe"

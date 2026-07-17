@@ -41,7 +41,9 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
       - name: Run isolated PowerShell tests
         shell: powershell
-        run: .\test.ps1
+        run: |
+          .\test.ps1
+          .\tests\self-update-lock-regressions.ps1
 
   legacy-linux-node:
     name: ubuntu-20.04-managed-node

@@ -84,6 +84,9 @@ fi
 if [[ "${1:-}" == "--help" ]]; then
   if [[ "${FAKE_CLAUDE_HELP_NO_MODEL:-0}" == 1 ]]; then
     printf '%s\n' '--effort --settings'
+  elif [[ "${FAKE_CLAUDE_HELP_PROSE_ONLY:-0}" == 1 ]]; then
+    printf '%s\n' '  --model <model>  Model for this session'
+    printf '%s\n' '  --bare           Minimal mode; explicit context may use --agents, --append-system-prompt, --permission-mode, --add-dir, or --plugin-dir'
   else
     printf '%s\n' '--model --agents --append-system-prompt --permission-mode --settings --effort --add-dir --plugin-dir'
   fi
@@ -100,7 +103,37 @@ if [[ "${1:-}" == "auto-mode" && "${2:-}" == "defaults" ]]; then
 fi
 if [[ "${1:-}" == "update" ]]; then
   [[ -z "${FAKE_UPDATE_LOG:-}" ]] || printf '%s\n' "$$" >> "$FAKE_UPDATE_LOG"
+  [[ -z "${FAKE_UPDATE_ENV_LOG:-}" ]] || {
+    printf 'PROXY_TOKEN=%s\n' "${CLAUDEX_PROXY_TOKEN:-}" >> "$FAKE_UPDATE_ENV_LOG"
+    printf 'AUTH_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-}" >> "$FAKE_UPDATE_ENV_LOG"
+    printf 'MANAGED=%s\n' "${CLAUDEX_MANAGED_SESSION:-}" >> "$FAKE_UPDATE_ENV_LOG"
+    printf 'SUBAGENT=%s\n' "${CLAUDE_CODE_SUBAGENT_MODEL:-}" >> "$FAKE_UPDATE_ENV_LOG"
+  }
+  [[ -z "${FAKE_UPDATE_READY_FILE:-}" ]] || : > "$FAKE_UPDATE_READY_FILE"
+  if [[ -n "${FAKE_UPDATE_WAIT_FILE:-}" ]]; then
+    while [[ ! -e "$FAKE_UPDATE_WAIT_FILE" ]]; do sleep 0.02; done
+  fi
+  [[ -z "${FAKE_UPDATE_DELAY:-}" ]] || sleep "$FAKE_UPDATE_DELAY"
+  [[ -z "${FAKE_UPDATE_DONE_FILE:-}" ]] || : > "$FAKE_UPDATE_DONE_FILE"
   exit "${FAKE_UPDATE_EXIT:-0}"
+fi
+if [[ -n "${FAKE_CLAUDE_SIGNAL_READY_FILE:-}" ]]; then
+  signal_sleeper=""
+  finish_signal_test() {
+    printf '%s\n' "$1" > "$FAKE_CLAUDE_SIGNAL_RECEIVED_FILE"
+    [[ -z "$signal_sleeper" ]] || kill "$signal_sleeper" 2>/dev/null || true
+    [[ -z "$signal_sleeper" ]] || wait "$signal_sleeper" 2>/dev/null || true
+    exit 0
+  }
+  trap 'finish_signal_test TERM' TERM
+  trap 'finish_signal_test INT' INT
+  trap 'finish_signal_test HUP' HUP
+  printf '%s\n' "$$" > "$FAKE_CLAUDE_SIGNAL_PID_FILE"
+  : > "$FAKE_CLAUDE_SIGNAL_READY_FILE"
+  sleep 300 &
+  signal_sleeper=$!
+  wait "$signal_sleeper"
+  exit $?
 fi
 if [[ "${FAKE_CLAUDE_RESUME:-0}" == 1 ]]; then
   project_key=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
@@ -161,6 +194,15 @@ printf '%s\n' "USE_FOUNDRY=${CLAUDE_CODE_USE_FOUNDRY:-}"
 printf '%s\n' "BEDROCK_BASE=${ANTHROPIC_BEDROCK_BASE_URL:-}"
 printf '%s\n' "VERTEX_BASE=${ANTHROPIC_VERTEX_BASE_URL:-}"
 printf '%s\n' "FOUNDRY_BASE=${ANTHROPIC_FOUNDRY_BASE_URL:-}"
+printf '%s\n' "API_KEY=${ANTHROPIC_API_KEY:-}"
+printf '%s\n' "OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}"
+printf '%s\n' "CUSTOM_HEADERS=${ANTHROPIC_CUSTOM_HEADERS:-}"
+printf '%s\n' "ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}"
+printf '%s\n' "CUSTOM_MODEL=${ANTHROPIC_CUSTOM_MODEL_OPTION:-}"
+printf '%s\n' "OPUS_DESCRIPTION=${ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION:-}"
+printf '%s\n' "OPUS_CAPABILITIES=${ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES:-}"
+printf '%s\n' "CODEX_AUTH_FILE=${CLAUDEX_CODEX_AUTH_FILE:-}"
+printf '%s\n' "CODEX_SOURCE_AUTH_FILE=${CLAUDEX_CODEX_SOURCE_AUTH_FILE:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
 printf '%s\n' "BUN=${BUN_OPTIONS:-}"
 printf '%s\n' "INTERACTIVE=${CLAUDEX_INTERACTIVE_TUI:-}"
@@ -180,9 +222,13 @@ cat > "$tmp/bin/codex" <<'EOF'
 if [[ "${FAKE_CODEX_LOGGED_OUT:-0}" == 1 ]]; then exit 1; fi
 if [[ "${1:-}" == login && "${2:-}" == status ]]; then exit 0; fi
 if [[ "${1:-}" == logout ]]; then exit "${FAKE_CODEX_LOGOUT_EXIT:-0}"; fi
-if [[ "${1:-}" == -c && "${3:-}" == login ]]; then
-  [[ -z "${FAKE_CODEX_LOGIN_LOG:-}" ]] || printf '%s\n' login >> "$FAKE_CODEX_LOGIN_LOG"
-  exit 0
+if [[ "${1:-}" == -c && "${2:-}" == 'cli_auth_credentials_store="file"' ]]; then
+  if [[ "${3:-}" == login && "${4:-}" == status ]]; then exit 0; fi
+  if [[ "${3:-}" == logout ]]; then exit "${FAKE_CODEX_LOGOUT_EXIT:-0}"; fi
+  if [[ "${3:-}" == login ]]; then
+    [[ -z "${FAKE_CODEX_LOGIN_LOG:-}" ]] || printf '%s\n' login >> "$FAKE_CODEX_LOGIN_LOG"
+    exit 0
+  fi
 fi
 if [[ "${1:-}" == native-test ]]; then
   printf '%s\n' "NATIVE_CODEX_ARGS=$*"
@@ -209,7 +255,7 @@ if [[ "${1:-}" == "-version" ]]; then
   exit 1
 fi
 if [[ -n "${FAKE_PROXY_READY_FILE:-}" ]]; then
-  : > "$FAKE_PROXY_READY_FILE"
+  [[ "${FAKE_PROXY_NEVER_READY:-0}" == 1 ]] || : > "$FAKE_PROXY_READY_FILE"
   [[ -z "${FAKE_PROXY_START_LOG:-}" ]] || printf '%s\n' "$$" >> "$FAKE_PROXY_START_LOG"
   trap 'exit 0' TERM INT
   while :; do sleep 1; done
@@ -231,6 +277,7 @@ EOF
 # launchers always derive identity from the operating system.
 cat > "$tmp/bin/ps" <<'EOF'
 #!/usr/bin/env bash
+[[ "${CLAUDEX_TEST_PS_FAIL:-0}" != 1 ]] || exit 1
 printf '%s\n' "${CLAUDEX_TEST_PROCESS_IDENTITY:-test-process-identity}"
 EOF
 chmod +x "$tmp/bin/"*
@@ -240,6 +287,25 @@ run_wrapper() {
     CLAUDEX_SKIP_PROXY_WATCHER=1 \
     "$root/claudex" "$@"
 }
+
+cat > "$tmp/launcher-signal-driver.cjs" <<'EOF'
+const fs = require('node:fs');
+const os = require('node:os');
+const { spawn } = require('node:child_process');
+
+const child = spawn(process.argv[2], process.argv.slice(3), {
+  env: process.env,
+  stdio: 'ignore',
+});
+fs.writeFileSync(process.env.CLAUDEX_TEST_WRAPPER_PID_FILE, `${child.pid}\n`);
+child.once('error', (error) => {
+  console.error(error);
+  process.exit(1);
+});
+child.once('exit', (code, signal) => {
+  process.exit(code ?? 128 + (os.constants.signals[signal] || 2));
+});
+EOF
 
 # Native harness routes must bypass every compatibility-layer dependency while
 # preserving argv. A managed parent is scrubbed; an ordinary native Claude
@@ -273,6 +339,9 @@ native_claude_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_NODE_BIN=/
 native_user_claude_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_NODE_BIN=/missing/node \
   CLAUDE_CONFIG_DIR=/user/claude-profile ANTHROPIC_BASE_URL=https://custom-provider.invalid \
   ANTHROPIC_AUTH_TOKEN=native-provider-token CLAUDEX_PROXY_TOKEN=must-not-leak \
+  ANTHROPIC_API_KEY=native-api-key CLAUDE_CODE_OAUTH_TOKEN=native-oauth-token \
+  ANTHROPIC_CUSTOM_HEADERS='X-Native: preserved' ANTHROPIC_MODEL=claude-native \
+  ANTHROPIC_CUSTOM_MODEL_OPTION=claude-native-custom \
   CLAUDE_CODE_USE_BEDROCK=1 CLAUDE_CODE_USE_VERTEX=1 CLAUDE_CODE_USE_FOUNDRY=1 \
   ANTHROPIC_BEDROCK_BASE_URL=https://bedrock.invalid ANTHROPIC_VERTEX_BASE_URL=https://vertex.invalid \
   ANTHROPIC_FOUNDRY_BASE_URL=https://foundry.invalid \
@@ -285,6 +354,9 @@ native_user_claude_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_NODE_
 [[ "$native_user_claude_output" == *'BUN=--preload /user/native-preload.cjs'* ]]
 [[ "$native_user_claude_output" == *'BASE=https://custom-provider.invalid'* ]]
 [[ "$native_user_claude_output" == *'PROVIDER_TOKEN_OK=yes'* ]]
+[[ "$native_user_claude_output" == *'API_KEY=native-api-key'* && "$native_user_claude_output" == *'OAUTH_TOKEN=native-oauth-token'* ]]
+[[ "$native_user_claude_output" == *'CUSTOM_HEADERS=X-Native: preserved'* && "$native_user_claude_output" == *'ANTHROPIC_MODEL=claude-native'* ]]
+[[ "$native_user_claude_output" == *'CUSTOM_MODEL=claude-native-custom'* ]]
 [[ "$native_user_claude_output" == *'USE_BEDROCK=1'* && "$native_user_claude_output" == *'USE_VERTEX=1'* ]]
 [[ "$native_user_claude_output" == *'USE_FOUNDRY=1'* && "$native_user_claude_output" == *'BEDROCK_BASE=https://bedrock.invalid'* ]]
 [[ "$native_user_claude_output" == *'VERTEX_BASE=https://vertex.invalid'* && "$native_user_claude_output" == *'FOUNDRY_BASE=https://foundry.invalid'* ]]
@@ -307,15 +379,41 @@ fi
 hosted_remote_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" \
   CLAUDE_CONFIG_DIR=/user/claude-profile ANTHROPIC_BASE_URL=https://custom-provider.invalid \
   ANTHROPIC_AUTH_TOKEN=native-provider-token CLAUDEX_PROXY_TOKEN=must-not-leak \
+  ANTHROPIC_API_KEY=hosted-api-key CLAUDE_CODE_OAUTH_TOKEN=hosted-oauth-token \
+  ANTHROPIC_CUSTOM_HEADERS='X-Hosted: remove' ANTHROPIC_MODEL=gpt-hosted \
+  ANTHROPIC_CUSTOM_MODEL_OPTION=gpt-hosted-custom \
+  ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION=managed-description \
+  ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES=managed-capabilities \
+  CLAUDE_CODE_AUTO_MODE_MODEL=gpt-hosted-auto CLAUDE_CODE_MAX_CONTEXT_TOKENS=400000 \
+  CLAUDEX_PROXY_URL=http://127.0.0.1:9999 CLAUDEX_CHATGPT_PLAN_LABEL=ChatGPT-Proxied \
   "$root/claudex" --remote-control=pairing-name)
 [[ "$hosted_remote_output" == *'ARGS=--remote-control=pairing-name'* ]]
 [[ "$hosted_remote_output" == *'CONFIG=/user/claude-profile'* ]]
 [[ "$hosted_remote_output" == *$'BASE=\n'* && "$hosted_remote_output" == *'PROVIDER_TOKEN_OK=no'* ]]
 [[ "$hosted_remote_output" == *$'PROXY_TOKEN_SET=\n'* ]]
+[[ "$hosted_remote_output" == *$'API_KEY=\n'* && "$hosted_remote_output" == *$'OAUTH_TOKEN=\n'* ]]
+[[ "$hosted_remote_output" == *$'CUSTOM_HEADERS=\n'* && "$hosted_remote_output" == *$'ANTHROPIC_MODEL=\n'* ]]
+[[ "$hosted_remote_output" == *$'CUSTOM_MODEL=\n'* && "$hosted_remote_output" == *$'OPUS_DESCRIPTION=\n'* ]]
+[[ "$hosted_remote_output" == *$'OPUS_CAPABILITIES=\n'* && "$hosted_remote_output" == *$'AUTO=\n'* ]]
+[[ "$hosted_remote_output" == *$'CONTEXT=\n'* && "$hosted_remote_output" == *$'CHATGPT_PLAN=\n'* ]]
 hosted_rc_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" "$root/claudex" --rc pair-name)
 [[ "$hosted_rc_output" == *'ARGC=2'* && "$hosted_rc_output" == *'ARGS=--rc pair-name'* ]]
 hosted_review_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" "$root/claudex" ultrareview --help)
 [[ "$hosted_review_output" == *'ARGS=ultrareview --help'* ]]
+positional_remote_output=$(HOME="$native_broken_env_home" PATH="$tmp/bin:$PATH" \
+  ANTHROPIC_API_KEY=positional-api-key "$root/claudex" remote-control)
+[[ "$positional_remote_output" == *'ARGS=remote-control'* && "$positional_remote_output" == *$'API_KEY=\n'* ]]
+debug_hosted_output=$(HOME="$native_broken_env_home" PATH="$tmp/bin:$PATH" \
+  "$root/claudex" -d hosted --remote-control=debug-session)
+[[ "$debug_hosted_output" == *'ARGS=-d hosted --remote-control=debug-session'* && "$debug_hosted_output" == *$'BASE=\n'* ]]
+missing_maintenance_home="$tmp/missing-maintenance-home"
+mkdir -p "$missing_maintenance_home"
+debug_maintenance_output=$(HOME="$missing_maintenance_home" PATH="$tmp/bin:$PATH" \
+  "$root/claudex" --debug=api mcp --help)
+[[ "$debug_maintenance_output" == *'ARGS=--debug=api mcp --help'* && "$debug_maintenance_output" == *$'BASE=\n'* ]]
+trailing_version_output=$(HOME="$missing_maintenance_home" PATH="$tmp/bin:$PATH" \
+  "$root/claudex" literal-prompt --version)
+[[ "$trailing_version_output" == *'ARGS=literal-prompt --version'* && "$trailing_version_output" == *$'BASE=\n'* ]]
 if HOME="$tmp/home" PATH="$tmp/bin:$PATH" FAKE_CLAUDE_EXIT=41 \
     "$root/claudex" --remote-control >/dev/null 2>&1; then
   hosted_exit_status=0
@@ -558,6 +656,19 @@ jq -e '[.additionalModelOptionsCache[] | select(.value == "gpt-5.6-sol")] as $so
 [[ "$default_output" == *'outside an explicitly requested native Agent Team'* ]]
 [[ "$default_output" != *'"model":"gpt-5.6-sol"'* ]]
 
+managed_provider_output=$(CLAUDE_CODE_USE_BEDROCK=1 CLAUDE_CODE_USE_VERTEX=1 CLAUDE_CODE_USE_FOUNDRY=1 \
+  ANTHROPIC_BEDROCK_BASE_URL=https://bedrock.invalid ANTHROPIC_VERTEX_BASE_URL=https://vertex.invalid \
+  ANTHROPIC_FOUNDRY_BASE_URL=https://foundry.invalid ANTHROPIC_API_KEY=provider-api-key \
+  CLAUDE_CODE_OAUTH_TOKEN=provider-oauth ANTHROPIC_CUSTOM_HEADERS='X-Provider: remove' \
+  ANTHROPIC_MODEL=claude-provider ANTHROPIC_CUSTOM_MODEL_OPTION=claude-provider-custom \
+  run_wrapper provider-boundary-test)
+[[ "$managed_provider_output" == *$'USE_BEDROCK=\n'* && "$managed_provider_output" == *$'USE_VERTEX=\n'* ]]
+[[ "$managed_provider_output" == *$'USE_FOUNDRY=\n'* && "$managed_provider_output" == *$'BEDROCK_BASE=\n'* ]]
+[[ "$managed_provider_output" == *$'VERTEX_BASE=\n'* && "$managed_provider_output" == *$'FOUNDRY_BASE=\n'* ]]
+[[ "$managed_provider_output" == *$'API_KEY=\n'* && "$managed_provider_output" == *$'OAUTH_TOKEN=\n'* ]]
+[[ "$managed_provider_output" == *$'CUSTOM_HEADERS=\n'* && "$managed_provider_output" == *$'ANTHROPIC_MODEL=\n'* ]]
+[[ "$managed_provider_output" == *$'CUSTOM_MODEL=\n'* ]]
+
 explicit_subagent_output=$(CLAUDE_CODE_SUBAGENT_MODEL=user-selected-subagent run_wrapper subagent-model-test)
 [[ "$explicit_subagent_output" == *'SUBAGENT=user-selected-subagent'* ]]
 instruction_bridge_off=$(CLAUDEX_INSTRUCTION_BRIDGE=off run_wrapper instruction-bridge-off)
@@ -644,12 +755,185 @@ jq -e '
   and ([.autoMode.hard_deny[] | select(. == "User custom hard deny rule")] | length == 1)
 ' "$tmp/home/.config/claudex/settings.json" >/dev/null
 
+proxy_lock="$tmp/home/.config/claudex/run/proxy-start.lock"
+stop_fake_managed_proxy() {
+  local metadata="$tmp/home/.config/claudex/run/managed-proxy" pid=""
+  if [[ -r "$metadata" ]]; then
+    pid=$(awk -F= '$1 == "pid" { print $2; exit }' "$metadata")
+    [[ -z "$pid" ]] || kill -TERM "$pid" 2>/dev/null || true
+    rm -f "$metadata"
+  fi
+}
+
+# Proxy startup uses the shared generation protocol itself. Force the portable
+# publication path and a complete publication failure before exercising races.
+proxy_fallback_ready="$tmp/proxy-fallback-ready"
+proxy_fallback_log="$tmp/proxy-fallback.log"
+HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=1 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_SKIP_AUTH_SYNC=1 CLAUDEX_SKILL_BRIDGE=off CLAUDEX_TEST_FORCE_HARDLINK_FAILURE=1 \
+  CLAUDEX_TEST_PROXY_REACHABLE_FILE="$proxy_fallback_ready" \
+  FAKE_PROXY_READY_FILE="$proxy_fallback_ready" FAKE_PROXY_START_LOG="$proxy_fallback_log" \
+  "$root/claudex" proxy-fallback-test >/dev/null
+[[ -e "$proxy_fallback_ready" && "$(wc -l < "$proxy_fallback_log" | tr -d ' ')" == 1 && ! -e "$proxy_lock" ]]
+stop_fake_managed_proxy
+rm -f "$proxy_fallback_ready" "$proxy_fallback_log"
+
+proxy_partial_attempt="$tmp/proxy-partial-attempt"
+HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=1 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_SKIP_AUTH_SYNC=1 CLAUDEX_SKILL_BRIDGE=off CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE=1 \
+  CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE_MATCH=proxy-start.lock \
+  CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE="$proxy_partial_attempt" \
+  FAKE_PROXY_READY_FILE="$tmp/proxy-partial-ready" FAKE_PROXY_NEVER_READY=1 \
+  "$root/claudex" proxy-partial-test >"$tmp/proxy-partial.out" 2>"$tmp/proxy-partial.err" &
+proxy_partial_pid=$!
+for _ in {1..1000}; do grep -q '^blocked ' "$proxy_partial_attempt" 2>/dev/null && break; sleep 0.02; done
+grep -q '^blocked ' "$proxy_partial_attempt"
+[[ ! -e "$proxy_lock" ]] && ! compgen -G "$proxy_lock.quarantine.*" >/dev/null
+kill -TERM "$proxy_partial_pid" 2>/dev/null || true
+wait "$proxy_partial_pid" 2>/dev/null || true
+
+# A recent legacy ownerless lock is preserved. The attempt marker makes the
+# assertion independent of scheduler timing.
+mkdir -p "$proxy_lock"
+proxy_ownerless_attempt="$tmp/proxy-ownerless-attempt"
+HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=1 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_SKIP_AUTH_SYNC=1 CLAUDEX_SKILL_BRIDGE=off CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE="$proxy_ownerless_attempt" \
+  FAKE_PROXY_READY_FILE="$tmp/proxy-ownerless-ready" FAKE_PROXY_NEVER_READY=1 \
+  "$root/claudex" proxy-ownerless-test >"$tmp/proxy-ownerless.out" 2>"$tmp/proxy-ownerless.err" &
+proxy_ownerless_pid=$!
+for _ in {1..1000}; do grep -q '^blocked ' "$proxy_ownerless_attempt" 2>/dev/null && break; sleep 0.02; done
+grep -q '^blocked ' "$proxy_ownerless_attempt"
+[[ -d "$proxy_lock" && ! -e "$proxy_lock/owner" && ! -e "$proxy_lock/generation" ]]
+kill -TERM "$proxy_ownerless_pid" 2>/dev/null || true
+wait "$proxy_ownerless_pid" 2>/dev/null || true
+rm -rf "$proxy_lock"
+
+# A creator paused before publication cannot overwrite a later generation.
+proxy_race_ready="$tmp/proxy-race-ready"
+proxy_race_log="$tmp/proxy-race.log"
+proxy_race_base=(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=1 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_SKIP_AUTH_SYNC=1 CLAUDEX_SKILL_BRIDGE=off CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity \
+  CLAUDEX_TEST_LOCK_MATCH=proxy-start.lock CLAUDEX_TEST_PROXY_REACHABLE_FILE="$proxy_race_ready" \
+  FAKE_PROXY_READY_FILE="$proxy_race_ready" FAKE_PROXY_START_LOG="$proxy_race_log")
+env "${proxy_race_base[@]}" CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY="$tmp/proxy-a-mkdir" \
+  CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE="$tmp/proxy-a-continue" \
+  CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE="$tmp/proxy-a-attempt" \
+  "$root/claudex" proxy-a-test >/dev/null &
+proxy_a=$!
+for _ in {1..1000}; do [[ -e "$tmp/proxy-a-mkdir" ]] && break; sleep 0.02; done
+[[ -e "$tmp/proxy-a-mkdir" ]]
+touch -t 200001010000 "$proxy_lock"
+env "${proxy_race_base[@]}" CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY="$tmp/proxy-b-publish" \
+  CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE="$tmp/proxy-b-continue" \
+  "$root/claudex" proxy-b-test >/dev/null &
+proxy_b=$!
+for _ in {1..1000}; do [[ -e "$tmp/proxy-b-publish" ]] && break; sleep 0.02; done
+[[ -e "$tmp/proxy-b-publish" ]]
+proxy_b_nonce=$(awk -F= '$1 == "nonce" { print $2; exit }' "$proxy_lock/owner")
+: > "$tmp/proxy-a-continue"
+for _ in {1..1000}; do grep -q '^blocked ' "$tmp/proxy-a-attempt" 2>/dev/null && break; sleep 0.02; done
+grep -q '^blocked ' "$tmp/proxy-a-attempt"
+[[ "$(awk -F= '$1 == "nonce" { print $2; exit }' "$proxy_lock/owner")" == "$proxy_b_nonce" ]]
+: > "$tmp/proxy-b-continue"
+wait "$proxy_b"
+wait "$proxy_a"
+[[ "$(wc -l < "$proxy_race_log" | tr -d ' ')" == 1 && ! -e "$proxy_lock" ]]
+stop_fake_managed_proxy
+rm -f "$proxy_race_ready" "$proxy_race_log"
+
+# A stale X remover that moves Y cannot admit Z. Y restores its own generation
+# when it resumes, then starts the single proxy instance.
+mkdir -p "$proxy_lock"
+printf '%s\n' proxy-x > "$proxy_lock/generation"
+printf 'pid=99999999\nidentity=dead\nnonce=proxy-x\n' > "$proxy_lock/owner"
+touch -t 200001010000 "$proxy_lock"
+env "${proxy_race_base[@]}" CLAUDEX_TEST_LOCK_BEFORE_RENAME_READY="$tmp/proxy-x-before" \
+  CLAUDEX_TEST_LOCK_BEFORE_RENAME_CONTINUE="$tmp/proxy-x-before-continue" \
+  CLAUDEX_TEST_LOCK_AFTER_RENAME_READY="$tmp/proxy-x-after" \
+  CLAUDEX_TEST_LOCK_AFTER_RENAME_CONTINUE="$tmp/proxy-x-after-continue" \
+  "$root/claudex" proxy-x-test >/dev/null &
+proxy_x=$!
+for _ in {1..1000}; do [[ -e "$tmp/proxy-x-before" ]] && break; sleep 0.02; done
+[[ -e "$tmp/proxy-x-before" ]]
+env "${proxy_race_base[@]}" CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY="$tmp/proxy-y-publish" \
+  CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE="$tmp/proxy-y-continue" \
+  CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE="$tmp/proxy-y-recovered" \
+  "$root/claudex" proxy-y-test >/dev/null &
+proxy_y=$!
+for _ in {1..1000}; do [[ -e "$tmp/proxy-y-publish" ]] && break; sleep 0.02; done
+[[ -e "$tmp/proxy-y-publish" ]]
+proxy_y_nonce=$(awk -F= '$1 == "nonce" { print $2; exit }' "$proxy_lock/owner")
+: > "$tmp/proxy-x-before-continue"
+for _ in {1..1000}; do [[ -e "$tmp/proxy-x-after" ]] && break; sleep 0.02; done
+[[ -e "$tmp/proxy-x-after" ]]
+env "${proxy_race_base[@]}" CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE="$tmp/proxy-z-attempt" \
+  "$root/claudex" proxy-z-test >/dev/null &
+proxy_z=$!
+for _ in {1..1000}; do grep -q '^blocked ' "$tmp/proxy-z-attempt" 2>/dev/null && break; sleep 0.02; done
+grep -q '^blocked ' "$tmp/proxy-z-attempt"
+[[ "$(awk -F= '$1 == "nonce" { print $2; exit }' "$proxy_lock/owner")" == "$proxy_y_nonce" ]]
+: > "$tmp/proxy-y-continue"
+for _ in {1..1000}; do [[ -e "$tmp/proxy-y-recovered" ]] && break; sleep 0.02; done
+[[ -e "$tmp/proxy-y-recovered" ]]
+: > "$tmp/proxy-x-after-continue"
+wait "$proxy_y"
+wait "$proxy_x"
+wait "$proxy_z"
+[[ "$(wc -l < "$proxy_race_log" | tr -d ' ')" == 1 && ! -e "$proxy_lock" ]]
+stop_fake_managed_proxy
+
+# Releasing an old owner never deletes a replacement generation.
+rm -f "$proxy_race_ready" "$proxy_race_log"
+proxy_release_attempt="$tmp/proxy-release-attempt"
+env "${proxy_race_base[@]}" CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE="$proxy_release_attempt" \
+  FAKE_PROXY_NEVER_READY=1 "$root/claudex" proxy-release-test >/dev/null 2>"$tmp/proxy-release.err" &
+proxy_release_pid=$!
+for _ in {1..1000}; do
+  grep -q '^acquired ' "$proxy_release_attempt" 2>/dev/null && [[ -s "$proxy_race_log" ]] && break
+  sleep 0.02
+done
+grep -q '^acquired ' "$proxy_release_attempt"
+[[ -s "$proxy_race_log" ]]
+mv "$proxy_lock" "$tmp/displaced-proxy-lock"
+mkdir -p "$proxy_lock"
+printf '%s\n' proxy-replacement > "$proxy_lock/generation"
+printf 'pid=%s\nidentity=%s\nnonce=proxy-replacement\n' "$$" test-process-identity > "$proxy_lock/owner"
+kill -TERM "$proxy_release_pid" 2>/dev/null || true
+wait "$proxy_release_pid" 2>/dev/null || true
+grep -F 'nonce=proxy-replacement' "$proxy_lock/owner" >/dev/null
+rm -rf "$proxy_lock" "$tmp/displaced-proxy-lock"
+stop_fake_managed_proxy
+
+# A reused live PID with a different start identity is stale, while a genuinely
+# live record remains protected regardless of directory age.
+rm -f "$proxy_race_ready" "$proxy_race_log"
+mkdir -p "$proxy_lock"
+printf '%s\n' proxy-reused-pid > "$proxy_lock/generation"
+printf 'pid=%s\nidentity=stale-process-identity\nnonce=proxy-reused-pid\n' "$$" > "$proxy_lock/owner"
+touch -t 200001010000 "$proxy_lock"
+env "${proxy_race_base[@]}" "$root/claudex" proxy-reused-pid-test >/dev/null
+[[ -e "$proxy_race_ready" && -s "$proxy_race_log" && ! -e "$proxy_lock" ]]
+stop_fake_managed_proxy
+
+# A genuinely old ownerless legacy directory is reclaimable after its
+# conservative transition window.
+rm -f "$proxy_race_ready" "$proxy_race_log"
+mkdir -p "$proxy_lock"
+touch -t 200001010000 "$proxy_lock"
+env "${proxy_race_base[@]}" "$root/claudex" proxy-stale-ownerless-test >/dev/null
+[[ -e "$proxy_race_ready" && -s "$proxy_race_log" && ! -e "$proxy_lock" ]]
+stop_fake_managed_proxy
+
 proxy_ready_file="$tmp/proxy-ready"
 proxy_start_log="$tmp/proxy-start.log"
 : > "$proxy_ready_file"
 proxy_recovery_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
   CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=0 \
-  CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_SKIP_AUTH_SYNC=1 CLAUDEX_SKILL_BRIDGE=off CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity \
   CLAUDEX_TEST_PROXY_REACHABLE_FILE="$proxy_ready_file" \
   FAKE_PROXY_READY_FILE="$proxy_ready_file" FAKE_PROXY_START_LOG="$proxy_start_log" \
   FAKE_PROXY_RECOVERY=1 "$root/claudex" recovery-test)
@@ -657,11 +941,58 @@ proxy_recovery_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN=
 [[ "$(wc -l < "$proxy_start_log" | tr -d ' ')" == 1 ]]
 [[ ! -e "$tmp/home/.config/claudex/run/proxy-start.lock" ]]
 
+# Lock age alone must never evict a live proxy-start owner. Simulate a slow
+# startup, backdate only its lock directory, and verify a waiting launcher
+# leaves that exact ownership generation in place.
+live_owner_ready_file="$tmp/live-owner-proxy-ready"
+live_owner_start_log="$tmp/live-owner-proxy-start.log"
+live_owner_lock="$tmp/home/.config/claudex/run/proxy-start.lock"
+rm -f "$live_owner_ready_file" "$live_owner_start_log"
+HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=1 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_SKIP_AUTH_SYNC=1 CLAUDEX_SKILL_BRIDGE=off CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity \
+  FAKE_PROXY_READY_FILE="$live_owner_ready_file" FAKE_PROXY_START_LOG="$live_owner_start_log" FAKE_PROXY_NEVER_READY=1 \
+  "$root/claudex" live-owner-first >"$tmp/live-owner-first.out" 2>"$tmp/live-owner-first.err" &
+live_owner_first_pid=$!
+for _ in {1..1000}; do
+  [[ -s "$live_owner_start_log" && -r "$live_owner_lock/owner" && -r "$live_owner_lock/generation" ]] && break
+  sleep 0.02
+done
+[[ -s "$live_owner_start_log" && -r "$live_owner_lock/owner" && -r "$live_owner_lock/generation" ]]
+live_owner_record=$(<"$live_owner_lock/owner")
+live_owner_generation=$(<"$live_owner_lock/generation")
+touch -t 202001010000 "$live_owner_lock"
+HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=1 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_SKIP_AUTH_SYNC=1 CLAUDEX_SKILL_BRIDGE=off CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity \
+  CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE="$tmp/live-owner-second-attempt" \
+  FAKE_PROXY_READY_FILE="$live_owner_ready_file" FAKE_PROXY_START_LOG="$live_owner_start_log" FAKE_PROXY_NEVER_READY=1 \
+  "$root/claudex" live-owner-second >"$tmp/live-owner-second.out" 2>"$tmp/live-owner-second.err" &
+live_owner_second_pid=$!
+for _ in {1..1000}; do grep -q '^blocked ' "$tmp/live-owner-second-attempt" 2>/dev/null && break; sleep 0.02; done
+grep -q '^blocked ' "$tmp/live-owner-second-attempt"
+live_owner_record_after=""
+[[ ! -r "$live_owner_lock/owner" ]] || live_owner_record_after=$(<"$live_owner_lock/owner")
+live_owner_generation_after=""
+[[ ! -r "$live_owner_lock/generation" ]] || live_owner_generation_after=$(<"$live_owner_lock/generation")
+kill -TERM "$live_owner_second_pid" "$live_owner_first_pid" 2>/dev/null || true
+wait "$live_owner_second_pid" 2>/dev/null || true
+wait "$live_owner_first_pid" 2>/dev/null || true
+if [[ -r "$tmp/home/.config/claudex/run/managed-proxy" ]]; then
+  live_owner_proxy_pid=$(awk -F= '$1 == "pid" { print $2; exit }' "$tmp/home/.config/claudex/run/managed-proxy")
+  [[ -z "$live_owner_proxy_pid" ]] || kill -TERM "$live_owner_proxy_pid" 2>/dev/null || true
+  rm -f "$tmp/home/.config/claudex/run/managed-proxy"
+fi
+rm -rf "$live_owner_lock"
+[[ -n "$live_owner_record_after" ]]
+[[ "$live_owner_record_after" == "$live_owner_record" ]]
+[[ "$live_owner_generation_after" == "$live_owner_generation" ]]
+
 transient_proxy_start_log="$tmp/transient-proxy-start.log"
 : > "$proxy_ready_file"
 HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
   CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=0 \
-  CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity \
   CLAUDEX_TEST_PROXY_REACHABLE_FILE="$proxy_ready_file" \
   FAKE_PROXY_READY_FILE="$proxy_ready_file" FAKE_PROXY_START_LOG="$transient_proxy_start_log" \
   FAKE_PROXY_TRANSIENT_ONCE=1 "$root/claudex" transient-health-test >/dev/null
@@ -719,7 +1050,7 @@ if ! managed_401_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BI
   CLAUDEX_PROXY_BIN="$auth_proxy_bin" CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 \
   CLAUDEX_SKIP_PROXY_WATCHER=1 FAKE_PROXY_HEALTH_STATE="$proxy_auth_state" \
   FAKE_PROXY_AUTH_START_LOG="$proxy_auth_log" FAKE_PROXY_START_STATE=healthy \
-  CLAUDEX_TEST_PROCESS_IDENTITY="$tracked_proxy_identity" \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_PROCESS_IDENTITY="$tracked_proxy_identity" \
   "$root/claudex" managed-401-test 2>"$tmp/managed-401.stderr"); then
   cat "$tmp/managed-401.stderr" >&2
   exit 1
@@ -742,7 +1073,7 @@ printf '%s\n' unauthorized > "$proxy_auth_state"
 if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$proxy_auth_curl" \
     CLAUDEX_PROXY_BIN="$auth_proxy_bin" CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 \
     CLAUDEX_SKIP_PROXY_WATCHER=1 FAKE_PROXY_HEALTH_STATE="$proxy_auth_state" \
-    FAKE_PROXY_AUTH_START_LOG="$proxy_auth_log" CLAUDEX_TEST_PROCESS_IDENTITY="$tracked_proxy_identity" \
+    FAKE_PROXY_AUTH_START_LOG="$proxy_auth_log" CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_PROCESS_IDENTITY="$tracked_proxy_identity" \
     "$root/claudex" unmanaged-401-test \
     >"$tmp/unmanaged-401.stdout" 2>"$tmp/unmanaged-401.stderr"; then
   printf '%s\n' 'expected an unmanaged 401 listener to fail closed' >&2
@@ -759,7 +1090,7 @@ if HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$proxy_auth_curl" \
     CLAUDEX_PROXY_BIN="$auth_proxy_bin" CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 \
     CLAUDEX_SKIP_PROXY_WATCHER=1 FAKE_PROXY_HEALTH_STATE="$proxy_auth_state" \
     FAKE_PROXY_AUTH_START_LOG="$proxy_auth_log" FAKE_PROXY_START_STATE=unauthorized \
-    CLAUDEX_TEST_PROCESS_IDENTITY="$tracked_proxy_identity" \
+    CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_PROCESS_IDENTITY="$tracked_proxy_identity" \
     "$root/claudex" never-ready-proxy-test >"$tmp/never-ready.stdout" 2>"$tmp/never-ready.stderr"; then
   printf '%s\n' 'expected a newly spawned unauthorized proxy to fail readiness' >&2
   exit 1
@@ -868,11 +1199,98 @@ fi
 [[ "$interrupted_resume_output" != *$'\033[2A'* ]]
 [[ "$interrupted_resume_output" == *$'Resume this session with Claudex:\nclaudex --resume 123e4567-e89b-12d3-a456-426614174000'* ]]
 
+assert_launcher_signal_forwarding() {
+  local signal="$1" expected_exit="$2" label
+  label=$(printf '%s' "$signal" | tr '[:upper:]' '[:lower:]')
+  local wrapper_pid_file="$tmp/launcher-$label.pid"
+  local claude_pid_file="$tmp/claude-$label.pid"
+  local ready_file="$tmp/claude-$label.ready"
+  local received_file="$tmp/claude-$label.received"
+  local driver_pid wrapper_pid child_pid driver_exit=0 attempt
+  HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+    CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_PROXY_WATCHER=1 \
+    CLAUDEX_TEST_WRAPPER_PID_FILE="$wrapper_pid_file" \
+    FAKE_CLAUDE_SIGNAL_PID_FILE="$claude_pid_file" \
+    FAKE_CLAUDE_SIGNAL_READY_FILE="$ready_file" \
+    FAKE_CLAUDE_SIGNAL_RECEIVED_FILE="$received_file" \
+    node "$tmp/launcher-signal-driver.cjs" "$root/claudex" --claude-chrome --print signal-test &
+  driver_pid=$!
+  for attempt in {1..250}; do
+    [[ -s "$wrapper_pid_file" && -s "$claude_pid_file" && -e "$ready_file" ]] && break
+    sleep 0.02
+  done
+  [[ -s "$wrapper_pid_file" && -s "$claude_pid_file" && -e "$ready_file" ]]
+  read -r wrapper_pid < "$wrapper_pid_file"
+  read -r child_pid < "$claude_pid_file"
+  kill -s "$signal" "$wrapper_pid"
+  set +e
+  wait "$driver_pid"
+  driver_exit=$?
+  set -e
+  [[ "$driver_exit" == "$expected_exit" ]]
+  [[ "$(cat "$received_file")" == "$signal" ]]
+  for attempt in {1..100}; do
+    kill -0 "$child_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  ! kill -0 "$child_pid" 2>/dev/null
+}
+
+assert_launcher_signal_forwarding TERM 143
+assert_launcher_signal_forwarding INT 130
+assert_launcher_signal_forwarding HUP 129
+
 bare_output=$(run_wrapper --bare --print test-prompt)
 [[ "$bare_output" != *'--agents'* ]]
 [[ "$bare_output" != *'--add-dir'* ]]
 [[ "$bare_output" != *'--append-system-prompt'* ]]
 [[ "$bare_output" != *'--permission-mode'* ]]
+
+trailing_bare_output=$(run_wrapper literal-prompt --bare --print)
+[[ "$trailing_bare_output" != *'--agents'* && "$trailing_bare_output" != *'--add-dir'* ]]
+[[ "$trailing_bare_output" != *'--append-system-prompt'* && "$trailing_bare_output" != *'--permission-mode'* ]]
+trailing_model_output=$(run_wrapper literal-prompt --model gpt-5.6-luna)
+[[ "$trailing_model_output" == *'literal-prompt --model gpt-5.6-luna'* ]]
+[[ "$trailing_model_output" != *'--model gpt-5.6-sol literal-prompt --model gpt-5.6-luna'* ]]
+
+prose_only_capabilities=$(FAKE_CLAUDE_HELP_PROSE_ONLY=1 CLAUDEX_SKILL_BRIDGE=off \
+  run_wrapper --print prose-capability-test)
+[[ "$prose_only_capabilities" != *'--agents'* && "$prose_only_capabilities" != *'--append-system-prompt'* ]]
+[[ "$prose_only_capabilities" != *'--permission-mode'* && "$prose_only_capabilities" != *'--add-dir'* ]]
+
+for optional_form in '--debug=api' '-dapi' '--from-pr=42' '--prompt-suggestions=false' '--resume=session-123' '-rsession-123' '--worktree=audit' '-waudit'; do
+  optional_output=$(run_wrapper "$optional_form" --bare --print optional-form-test)
+  [[ "$optional_output" == *"$optional_form"* ]]
+  [[ "$optional_output" != *'--agents'* && "$optional_output" != *'--permission-mode'* ]]
+done
+
+worktree_bridge_probe="$tmp/worktree-skill-bridge.cjs"
+worktree_bridge_log="$tmp/worktree-skill-bridge.log"
+cat > "$worktree_bridge_probe" <<'EOF'
+#!/usr/bin/env node
+'use strict';
+require('fs').writeFileSync(process.env.CLAUDEX_TEST_WORKTREE_BRIDGE_LOG, process.argv.slice(2).join('\n') + '\n');
+process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions: [], warnings: [] }) + '\n');
+EOF
+assert_worktree_bridge_mode() {
+  : > "$worktree_bridge_log"
+  CLAUDEX_SKILL_BRIDGE_HELPER="$worktree_bridge_probe" \
+    CLAUDEX_TEST_WORKTREE_BRIDGE_LOG="$worktree_bridge_log" \
+    run_wrapper "$@" --print worktree-bridge-test >/dev/null
+  grep -Fx -- '--global-only' "$worktree_bridge_log" >/dev/null
+}
+assert_worktree_bridge_mode --worktree
+assert_worktree_bridge_mode --worktree audit-tree
+assert_worktree_bridge_mode --worktree=audit-tree
+assert_worktree_bridge_mode -w
+assert_worktree_bridge_mode -w audit-tree
+assert_worktree_bridge_mode -w=audit-tree
+assert_worktree_bridge_mode -waudit-tree
+: > "$worktree_bridge_log"
+CLAUDEX_SKILL_BRIDGE_HELPER="$worktree_bridge_probe" \
+  CLAUDEX_TEST_WORKTREE_BRIDGE_LOG="$worktree_bridge_log" \
+  run_wrapper --print ordinary-bridge-test >/dev/null
+! grep -Fx -- '--global-only' "$worktree_bridge_log" >/dev/null
 
 maintenance_output=$(CLAUDE_CODE_DISABLE_1M_CONTEXT=inherited run_wrapper mcp list)
 [[ "$maintenance_output" == *'BASE='* ]]
@@ -957,7 +1375,7 @@ inherited_chrome=$(ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-5.6-sol \
   ANTHROPIC_FOUNDRY_BASE_URL=https://foundry.invalid \
   CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 run_wrapper --claude-chrome --print chrome-test)
 [[ "$inherited_chrome" == *$'AUTO=\n'* && "$inherited_chrome" == *$'BG=\n'* ]]
-[[ "$inherited_chrome" == *'SUBAGENT=gpt-5.6-terra'* && "$inherited_chrome" == *$'OPUS=\n'* ]]
+[[ "$inherited_chrome" == *$'SUBAGENT=\n'* && "$inherited_chrome" == *$'OPUS=\n'* ]]
 [[ "$inherited_chrome" == *$'FABLE=\n'* && "$inherited_chrome" == *'ADDITIONAL_CLAUDE_MD=1'* ]]
 [[ "$inherited_chrome" == *$'USE_BEDROCK=\n'* && "$inherited_chrome" == *$'USE_VERTEX=\n'* ]]
 [[ "$inherited_chrome" == *$'USE_FOUNDRY=\n'* && "$inherited_chrome" == *$'BEDROCK_BASE=\n'* ]]
@@ -965,7 +1383,7 @@ inherited_chrome=$(ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-5.6-sol \
 managed_inherited_chrome=$(CLAUDEX_MANAGED_SESSION=1 CLAUDEX_PROXY_TOKEN=must-not-leak \
   CLAUDE_CODE_SUBAGENT_MODEL=user-selected-subagent CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 \
   run_wrapper --claude-chrome --print chrome-test)
-[[ "$managed_inherited_chrome" == *'SUBAGENT=user-selected-subagent'* ]]
+[[ "$managed_inherited_chrome" == *$'SUBAGENT=\n'* ]]
 [[ "$managed_inherited_chrome" == *$'ADDITIONAL_CLAUDE_MD=\n'* ]]
 [[ "$managed_inherited_chrome" == *$'PROXY_TOKEN_SET=\n'* ]]
 
@@ -1124,6 +1542,61 @@ status_output=$(printf '%s\n' '{"session_id":"stable-session","model":{"id":"gpt
 [[ "$status_output" == *'Codex 7d 16% left'* ]]
 [[ "$status_output" != *$'\033]0;'* ]]
 
+hostile_status=$(printf '%s\n' '{"session_id":"hostile-session","model":{"id":"hostile\u001b]0;MODEL-OSC\u0007\u009d0;MODEL-C1-OSC\u009c\u001b[31mMODEL-CSI\u001b[0m\u009b31mMODEL-C1\u061cMODEL-ALM\u200eMODEL-LRM\u200fMODEL-RLM\u202eMODEL-BIDI"},"effort":{"level":"high\u001b]8;;https://attacker.invalid\u0007max\u001b]8;;\u0007"},"context_window":{"used_percentage":5}}' | \
+  CLAUDEX_USAGE_DISPLAY=off CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+[[ "$hostile_status" == $'\033[38;5;81mClaudex\033[0m · \033[1mhostile\033[0m · high effort · 5% context' ]]
+[[ "$hostile_status" != *'MODEL-OSC'* && "$hostile_status" != *'MODEL-C1-OSC'* && "$hostile_status" != *'https://attacker.invalid'* ]]
+hostile_unstyled=${hostile_status//$'\033[38;5;81m'/}
+hostile_unstyled=${hostile_unstyled//$'\033[1m'/}
+hostile_unstyled=${hostile_unstyled//$'\033[0m'/}
+[[ "$hostile_unstyled" != *$'\033'* && "$hostile_unstyled" != *$'\007'* && "$hostile_unstyled" != *$'\u009b'* ]]
+[[ "$hostile_unstyled" != *$'\u061c'* && "$hostile_unstyled" != *$'\u200e'* && "$hostile_unstyled" != *$'\u200f'* && "$hostile_unstyled" != *$'\u202e'* ]]
+
+safe_unicode_status=$(printf '%s\n' '{"session_id":"safe-label-session","model":{"id":"safe-\u6a21\u578b"},"effort":{"level":"future-tier"},"context_window":{"used_percentage":6}}' | \
+  CLAUDEX_USAGE_DISPLAY=off CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+[[ "$safe_unicode_status" == *$'\033[1msafe-模型\033[0m · future-tier effort · 6% context' ]]
+
+suffix_only_status=$(printf '%s\n' '{"session_id":"suffix-only-session","model":{"id":"\u001b]0;ignored\u0007gpt-5.6-sol","display_name":"safe fallback"},"effort":{"level":"\u001b]0;ignored\u0007max"},"context_window":{"used_percentage":7}}' | \
+  CLAUDEX_USAGE_DISPLAY=off CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+[[ "$suffix_only_status" == $'\033[38;5;81mClaudex\033[0m · \033[1msafe fallback\033[0m · adaptive effort · 7% context' ]]
+
+printf '%s\n' $'safe summary \033]0;CACHE-OSC\007 \u009d0;CACHE-C1-OSC\u009c \033[31mCACHE-CSI\033[0m \u009b31mCACHE-C1 \u202eCACHE-BIDI' \
+  > "$tmp/home/.config/claudex/usage-cache/summary"
+date +%s > "$tmp/home/.config/claudex/usage-cache/last-success"
+hostile_cache_status=$(printf '%s\n' '{"session_id":"hostile-cache","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":5}}' | \
+  CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
+[[ "$hostile_cache_status" == *'safe summary'* ]]
+[[ "$hostile_cache_status" != *'CACHE-OSC'* && "$hostile_cache_status" != *'CACHE-C1-OSC'* ]]
+hostile_cache_unstyled=${hostile_cache_status//$'\033[38;5;81m'/}
+hostile_cache_unstyled=${hostile_cache_unstyled//$'\033[1m'/}
+hostile_cache_unstyled=${hostile_cache_unstyled//$'\033[0m'/}
+[[ "$hostile_cache_unstyled" != *$'\033'* && "$hostile_cache_unstyled" != *$'\007'* && "$hostile_cache_unstyled" != *$'\u009b'* && "$hostile_cache_unstyled" != *$'\u202e'* ]]
+
+status_refresh_config="$tmp/status-refresh-private-env"
+status_refresh_helper="$tmp/status-refresh-private-env-helper"
+status_refresh_log="$tmp/status-refresh-private-env.log"
+mkdir -p "$status_refresh_config"
+cat > "$status_refresh_helper" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' \
+  "MANTLE=${ANTHROPIC_BEDROCK_MANTLE_BASE_URL:-}" \
+  "VERTEX_PROJECT=${ANTHROPIC_VERTEX_PROJECT_ID:-}" \
+  "FOUNDRY_RESOURCE=${ANTHROPIC_FOUNDRY_RESOURCE:-}" \
+  "FOUNDRY_API_KEY=${ANTHROPIC_FOUNDRY_API_KEY:-}" \
+  > "$STATUS_REFRESH_PRIVATE_ENV_LOG"
+EOF
+chmod +x "$status_refresh_helper"
+printf '%s\n' '{"session_id":"private-refresh","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":5}}' | \
+  CLAUDE_CONFIG_DIR="$status_refresh_config" CLAUDEX_USAGE_LIMIT_BIN="$status_refresh_helper" \
+  STATUS_REFRESH_PRIVATE_ENV_LOG="$status_refresh_log" \
+  ANTHROPIC_BEDROCK_MANTLE_BASE_URL='https://mantle.private.invalid' \
+  ANTHROPIC_VERTEX_PROJECT_ID='private-vertex-project' \
+  ANTHROPIC_FOUNDRY_RESOURCE='private-foundry-resource' \
+  ANTHROPIC_FOUNDRY_API_KEY='private-foundry-secret' \
+  "$root/statusline" >/dev/null
+for _ in {1..100}; do [[ -s "$status_refresh_log" ]] && break; sleep 0.02; done
+[[ "$(<"$status_refresh_log")" == $'MANTLE=\nVERTEX_PROJECT=\nFOUNDRY_RESOURCE=\nFOUNDRY_API_KEY=' ]]
+
 printf '%s\n' 'Codex 7d 16% left · Review 7d 9% left · Extra-long-capacity-window 30d 8% left' \
   > "$tmp/home/.config/claudex/usage-cache/summary"
 date +%s > "$tmp/home/.config/claudex/usage-cache/last-success"
@@ -1179,6 +1652,7 @@ invalid_status=$(printf '%s\n' 'not-json' | CLAUDE_CONFIG_DIR="$tmp/home/.config
 [[ "$invalid_status" == *'Unknown model'* ]]
 
 node "$root/scripts/check-preload.mjs"
+node "$root/tests/windows-private-environment.test.cjs"
 
 solplan_input_regression=$(CLAUDEX_TEST_TTY_INPUT=1 node - "$root/preload.cjs" <<'NODE'
 const assert = require('node:assert/strict');
@@ -1591,19 +2065,337 @@ printf '%s\n' 'CLAUDEX_PROXY_TOKEN=test-token' "CLAUDEX_CODEX_AUTH_DIR=$update_h
 update_dir="$update_home/.config/claudex/update"
 direct_update_log="$tmp/direct-update.log"
 HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=0 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_FORCE_HARDLINK_FAILURE=1 \
   FAKE_UPDATE_LOG="$direct_update_log" "$root/claudex" --claude-chrome --version >/dev/null
-for _ in {1..50}; do [[ -s "$update_dir/last-success" ]] && break; sleep 0.02; done
+for _ in {1..1000}; do [[ -s "$update_dir/last-success" && ! -e "$update_dir/lock" ]] && break; sleep 0.02; done
 [[ -s "$direct_update_log" && -s "$update_dir/last-success" ]]
+[[ ! -e "$update_dir/lock" ]] && ! compgen -G "$update_dir/lock.quarantine.*" >/dev/null
+
+# State writers retain an old live owner's lock and reclaim only dead owners.
+state_lock="$update_home/.config/claudex/run/model-display.lock"
+mkdir -p "$state_lock"
+printf 'pid=%s\nidentity=%s\nnonce=live-state-owner\n' "$$" 'test-process-identity' > "$state_lock/owner"
+touch -t 200001010000 "$state_lock"
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity "$root/claudex" --claude-chrome --version >/dev/null
+grep -F 'nonce=live-state-owner' "$state_lock/owner" >/dev/null
+rm -rf "$state_lock"
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE=1 \
+  "$root/claudex" --claude-chrome --version >/dev/null
+[[ ! -e "$state_lock" ]] && ! compgen -G "$state_lock.quarantine.*" >/dev/null
+mkdir -p "$state_lock"
+printf 'pid=99999999\nidentity=dead-state-owner\nnonce=dead-state-owner\n' > "$state_lock/owner"
+touch -t 200001010000 "$state_lock"
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity "$root/claudex" --claude-chrome --version >/dev/null
+[[ ! -e "$state_lock" ]]
+mkdir -p "$state_lock"
+printf 'pid=%s\nidentity=\nnonce=unverifiable-reused-owner\n' "$$" > "$state_lock/owner"
+touch -t 200001010000 "$state_lock"
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=1 \
+  CLAUDEX_TEST_PS_FAIL=1 "$root/claudex" --claude-chrome --version >/dev/null
+grep -F 'nonce=unverifiable-reused-owner' "$state_lock/owner" >/dev/null
+rm -rf "$state_lock"
+
+# Orchestrate both historical ABA windows. A paused creator may not overwrite a
+# later B generation, and a stale X remover that moves Y may not let Z enter.
+aba_base=(HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
+  CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity \
+  CLAUDEX_TEST_LOCK_MATCH=model-display.lock)
+env "${aba_base[@]}" CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY="$tmp/aba-a-mkdir" \
+  CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE="$tmp/aba-a-continue" \
+  "$root/claudex" --claude-chrome --version >/dev/null &
+aba_a=$!
+for _ in {1..200}; do [[ -e "$tmp/aba-a-mkdir" ]] && break; sleep 0.02; done
+touch -t 200001010000 "$state_lock"
+env "${aba_base[@]}" CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY="$tmp/aba-b-publish" \
+  CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE="$tmp/aba-b-continue" \
+  "$root/claudex" --claude-chrome --version >/dev/null &
+aba_b=$!
+for _ in {1..300}; do [[ -e "$tmp/aba-b-publish" ]] && break; sleep 0.02; done
+aba_b_nonce=$(awk -F= '$1 == "nonce" { print $2; exit }' "$state_lock/owner")
+: > "$tmp/aba-a-continue"
+wait "$aba_a"
+[[ "$(awk -F= '$1 == "nonce" { print $2; exit }' "$state_lock/owner")" == "$aba_b_nonce" ]]
+: > "$tmp/aba-b-continue"
+wait "$aba_b"
+
+rm -rf "$state_lock"
+mkdir -p "$state_lock"
+printf '%s\n' x > "$state_lock/generation"
+printf 'pid=99999999\nidentity=dead\nnonce=x\n' > "$state_lock/owner"
+touch -t 200001010000 "$state_lock"
+env "${aba_base[@]}" CLAUDEX_TEST_LOCK_BEFORE_RENAME_READY="$tmp/aba-x-before" \
+  CLAUDEX_TEST_LOCK_BEFORE_RENAME_CONTINUE="$tmp/aba-x-before-continue" \
+  CLAUDEX_TEST_LOCK_AFTER_RENAME_READY="$tmp/aba-x-after" \
+  CLAUDEX_TEST_LOCK_AFTER_RENAME_CONTINUE="$tmp/aba-x-after-continue" \
+  "$root/claudex" --claude-chrome --version >/dev/null &
+aba_x=$!
+for _ in {1..200}; do [[ -e "$tmp/aba-x-before" ]] && break; sleep 0.02; done
+env "${aba_base[@]}" CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY="$tmp/aba-y-publish" \
+  CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE="$tmp/aba-y-continue" \
+  "$root/claudex" --claude-chrome --version >/dev/null &
+aba_y=$!
+for _ in {1..300}; do [[ -e "$tmp/aba-y-publish" ]] && break; sleep 0.02; done
+aba_y_nonce=$(awk -F= '$1 == "nonce" { print $2; exit }' "$state_lock/owner")
+: > "$tmp/aba-x-before-continue"
+for _ in {1..200}; do [[ -e "$tmp/aba-x-after" ]] && break; sleep 0.02; done
+env "${aba_base[@]}" "$root/claudex" --claude-chrome --version >/dev/null &
+aba_z=$!
+wait "$aba_z"
+[[ "$(awk -F= '$1 == "nonce" { print $2; exit }' "$state_lock/owner")" == "$aba_y_nonce" ]]
+: > "$tmp/aba-x-after-continue"
+wait "$aba_x"
+: > "$tmp/aba-y-continue"
+wait "$aba_y"
+
+# If X dies or pauses after moving Y, Y itself restores and retains its exact
+# generation instead of timing out behind its own live quarantine barrier.
+rm -rf "$state_lock" "$state_lock".quarantine.*
+mkdir -p "$state_lock"
+printf '%s\n' x-self > "$state_lock/generation"
+printf 'pid=99999999\nidentity=dead\nnonce=x-self\n' > "$state_lock/owner"
+touch -t 200001010000 "$state_lock"
+env "${aba_base[@]}" CLAUDEX_TEST_LOCK_BEFORE_RENAME_READY="$tmp/self-x-before" \
+  CLAUDEX_TEST_LOCK_BEFORE_RENAME_CONTINUE="$tmp/self-x-before-continue" \
+  CLAUDEX_TEST_LOCK_AFTER_RENAME_READY="$tmp/self-x-after" \
+  CLAUDEX_TEST_LOCK_AFTER_RENAME_CONTINUE="$tmp/self-x-after-continue" \
+  "$root/claudex" --claude-chrome --version >/dev/null &
+self_x=$!
+for _ in {1..200}; do [[ -e "$tmp/self-x-before" ]] && break; sleep 0.02; done
+env "${aba_base[@]}" CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY="$tmp/self-y-publish" \
+  CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE="$tmp/self-y-continue" \
+  CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE="$tmp/self-y-recovered" \
+  "$root/claudex" --claude-chrome --version >/dev/null &
+self_y=$!
+for _ in {1..300}; do [[ -e "$tmp/self-y-publish" ]] && break; sleep 0.02; done
+: > "$tmp/self-x-before-continue"
+for _ in {1..200}; do [[ -e "$tmp/self-x-after" ]] && break; sleep 0.02; done
+: > "$tmp/self-y-continue"
+for _ in {1..200}; do [[ -e "$tmp/self-y-recovered" ]] && break; sleep 0.02; done
+[[ -e "$tmp/self-y-recovered" ]]
+wait "$self_y"
+: > "$tmp/self-x-after-continue"
+wait "$self_x"
+[[ ! -e "$state_lock" ]] && ! compgen -G "$state_lock.quarantine.*" >/dev/null
+
+# A new creator that resumes inside a prior-format replacement must withdraw
+# only its injected generation and restore the old owner's exact record.
+env "${aba_base[@]}" CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY="$tmp/legacy-a-mkdir" \
+  CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE="$tmp/legacy-a-continue" \
+  "$root/claudex" --claude-chrome --version >/dev/null &
+legacy_a=$!
+for _ in {1..200}; do [[ -e "$tmp/legacy-a-mkdir" ]] && break; sleep 0.02; done
+[[ -e "$tmp/legacy-a-mkdir" ]]
+mv "$state_lock" "$tmp/legacy-a-empty"
+mkdir -p "$state_lock"
+printf '%s old-token\n' "$$" > "$state_lock/owner-pid"
+: > "$tmp/legacy-a-continue"
+wait "$legacy_a"
+[[ "$(<"$state_lock/owner-pid")" == "$$ old-token" && ! -e "$state_lock/owner" && ! -e "$state_lock/generation" ]]
+rm -rf "$state_lock" "$tmp/legacy-a-empty"
+
+# A zero-length owner-pid is still an in-progress prior-format publication.
+# A resumed structured creator must not delete it or enter the lock.
+env "${aba_base[@]}" CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY="$tmp/legacy-zero-mkdir" \
+  CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE="$tmp/legacy-zero-continue" \
+  "$root/claudex" --claude-chrome --version >/dev/null &
+legacy_zero=$!
+for _ in {1..200}; do [[ -e "$tmp/legacy-zero-mkdir" ]] && break; sleep 0.02; done
+[[ -e "$tmp/legacy-zero-mkdir" ]]
+mv "$state_lock" "$tmp/legacy-zero-created"
+mkdir -p "$state_lock"
+: > "$state_lock/owner-pid"
+: > "$tmp/legacy-zero-continue"
+wait "$legacy_zero"
+[[ -e "$state_lock/owner-pid" && ! -s "$state_lock/owner-pid" \
+    && ! -e "$state_lock/owner" && ! -e "$state_lock/generation" ]]
+rm -rf "$state_lock" "$tmp/legacy-zero-created"
+
+# A prior-format creator can replace the directory and still be paused before
+# its owner-pid file exists. Device and inode identity must reject that empty
+# replacement rather than publishing into it.
+: > "$tmp/legacy-absent-after-continue"
+env "${aba_base[@]}" CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY="$tmp/legacy-absent-mkdir" \
+  CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE="$tmp/legacy-absent-continue" \
+  CLAUDEX_TEST_LOCK_AFTER_PUBLISH_READY="$tmp/legacy-absent-entered" \
+  CLAUDEX_TEST_LOCK_AFTER_PUBLISH_CONTINUE="$tmp/legacy-absent-after-continue" \
+  CLAUDEX_TEST_LOCK_PRESERVE_FILE="$tmp/legacy-absent-path-moved" \
+  "$root/claudex" --claude-chrome --version >/dev/null &
+legacy_absent=$!
+for _ in {1..200}; do [[ -e "$tmp/legacy-absent-mkdir" ]] && break; sleep 0.02; done
+[[ -e "$tmp/legacy-absent-mkdir" ]]
+mv "$state_lock" "$tmp/legacy-absent-created"
+mkdir -p "$state_lock"
+: > "$tmp/legacy-absent-continue"
+wait "$legacy_absent"
+[[ -d "$state_lock" && ! -e "$state_lock/owner-pid" \
+    && ! -e "$state_lock/owner" && ! -e "$state_lock/generation" \
+    && ! -e "$tmp/legacy-absent-entered" && ! -e "$tmp/legacy-absent-path-moved" ]]
+printf '%s old-token\n' "$$" > "$state_lock/owner-pid"
+[[ "$(<"$state_lock/owner-pid")" == "$$ old-token" ]]
+rm -rf "$state_lock" "$tmp/legacy-absent-created"
+
+# Future-format artifacts are conservative ownership signals too. Publication
+# must withdraw only its injected files and leave the unknown entry untouched.
+env "${aba_base[@]}" CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY="$tmp/unknown-owner-mkdir" \
+  CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE="$tmp/unknown-owner-continue" \
+  "$root/claudex" --claude-chrome --version >/dev/null &
+unknown_owner=$!
+for _ in {1..200}; do [[ -e "$tmp/unknown-owner-mkdir" ]] && break; sleep 0.02; done
+[[ -e "$tmp/unknown-owner-mkdir" ]]
+mv "$state_lock" "$tmp/unknown-owner-created"
+mkdir -p "$state_lock"
+printf '%s\n' future-owner > "$state_lock/owner.json"
+: > "$tmp/unknown-owner-continue"
+wait "$unknown_owner"
+[[ "$(<"$state_lock/owner.json")" == future-owner \
+    && ! -e "$state_lock/owner" && ! -e "$state_lock/generation" ]]
+rm -rf "$state_lock" "$tmp/unknown-owner-created"
+
+# Crash recovery prioritizes a prior-format live owner over a foreign injected
+# generation in quarantine, removes the injection, and restores the owner.
+mkdir -p "$state_lock.quarantine.mixed"
+printf '%s\n' injected-generation > "$state_lock.quarantine.mixed/generation"
+printf 'pid=99999999\nidentity=dead\nnonce=injected-generation\n' > "$state_lock.quarantine.mixed/owner"
+printf '%s old-token\n' "$$" > "$state_lock.quarantine.mixed/owner-pid"
+touch -t 200001010000 "$state_lock.quarantine.mixed"
+env "${aba_base[@]}" "$root/claudex" --claude-chrome --version >/dev/null
+[[ "$(<"$state_lock/owner-pid")" == "$$ old-token" && ! -e "$state_lock/owner" && ! -e "$state_lock/generation" ]]
+rm -rf "$state_lock"
+
+mkdir -p "$state_lock.quarantine.mixed-empty"
+printf '%s\n' injected-generation > "$state_lock.quarantine.mixed-empty/generation"
+printf 'pid=99999999\nidentity=dead\nnonce=injected-generation\n' > "$state_lock.quarantine.mixed-empty/owner"
+: > "$state_lock.quarantine.mixed-empty/owner-pid"
+touch -t 200001010000 "$state_lock.quarantine.mixed-empty"
+env "${aba_base[@]}" "$root/claudex" --claude-chrome --version >/dev/null
+[[ -e "$state_lock/owner-pid" && ! -s "$state_lock/owner-pid" \
+    && ! -e "$state_lock/owner" && ! -e "$state_lock/generation" ]]
+rm -rf "$state_lock"
+
+# A dead prior-format owner also takes precedence over a live-looking injected
+# structured owner. Once its grace has elapsed, both canonical and quarantined
+# mixed states are reclaimed instead of being blocked by the injected PID.
+mkdir -p "$state_lock.quarantine.mixed-dead"
+printf '%s\n' injected-live > "$state_lock.quarantine.mixed-dead/generation"
+printf 'pid=%s\nidentity=\nnonce=injected-live\n' "$$" > "$state_lock.quarantine.mixed-dead/owner"
+printf '%s old-token\n' 99999999 > "$state_lock.quarantine.mixed-dead/owner-pid"
+touch -t 200001010000 "$state_lock.quarantine.mixed-dead"
+env "${aba_base[@]}" "$root/claudex" --claude-chrome --version >/dev/null
+[[ ! -e "$state_lock" ]] && ! compgen -G "$state_lock.quarantine.*" >/dev/null
+
+mkdir -p "$state_lock"
+printf '%s\n' injected-live > "$state_lock/generation"
+printf 'pid=%s\nidentity=\nnonce=injected-live\n' "$$" > "$state_lock/owner"
+printf '%s old-token\n' 99999999 > "$state_lock/owner-pid"
+touch -t 200001010000 "$state_lock"
+env "${aba_base[@]}" "$root/claudex" --claude-chrome --version >/dev/null
+[[ ! -e "$state_lock" ]] && ! compgen -G "$state_lock.quarantine.*" >/dev/null
+
+# A detached update survives HUP, never inherits managed credentials, and an
+# artificially old live owner is not replaced by a second update.
+rm -rf "$update_dir"
+live_update_log="$tmp/live-update.log"
+live_update_env_log="$tmp/live-update-env.log"
+live_update_ready="$tmp/live-update-ready"
+live_update_release="$tmp/live-update-release"
+live_update_done="$tmp/live-update-done"
+live_update_attempt="$tmp/live-update-attempt"
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=0 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE="$live_update_attempt" \
+  CLAUDEX_PROXY_TOKEN=must-not-leak ANTHROPIC_AUTH_TOKEN=must-not-leak CLAUDEX_MANAGED_SESSION=1 \
+  CLAUDE_CODE_SUBAGENT_MODEL=must-not-leak \
+  FAKE_UPDATE_LOG="$live_update_log" FAKE_UPDATE_ENV_LOG="$live_update_env_log" \
+  FAKE_UPDATE_READY_FILE="$live_update_ready" FAKE_UPDATE_WAIT_FILE="$live_update_release" \
+  FAKE_UPDATE_DONE_FILE="$live_update_done" "$root/claudex" --claude-chrome --version >/dev/null
+for _ in {1..1000}; do [[ -e "$live_update_ready" && -s "$update_dir/lock/owner" ]] && break; sleep 0.02; done
+[[ -e "$live_update_ready" && -s "$update_dir/lock/owner" && -s "$live_update_attempt" ]]
+live_update_pid=$(head -n 1 "$live_update_log")
+touch -t 200001010000 "$update_dir/lock"
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=0 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE="$live_update_attempt" \
+  FAKE_UPDATE_LOG="$live_update_log" "$root/claudex" --claude-chrome --version >/dev/null
+for _ in {1..1000}; do grep -q '^blocked ' "$live_update_attempt" 2>/dev/null && break; sleep 0.02; done
+grep -q '^blocked ' "$live_update_attempt"
+[[ "$(wc -l < "$live_update_log" | tr -d ' ')" == 1 ]]
+kill -HUP "$live_update_pid"
+: > "$live_update_release"
+for _ in {1..1000}; do [[ -e "$live_update_done" && -s "$update_dir/last-success" ]] && break; sleep 0.02; done
+[[ -e "$live_update_done" && -s "$update_dir/last-success" ]]
+grep -Fx 'PROXY_TOKEN=' "$live_update_env_log" >/dev/null
+grep -Fx 'AUTH_TOKEN=' "$live_update_env_log" >/dev/null
+grep -Fx 'MANAGED=' "$live_update_env_log" >/dev/null
+grep -Fx 'SUBAGENT=' "$live_update_env_log" >/dev/null
+
+# An old owner cannot delete a replacement generation whose nonce differs.
+rm -rf "$update_dir"
+replacement_update_log="$tmp/replacement-update.log"
+replacement_update_ready="$tmp/replacement-update-ready"
+replacement_update_release="$tmp/replacement-update-release"
+replacement_update_done="$tmp/replacement-update-done"
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=0 \
+  FAKE_UPDATE_LOG="$replacement_update_log" FAKE_UPDATE_READY_FILE="$replacement_update_ready" \
+  FAKE_UPDATE_WAIT_FILE="$replacement_update_release" FAKE_UPDATE_DONE_FILE="$replacement_update_done" \
+  "$root/claudex" --claude-chrome --version >/dev/null
+for _ in {1..1000}; do [[ -e "$replacement_update_ready" && -s "$update_dir/lock/owner" ]] && break; sleep 0.02; done
+mv "$update_dir/lock" "$update_dir/displaced-lock"
+mkdir "$update_dir/lock"
+printf 'pid=%s\nidentity=%s\nnonce=replacement-update-owner\n' "$$" 'test-process-identity' > "$update_dir/lock/owner"
+: > "$replacement_update_release"
+for _ in {1..1000}; do [[ -e "$replacement_update_done" ]] && break; sleep 0.02; done
+[[ -e "$replacement_update_done" ]]
+grep -F 'nonce=replacement-update-owner' "$update_dir/lock/owner" >/dev/null
+rm -rf "$update_dir"
+
+# A killed owner is reclaimed.
+rm -rf "$update_dir"
+dead_update_log="$tmp/dead-update.log"
+dead_update_ready="$tmp/dead-update-ready"
+dead_update_release="$tmp/dead-update-release"
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=0 \
+  FAKE_UPDATE_LOG="$dead_update_log" FAKE_UPDATE_READY_FILE="$dead_update_ready" \
+  FAKE_UPDATE_WAIT_FILE="$dead_update_release" "$root/claudex" --claude-chrome --version >/dev/null
+for _ in {1..1000}; do [[ -e "$dead_update_ready" && -s "$update_dir/lock/owner" ]] && break; sleep 0.02; done
+dead_update_owner=$(awk -F= '$1 == "pid" { print $2; exit }' "$update_dir/lock/owner")
+kill -KILL "$dead_update_owner" 2>/dev/null || true
+touch -t 200001010000 "$update_dir/lock"
+rm -f "$update_dir/last-success" "$dead_update_ready"
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=0 \
+  FAKE_UPDATE_LOG="$dead_update_log" "$root/claudex" --claude-chrome --version >/dev/null
+for _ in {1..1000}; do [[ $(wc -l < "$dead_update_log" | tr -d ' ') -ge 2 ]] && break; sleep 0.02; done
+[[ "$(wc -l < "$dead_update_log" | tr -d ' ')" == 2 ]]
+for _ in {1..1000}; do [[ -s "$update_dir/last-success" && ! -e "$update_dir/lock" ]] && break; sleep 0.02; done
+[[ -s "$update_dir/last-success" && ! -e "$update_dir/lock" ]]
+: > "$dead_update_release"
+
 rm -rf "$update_dir"
 mkdir -p "$update_dir/lock"
 touch -t 200001010000 "$update_dir/lock"
 update_log="$tmp/update.log"
 HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=0 FAKE_UPDATE_LOG="$update_log" \
   FAKE_CLAUDE_DELAY=0.2 "$root/claudex" test-prompt >/dev/null
-for _ in {1..50}; do [[ -s "$update_log" ]] && break; sleep 0.02; done
+for _ in {1..500}; do [[ -s "$update_log" ]] && break; sleep 0.02; done
 [[ -s "$update_log" ]]
+
+# A recent ownerless update lock can belong to v1.5.8 between mkdir and owner
+# publication, so the transition path preserves it for the full legacy hour.
+rm -rf "$update_dir"
+mkdir -p "$update_dir/lock"
+rm -f "$update_log"
+legacy_update_attempt="$tmp/legacy-update-attempt"
+HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=0 \
+  CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE="$legacy_update_attempt" \
+  FAKE_UPDATE_LOG="$update_log" "$root/claudex" --claude-chrome --version >/dev/null
+for _ in {1..1000}; do grep -q '^blocked ' "$legacy_update_attempt" 2>/dev/null && break; sleep 0.02; done
+grep -q '^blocked ' "$legacy_update_attempt"
+[[ -d "$update_dir/lock" && ! -e "$update_log" ]]
+
+rm -rf "$update_dir"
+mkdir -p "$update_dir/lock"
+touch -t 200001010000 "$update_dir/lock"
 rm -f "$update_log" "$update_dir/last-success"
-rmdir "$update_dir/lock" 2>/dev/null || true
 HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUDEX_SKIP_AUTO_UPDATE=0 FAKE_UPDATE_LOG="$update_log" \
   "$root/claudex" update >/dev/null
 [[ "$(wc -l < "$update_log" | tr -d ' ')" == 1 ]]

@@ -2,15 +2,13 @@
 set -euo pipefail
 
 readonly root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
-version="${1:-$(node -p "require('$root/package.json').version")}"
+version="${1:-$(node -p 'require(process.argv[1]).version' "$root/package.json")}"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf 'invalid version: %s\n' "$version" >&2; exit 2; }
-manifest_version=$(node -p "require('$root/package.json').version")
+manifest_version=$(node -p 'require(process.argv[1]).version' "$root/package.json")
 [[ "$version" == "$manifest_version" ]] || { printf 'release version %s does not match package.json %s\n' "$version" "$manifest_version" >&2; exit 2; }
 
-command -v zip >/dev/null 2>&1 || { printf '%s\n' 'zip is required to build release assets' >&2; exit 1; }
 command -v unzip >/dev/null 2>&1 || { printf '%s\n' 'unzip is required to verify release assets' >&2; exit 1; }
-command -v gzip >/dev/null 2>&1 || { printf '%s\n' 'gzip is required to build reproducible release assets' >&2; exit 1; }
-command -v tar >/dev/null 2>&1 || { printf '%s\n' 'tar is required to build release assets' >&2; exit 1; }
+command -v tar >/dev/null 2>&1 || { printf '%s\n' 'tar is required to verify release assets' >&2; exit 1; }
 
 # This is the complete release payload. Keep it explicit: recursively copying
 # these directories would silently publish any untracked editor, credential, or
@@ -55,36 +53,18 @@ unsupported=$(find "$stage" ! -type f ! -type d -print -quit)
   exit 1
 }
 
-# Archive metadata is part of every published checksum. Normalize permissions,
-# timestamps, ownership, and entry order so rebuilding the same source produces
-# the same bytes instead of invalidating package-manager hashes.
+# Archive metadata and Windows command-file line endings are part of every
+# published checksum. Normalize permissions and staged timestamps for inspection;
+# the repository-contained writer below also fixes archive ownership, timestamps,
+# entry order, gzip framing, and ZIP metadata without host tar/zip differences.
 find "$stage" -type d -exec chmod 755 {} +
 find "$stage" -type f -exec chmod 644 {} +
 chmod +x "$stage/bootstrap.sh" "$stage/claudex" "$stage/codex-session" "$stage/install.sh" "$stage/install.zsh" "$stage/self-update" \
   "$stage/statusline" "$stage/usage-limit" "$stage/bin/claudex-package.mjs"
 TZ=UTC find "$stage" -exec touch -t 200001010000 {} +
 
-readonly archive_list="$dist/.release-files"
-(
-  cd "$dist"
-  find "claudex-$version" -print | LC_ALL=C sort > "$archive_list"
-)
-
-tar_options=(--format=ustar --no-recursion)
-if tar --version 2>/dev/null | grep -q 'GNU tar'; then
-  tar_options+=(--owner=0 --group=0 --numeric-owner)
-else
-  # macOS ships bsdtar. These flags match the GNU archive ownership above.
-  tar_options+=(--uid 0 --gid 0 --uname root --gname root)
-fi
-
-(
-  cd "$dist"
-  export TZ=UTC
-  COPYFILE_DISABLE=1 tar "${tar_options[@]}" -cf - -T "$archive_list" | gzip -n > "claudex-$version.tar.gz"
-  zip -X -q "claudex-$version-windows.zip" -@ < "$archive_list"
-)
-rm -f "$archive_list"
+node "$root/scripts/create-release-archives.mjs" "$stage" \
+  "$dist/claudex-$version.tar.gz" "$dist/claudex-$version-windows.zip"
 
 if command -v sha256sum >/dev/null 2>&1; then
   (cd "$dist" && sha256sum "claudex-$version.tar.gz" "claudex-$version-windows.zip" > SHA256SUMS)

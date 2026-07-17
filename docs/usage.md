@@ -185,11 +185,11 @@ replacement tool set cannot support the managed lifecycle. `--disallowedTools`
 does the same only when it explicitly denies `Agent` or `TaskList`;
 `--allowedTools` changes approval policy without incorrectly hiding lifecycle
 guidance for tools that remain available.
-`--bg` is forwarded and Claude Code detaches the agent. Because Claudex's auth
-and proxy recovery watchers are scoped to the foreground launcher, a long running
-detached GPT backed agent is not guaranteed to follow later account changes or
-recover a later proxy outage. Use the native route for authoritative
-harness specific background lifecycle behavior.
+`--bg` is forwarded and Claude Code detaches the agent. Claudex detaches its
+auth and proxy recovery watchers too. They verify the foreground launcher's
+process identity, then remain active while the managed `claude agents --json`
+registry contains any live session, so detached GPT backed work continues to
+follow account changes and recover proxy outages.
 
 Examples:
 

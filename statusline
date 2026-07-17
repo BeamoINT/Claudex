@@ -15,8 +15,32 @@ parsed=$(printf '%s' "$input" | jq -ejr '[
 
 IFS=$'\x1f' read -r model_id display_name effort context_percent session_id total_input_tokens context_window_size input_columns <<< "$parsed"
 
+sanitize_terminal_text() {
+  # Strip terminal protocols before ordinary controls so OSC/DCS payloads do
+  # not become visible spoofing text. The final pass also removes C0/C1 and
+  # Unicode bidi formatting while preserving normal Unicode display text.
+  printf '%s' "$1" | jq -Rjr '
+    gsub("(?:\u001b\\]|\u009d)[^\u0007\u001b\u009c]*(?:\u0007|\u001b\\\\|\u009c)?"; "") |
+    gsub("(?:\u001b\\[|\u009b)[0-?]*[ -/]*[@-~]"; "") |
+    gsub("(?:\u001b[P_^X]|[\u0090\u0098\u009e\u009f])[^\u001b\u009c]*(?:\u001b\\\\|\u009c)?"; "") |
+    gsub("\u001b."; "") |
+    gsub("[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"; "")
+  ' 2>/dev/null || printf ''
+}
+
+sanitize_terminal_label() {
+  # Model and effort fields are semantic labels, not free-form terminal text.
+  # Retain only the safe prefix before the first control or bidi formatter so
+  # visible text placed after a stripped protocol cannot join, replace, or
+  # otherwise spoof the label. Styling is added by this script after this
+  # boundary; no input-owned terminal sequence is preserved.
+  printf '%s' "$1" | jq -Rjr '
+    sub("[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069].*$"; "")
+  ' 2>/dev/null || printf ''
+}
+
 statusline_file_mtime() {
-  if stat -f '%m' "$1" >/dev/null 2>&1; then stat -f '%m' "$1"
+  if stat -f '%m' "$1" >/dev/null 2>&1; then stat -f '%m' "$1" 2>/dev/null
   else stat -c '%Y' "$1" 2>/dev/null
   fi
 }
@@ -55,25 +79,6 @@ prune_statusline_cache() {
     rm -f "$oldest"
     count=$(( count - 1 ))
   done
-}
-
-reclaim_statusline_refresh_lock() {
-  local cache_dir="$1" lock_dir="$2" expected_record="$3"
-  local quarantine moved_record=""
-  quarantine="$cache_dir/.refresh.lock.quarantine.$$.$RANDOM"
-  mv "$lock_dir" "$quarantine" 2>/dev/null || return 1
-  if [[ -r "$quarantine/owner-pid" ]]; then
-    IFS= read -r moved_record < "$quarantine/owner-pid" || moved_record=""
-  fi
-  if [[ "$moved_record" == "$expected_record" ]]; then
-    rm -f "$quarantine/owner-pid"
-    rmdir "$quarantine" 2>/dev/null || true
-    return 0
-  fi
-  if [[ ! -e "$lock_dir" ]]; then
-    mv "$quarantine" "$lock_dir" 2>/dev/null || true
-  fi
-  return 1
 }
 
 stabilize_context_percent() {
@@ -139,12 +144,9 @@ load_usage_summary() {
   local summary_file="$cache_dir/summary"
   local last_attempt_file="$cache_dir/last-attempt"
   local last_success_file="$cache_dir/last-success"
-  local refresh_lock="$cache_dir/refresh.lock"
-  local refresh_owner_file="$refresh_lock/owner-pid"
   local refresh_seconds="${CLAUDEX_USAGE_REFRESH_SECONDS:-300}"
   local max_stale_seconds="${CLAUDEX_USAGE_MAX_STALE_SECONDS:-86400}"
-  local now last_attempt=0 last_success=0 refresh_pid="" refresh_owner="" refresh_token=""
-  local observed_owner="" owner_pid="" owner_token="" lock_age=0 owner_tmp=""
+  local now last_attempt=0 last_success=0
 
   [[ "$display" != off && -x "$helper" ]] || return 0
   if [[ ! "$refresh_seconds" =~ ^[0-9]+$ ]] || (( refresh_seconds < 60 || refresh_seconds > 3600 )); then
@@ -160,43 +162,23 @@ load_usage_summary() {
   if (( now - last_attempt >= refresh_seconds )); then
     mkdir -p "$cache_dir" 2>/dev/null || true
     chmod 700 "$cache_dir" 2>/dev/null || true
-    if mkdir "$refresh_lock" 2>/dev/null; then
-      refresh_token="${now}-$$-${RANDOM:-0}"
-      (umask 077; printf '%s %s\n' "$$" "$refresh_token" > "$refresh_owner_file") 2>/dev/null || {
-        rmdir "$refresh_lock" 2>/dev/null || true
-        return 0
-      }
-      printf '%s\n' "$now" > "$last_attempt_file"
-      chmod 600 "$last_attempt_file" 2>/dev/null || true
-      nohup "$helper" --refresh-cache --lock-held --lock-token "$refresh_token" >/dev/null 2>&1 </dev/null &
-      refresh_pid=$!
-      owner_tmp="$refresh_lock/.owner.$$"
-      if (umask 077; printf '%s %s\n' "$refresh_pid" "$refresh_token" > "$owner_tmp") 2>/dev/null; then
-        observed_owner=""
-        [[ ! -r "$refresh_owner_file" ]] || IFS= read -r observed_owner < "$refresh_owner_file" || observed_owner=""
-        if [[ "${observed_owner#* }" == "$refresh_token" ]]; then
-          mv -f "$owner_tmp" "$refresh_owner_file" 2>/dev/null || rm -f "$owner_tmp"
-        else
-          rm -f "$owner_tmp"
-        fi
-      fi
-    elif (( now - last_attempt >= refresh_seconds * 2 )); then
-      if [[ -r "$refresh_owner_file" ]]; then IFS= read -r observed_owner < "$refresh_owner_file" || observed_owner=""; fi
-      owner_pid="${observed_owner%% *}"
-      owner_token="${observed_owner#* }"
-      if [[ -z "$observed_owner" ]]; then
-        lock_age=$(statusline_file_mtime "$refresh_lock" 2>/dev/null || printf "$now")
-        (( now - lock_age >= 2 )) || owner_token=live
-      fi
-      if { [[ "$owner_pid" =~ ^[0-9]+$ && -n "$owner_token" ]] && ! kill -0 "$owner_pid" 2>/dev/null; } \
-          || [[ -z "$observed_owner" && -z "$owner_token" ]]; then
-        refresh_owner=""
-        [[ ! -r "$refresh_owner_file" ]] || IFS= read -r refresh_owner < "$refresh_owner_file" || refresh_owner=""
-        if [[ "$refresh_owner" == "$observed_owner" ]]; then
-          reclaim_statusline_refresh_lock "$cache_dir" "$refresh_lock" "$observed_owner" || true
-        fi
-      fi
-    fi
+    (umask 077; printf '%s\n' "$now" > "$last_attempt_file") 2>/dev/null || return 0
+    chmod 600 "$last_attempt_file" 2>/dev/null || true
+    # The helper owns the complete generation-safe refresh lock protocol.
+    # Starting an occasional losing helper is cheaper and safer than duplicating
+    # lock mutation in the frequently invoked status-line process.
+    nohup env \
+        -u CLAUDEX_PROXY_TOKEN -u CLAUDEX_PROXY_URL -u CLAUDEX_PROXY_CONFIG -u CLAUDEX_PROXY_BIN \
+        -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u CLAUDE_CODE_USE_BEDROCK \
+        -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY \
+        -u ANTHROPIC_BEDROCK_BASE_URL -u ANTHROPIC_BEDROCK_MANTLE_BASE_URL \
+        -u ANTHROPIC_VERTEX_BASE_URL -u ANTHROPIC_VERTEX_PROJECT_ID \
+        -u ANTHROPIC_FOUNDRY_BASE_URL -u ANTHROPIC_FOUNDRY_RESOURCE -u ANTHROPIC_FOUNDRY_API_KEY \
+        -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_CUSTOM_HEADERS \
+        -u ANTHROPIC_MODEL -u ANTHROPIC_SMALL_FAST_MODEL -u ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION \
+        -u ANTHROPIC_CUSTOM_MODEL_OPTION -u ANTHROPIC_CUSTOM_MODEL_OPTION_NAME \
+        -u ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION \
+        "$helper" --refresh-cache >/dev/null 2>&1 </dev/null &
   fi
 
   if [[ -r "$last_success_file" ]]; then IFS= read -r last_success < "$last_success_file" || last_success=0; fi
@@ -208,6 +190,10 @@ load_usage_summary() {
 
 load_usage_summary
 
+model_id=$(sanitize_terminal_label "$model_id")
+display_name=$(sanitize_terminal_label "$display_name")
+usage_summary=$(sanitize_terminal_text "$usage_summary")
+
 if [[ -z "$effort" ]]; then
   effort="${CLAUDE_CODE_EFFORT_LEVEL:-${CLAUDE_EFFORT:-}}"
 fi
@@ -218,6 +204,7 @@ fi
 if [[ -n "${CLAUDEX_SESSION_MODE:-}" ]]; then
   effort="$CLAUDEX_SESSION_MODE"
 fi
+effort=$(sanitize_terminal_label "$effort")
 readonly effort="${effort:-adaptive}"
 
 case "$model_id" in
@@ -242,6 +229,7 @@ if [[ -z "$selected_model_mode" && -r "${CLAUDE_CONFIG_DIR:-$HOME/.config/claude
     "${CLAUDE_CONFIG_DIR:-$HOME/.config/claudex}/settings.json" 2>/dev/null) || selected_model_mode=""
 fi
 if [[ "$selected_model_mode" == solplan ]]; then model_name="GPT-5.6 Solplan"; fi
+model_name=$(sanitize_terminal_label "$model_name")
 
 statusline_columns="${CLAUDEX_STATUSLINE_COLUMNS:-}"
 if [[ ! "$statusline_columns" =~ ^[1-9][0-9]*$ ]] && [[ "$input_columns" =~ ^[1-9][0-9]*$ ]]; then

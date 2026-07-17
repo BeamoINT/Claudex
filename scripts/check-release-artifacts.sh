@@ -2,9 +2,19 @@
 set -euo pipefail
 
 readonly root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
-readonly version="$(node -p "require('$root/package.json').version")"
+readonly version="$(node -p 'require(process.argv[1]).version' "$root/package.json")"
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/claudex-release-check.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT
+
+# The parent artifact check re-enters a copied checkout whose path contains a
+# quote. Keep that nested probe focused so it verifies this script's version
+# lookup and the builder without recursively running the complete suite.
+if [[ "${CLAUDEX_NESTED_QUOTE_PATH_CHECK:-0}" == 1 ]]; then
+  "$root/scripts/build-release.sh" "$version" >/dev/null
+  test -f "$root/dist/claudex-$version.tar.gz"
+  test -f "$root/dist/claudex-$version-windows.zip"
+  exit 0
+fi
 
 # Run the two builds under deliberately different caller time zones. The
 # builder must set TZ on the archive commands themselves; normalizing the
@@ -79,6 +89,112 @@ make_fixture() {
     cp -p "$root/bin/package-setup-lock.mjs" "$fixture_root/bin/package-setup-lock.mjs"
   fi
 }
+
+quoted_checkout_fixture="$temporary/checkout-with-'quote"
+make_fixture "$quoted_checkout_fixture"
+CLAUDEX_NESTED_QUOTE_PATH_CHECK=1 \
+  "$quoted_checkout_fixture/scripts/check-release-artifacts.sh"
+for asset in "claudex-$version.tar.gz" "claudex-$version-windows.zip" SHA256SUMS; do
+  cmp "$root/dist/$asset" "$quoted_checkout_fixture/dist/$asset"
+done
+
+# Git's clean/dirty comparison normalizes text according to .gitattributes, so
+# a clean checkout can expose host-specific or mixed newlines. Every release
+# text file must become canonical LF, with CRLF reserved for Windows .cmd files.
+eol_fixture="$temporary/eol-fixture"
+make_fixture "$eol_fixture"
+node - "$eol_fixture/claudex.cmd" "$eol_fixture/claudex-package.cmd" \
+  "$eol_fixture/README.md" "$eol_fixture/package.json" <<'NODE'
+const fs = require('fs');
+const [lfPath, mixedPath, crlfTextPath, mixedTextPath] = process.argv.slice(2);
+const lf = fs.readFileSync(lfPath, 'utf8').replace(/\r\n|\r|\n/g, '\n');
+fs.writeFileSync(lfPath, lf);
+let line = 0;
+fs.writeFileSync(mixedPath, fs.readFileSync(mixedPath, 'utf8').replace(/\r\n|\r|\n/g, () => (++line % 2 ? '\r' : '\r\n')));
+fs.writeFileSync(crlfTextPath, fs.readFileSync(crlfTextPath, 'utf8').replace(/\r\n|\r|\n/g, '\r\n'));
+line = 0;
+fs.writeFileSync(mixedTextPath, fs.readFileSync(mixedTextPath, 'utf8').replace(/\r\n|\r|\n/g, () => (++line % 2 ? '\r' : '\r\n')));
+NODE
+TZ=Australia/Eucla "$eol_fixture/scripts/build-release.sh" "$version" >/dev/null
+for asset in "claudex-$version.tar.gz" "claudex-$version-windows.zip" SHA256SUMS; do
+  cmp "$root/dist/$asset" "$eol_fixture/dist/$asset"
+done
+for text_file in README.md package.json; do
+  node - "$eol_fixture/dist/claudex-$version/$text_file" <<'NODE'
+const fs = require('fs');
+const file = process.argv[2];
+const text = fs.readFileSync(file, 'utf8');
+if (/\r/.test(text)) throw new Error(`${file} contains a non-LF newline`);
+NODE
+done
+for command_file in claudex.cmd claudex-package.cmd; do
+  node - "$eol_fixture/dist/claudex-$version/$command_file" <<'NODE'
+const fs = require('fs');
+const file = process.argv[2];
+const text = fs.readFileSync(file, 'utf8');
+if (/(^|[^\r])\n|\r(?!\n)/.test(text)) throw new Error(`${file} contains a non-CRLF newline`);
+NODE
+done
+
+# Archive construction must not fall back to platform zip/gzip or tar-create
+# implementations. Verification still uses the host tar reader so the emitted
+# USTAR remains independently consumable.
+canonical_fixture="$temporary/canonical-writer-fixture"
+canonical_bin="$temporary/canonical-writer-bin"
+make_fixture "$canonical_fixture"
+mkdir -p "$canonical_bin"
+cat > "$canonical_bin/zip" <<'EOF'
+#!/usr/bin/env bash
+exit 97
+EOF
+cat > "$canonical_bin/gzip" <<'EOF'
+#!/usr/bin/env bash
+exit 98
+EOF
+cat > "$canonical_bin/tar" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *' -c'*|*' --create '*) exit 99 ;;
+esac
+exec "$CLAUDEX_TEST_REAL_TAR" "$@"
+EOF
+chmod +x "$canonical_bin/zip" "$canonical_bin/gzip" "$canonical_bin/tar"
+CLAUDEX_TEST_REAL_TAR="$(command -v tar)" PATH="$canonical_bin:$PATH" \
+  TZ=Etc/GMT+12 "$canonical_fixture/scripts/build-release.sh" "$version" >/dev/null
+for asset in "claudex-$version.tar.gz" "claudex-$version-windows.zip" SHA256SUMS; do
+  cmp "$root/dist/$asset" "$canonical_fixture/dist/$asset"
+done
+node - "$root/dist/claudex-$version.tar.gz" "$root/dist/claudex-$version-windows.zip" <<'NODE'
+const fs = require('fs');
+const [gzipPath, zipPath] = process.argv.slice(2);
+const gzip = fs.readFileSync(gzipPath);
+const zip = fs.readFileSync(zipPath);
+if (gzip.subarray(0, 10).toString('hex') !== '1f8b08000000000000ff') {
+  throw new Error('release gzip header is not canonical');
+}
+if (zip.readUInt32LE(0) !== 0x04034b50 || zip.readUInt16LE(8) !== 0) {
+  throw new Error('release ZIP does not use canonical stored entries');
+}
+NODE
+
+# Native Windows filesystems do not expose meaningful POSIX executable bits.
+# Re-archive a fully non-executable stage and require the release-path contract
+# to reproduce both assets and their executable metadata exactly.
+mode_stage="$canonical_fixture/dist/claudex-$version"
+find "$mode_stage" -type f -exec chmod 644 {} +
+node "$canonical_fixture/scripts/create-release-archives.mjs" "$mode_stage" \
+  "$temporary/mode-normalized.tar.gz" "$temporary/mode-normalized-windows.zip"
+cmp "$root/dist/claudex-$version.tar.gz" "$temporary/mode-normalized.tar.gz"
+cmp "$root/dist/claudex-$version-windows.zip" "$temporary/mode-normalized-windows.zip"
+executable_release_files=(
+  bootstrap.sh claudex codex-session install.sh install.zsh self-update statusline usage-limit bin/claudex-package.mjs
+)
+for executable in "${executable_release_files[@]}"; do
+  tar_mode=$(tar -tvzf "$temporary/mode-normalized.tar.gz" "claudex-$version/$executable" | awk '{print $1}')
+  [[ "$tar_mode" == -rwxr-xr-x ]]
+  zip_mode=$(unzip -Z -l "$temporary/mode-normalized-windows.zip" "claudex-$version/$executable" | awk 'NR == 1 {print $1}')
+  [[ "$zip_mode" == -rwxr-xr-x ]]
+done
 
 assert_symlink_rejected() {
   fixture_root=$1

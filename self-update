@@ -91,25 +91,300 @@ write_state() {
   mv -f "$temporary" "$state_file"
 }
 
-release_lock() {
-  if [[ -r "$lock_dir/owner" ]]; then
-    local owner
-    read -r owner < "$lock_dir/owner" || owner=0
-    [[ "$owner" == "$$" ]] && rm -rf "$lock_dir"
+current_shell_pid() {
+  local destination="$1"
+  sh -c 'printf "%s\n" "$PPID" > "$1"' claudex-update-pid "$destination"
+}
+
+process_identity() {
+  local pid="$1" identity="" stat_line=""
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_PROCESS_IDENTITY:-}" ]]; then
+    printf '%s\n' "$CLAUDEX_TEST_PROCESS_IDENTITY"
+    return 0
   fi
+  if [[ -r "/proc/$pid/stat" ]]; then
+    IFS= read -r stat_line < "/proc/$pid/stat" || stat_line=""
+    stat_line="${stat_line##*) }"
+    if [[ -n "$stat_line" ]]; then
+      set -- $stat_line
+      if (( $# >= 20 )) && [[ "${20}" =~ ^[0-9]+$ ]]; then
+        printf 'proc:%s\n' "${20}"
+        return 0
+      fi
+    fi
+  fi
+  identity=$(ps -p "$pid" -o lstart= 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]][[:space:]]*/ /g' || true)
+  [[ -n "$identity" ]] || return 1
+  printf '%s\n' "$identity"
+}
+
+lock_age_seconds() {
+  local path="$1" mtime=0 now
+  if stat -f '%m' "$path" >/dev/null 2>&1; then mtime=$(stat -f '%m' "$path")
+  else mtime=$(stat -c '%Y' "$path" 2>/dev/null || printf 0); fi
+  now=$(date +%s)
+  if [[ "$mtime" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]]; then printf '%s\n' "$(( now - mtime ))"
+  else printf '%s\n' 0; fi
+}
+
+lock_directory_identity() {
+  local path="$1" identity=""
+  if stat -f '%d:%i' "$path" >/dev/null 2>&1; then identity=$(stat -f '%d:%i' "$path")
+  else identity=$(stat -c '%d:%i' "$path" 2>/dev/null || true); fi
+  [[ -n "$identity" ]] || return 1
+  printf '%s\n' "$identity"
+}
+
+read_lock_field() {
+  local owner_file="$1" field="$2"
+  awk -F= -v field="$field" '$1 == field { sub(/^[^=]*=/, ""); print; exit }' "$owner_file" 2>/dev/null
+}
+
+lock_owner_is_current() {
+  local owner_file="$1" pid identity current
+  pid=$(read_lock_field "$owner_file" pid)
+  identity=$(read_lock_field "$owner_file" identity)
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ -n "$identity" ]] || return 0
+  current=$(process_identity "$pid" || true)
+  [[ -z "$current" || "$current" == "$identity" ]]
+}
+
+legacy_lock_owner_is_current() {
+  local directory="$1" pid=""
+  [[ -r "$directory/owner" ]] || return 1
+  [[ -z "$(read_lock_field "$directory/owner" nonce)" ]] || return 1
+  IFS= read -r pid < "$directory/owner" || pid=""
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+legacy_lock_owner_is_valid() {
+  local directory="$1" pid=""
+  [[ -r "$directory/owner" ]] || return 1
+  [[ -z "$(read_lock_field "$directory/owner" nonce)" ]] || return 1
+  IFS= read -r pid < "$directory/owner" || pid=""
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 ]]
+}
+
+lock_test_pause() {
+  local stage="$1" ready_variable continue_variable ready_file continue_file
+  [[ "${CLAUDEX_TEST_MODE:-0}" == 1 ]] || return 0
+  ready_variable="CLAUDEX_TEST_UPDATE_LOCK_${stage}_READY"
+  continue_variable="CLAUDEX_TEST_UPDATE_LOCK_${stage}_CONTINUE"
+  ready_file="${!ready_variable:-}"
+  continue_file="${!continue_variable:-}"
+  [[ -n "$ready_file" && -n "$continue_file" ]] || return 0
+  : > "$ready_file"
+  while [[ ! -e "$continue_file" ]]; do sleep 0.02; done
+}
+
+read_generation_nonce() {
+  local nonce=""
+  [[ -r "$1/generation" ]] || return 0
+  IFS= read -r nonce < "$1/generation" || nonce=""
+  printf '%s\n' "$nonce"
+}
+
+lock_barrier_exists() {
+  local barrier
+  for barrier in "$1".quarantine.*; do [[ -e "$barrier" ]] && return 0; done
+  return 1
+}
+
+remove_lock_directory_files() {
+  rm -f "$1/owner" "$1/generation" 2>/dev/null || true
+  rmdir "$1" 2>/dev/null || true
+}
+
+publish_lock_file() {
+  local source="$1" destination="$2"
+  [[ "${CLAUDEX_TEST_MODE:-0}" != 1 || "${CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE:-0}" != 1 ]] || return 1
+  if [[ "${CLAUDEX_TEST_MODE:-0}" != 1 || "${CLAUDEX_TEST_FORCE_HARDLINK_FAILURE:-0}" != 1 ]]; then
+    ln "$source" "$destination" 2>/dev/null && return 0
+  fi
+  (
+    set -C
+    umask 077
+    exec 9> "$destination" || exit 1
+    cat "$source" >&9
+  ) 2>/dev/null
+}
+
+restore_lock_barrier() {
+  local barrier="$1" attempt
+  for attempt in {1..250}; do
+    if [[ ! -e "$lock_dir" ]] && mv "$barrier" "$lock_dir" 2>/dev/null; then return 0; fi
+    sleep 0.02
+  done
+  return 1
+}
+
+remove_incomplete_lock_directory() {
+  local quarantine moved_generation moved_owner_nonce
+  [[ -d "$lock_dir" ]] || return 0
+  quarantine="$lock_dir.quarantine.incomplete.$$.$RANDOM"
+  mv "$lock_dir" "$quarantine" 2>/dev/null || return 1
+  moved_generation=$(read_generation_nonce "$quarantine")
+  moved_owner_nonce=$(read_lock_field "$quarantine/owner" nonce)
+  if [[ -n "$moved_generation" || -n "$moved_owner_nonce" ]] || legacy_lock_owner_is_valid "$quarantine"; then
+    restore_lock_barrier "$quarantine" || true
+    return 1
+  fi
+  remove_lock_directory_files "$quarantine"
+  [[ ! -e "$quarantine" ]]
+}
+
+recover_lock_barriers() {
+  local barrier age owner_nonce generation_nonce
+  for barrier in "$lock_dir".quarantine.*; do
+    [[ -d "$barrier" ]] || continue
+    owner_nonce=$(read_lock_field "$barrier/owner" nonce)
+    generation_nonce=$(read_generation_nonce "$barrier")
+    age=$(lock_age_seconds "$barrier")
+    if legacy_lock_owner_is_current "$barrier"; then
+      # A crashed new creator may leave its generation in a live lock owned by
+      # the prior plain-PID format. The quarantine protects this exact cleanup.
+      [[ -z "$generation_nonce" ]] || rm -f "$barrier/generation" 2>/dev/null || true
+      if [[ ! -e "$lock_dir" ]]; then mv "$barrier" "$lock_dir" 2>/dev/null || true; fi
+    elif [[ -n "$owner_nonce" ]] && lock_owner_is_current "$barrier/owner"; then
+      if [[ ! -e "$lock_dir" ]]; then mv "$barrier" "$lock_dir" 2>/dev/null || true; fi
+    elif [[ -n "$owner_nonce" && "$age" -ge 2 ]]; then remove_lock_directory_files "$barrier"
+    elif [[ -n "$generation_nonce" && "$age" -ge 2 ]]; then remove_lock_directory_files "$barrier"
+    elif [[ -z "$generation_nonce" && "$age" -ge 300 ]] && ! legacy_lock_owner_is_current "$barrier"; then remove_lock_directory_files "$barrier"
+    fi
+  done
+}
+
+remove_owned_lock_generation() {
+  local expected_nonce="$1" current_nonce quarantine moved_generation moved_owner_nonce
+  current_nonce=$(read_generation_nonce "$lock_dir")
+  [[ -n "$current_nonce" ]] || current_nonce=$(read_lock_field "$lock_dir/owner" nonce)
+  [[ -n "$expected_nonce" && "$current_nonce" == "$expected_nonce" ]] || return 1
+  quarantine="$lock_dir.quarantine.$$.$RANDOM"
+  lock_test_pause BEFORE_RENAME
+  mv "$lock_dir" "$quarantine" 2>/dev/null || return 1
+  lock_test_pause AFTER_RENAME
+  [[ -d "$quarantine" ]] || return 1
+  moved_generation=$(read_generation_nonce "$quarantine")
+  moved_owner_nonce=$(read_lock_field "$quarantine/owner" nonce)
+  if [[ "$moved_generation" == "$expected_nonce" ]] && legacy_lock_owner_is_valid "$quarantine"; then
+    # A creator paused after mkdir can resume inside a replacement lock from a
+    # prior release. Remove only the generation file A injected and restore B.
+    rm -f "$quarantine/generation" 2>/dev/null || true
+    restore_lock_barrier "$quarantine" || true
+    return 1
+  fi
+  if [[ "$moved_generation" == "$expected_nonce" ]] \
+      && { [[ -z "$moved_owner_nonce" ]] || [[ "$moved_owner_nonce" == "$expected_nonce" ]]; }; then
+    remove_lock_directory_files "$quarantine"
+    return 0
+  fi
+  restore_lock_barrier "$quarantine" || true
+  return 1
+}
+
+recover_owned_lock_generation() {
+  local expected_nonce="$1" barrier moved_nonce current_nonce
+  for barrier in "$lock_dir".quarantine.*; do
+    [[ -d "$barrier" ]] || continue
+    moved_nonce=$(read_generation_nonce "$barrier")
+    [[ -n "$moved_nonce" ]] || moved_nonce=$(read_lock_field "$barrier/owner" nonce)
+    [[ "$moved_nonce" == "$expected_nonce" ]] || continue
+    if [[ ! -e "$lock_dir" ]]; then mv "$barrier" "$lock_dir" 2>/dev/null || true; fi
+  done
+  current_nonce=$(read_generation_nonce "$lock_dir")
+  [[ -n "$current_nonce" ]] || current_nonce=$(read_lock_field "$lock_dir/owner" nonce)
+  if [[ "$current_nonce" == "$expected_nonce" ]] && ! lock_barrier_exists "$lock_dir"; then
+    [[ "${CLAUDEX_TEST_MODE:-0}" != 1 || -z "${CLAUDEX_TEST_UPDATE_LOCK_SELF_RECOVERED_FILE:-}" ]] || : > "$CLAUDEX_TEST_UPDATE_LOCK_SELF_RECOVERED_FILE"
+    return 0
+  fi
+  if [[ "$current_nonce" == "$expected_nonce" ]]; then remove_owned_lock_generation "$expected_nonce" || true; fi
+  for barrier in "$lock_dir".quarantine.*; do
+    [[ -d "$barrier" ]] || continue
+    moved_nonce=$(read_generation_nonce "$barrier")
+    [[ -n "$moved_nonce" ]] || moved_nonce=$(read_lock_field "$barrier/owner" nonce)
+    [[ "$moved_nonce" == "$expected_nonce" ]] && remove_lock_directory_files "$barrier"
+  done
+  return 1
+}
+
+lock_nonce=""
+release_lock() {
+  local nonce="$lock_nonce"
+  [[ -n "$nonce" ]] || return 0
+  remove_owned_lock_generation "$nonce" || true
+  lock_nonce=""
 }
 
 acquire_lock() {
-  local owner=0 age=0 now
-  now=$(date +%s)
-  if mkdir "$lock_dir" 2>/dev/null; then printf '%s\n' "$$" > "$lock_dir/owner"; trap release_lock EXIT; return 0; fi
-  if [[ -r "$lock_dir/owner" ]]; then read -r owner < "$lock_dir/owner" || owner=0; fi
-  if stat -f '%m' "$lock_dir" >/dev/null 2>&1; then age=$(( now - $(stat -f '%m' "$lock_dir") ))
-  else age=$(( now - $(stat -c '%Y' "$lock_dir" 2>/dev/null || printf '%s' "$now") )); fi
-  if { [[ ! "$owner" =~ ^[0-9]+$ ]] || ! kill -0 "$owner" 2>/dev/null; } && (( age >= 300 )); then
-    local stale="$update_dir/lock.stale.$$.$now"
-    if mv "$lock_dir" "$stale" 2>/dev/null; then rm -rf "$stale"; mkdir "$lock_dir"; printf '%s\n' "$$" > "$lock_dir/owner"; trap release_lock EXIT; return 0; fi
+  local attempt attempt_limit=100 owner_file="$lock_dir/owner" age observed_nonce pid_file owner_pid owner_identity
+  local generation_nonce generation_tmp owner_tmp quarantine created_identity current_identity
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && "${CLAUDEX_TEST_UPDATE_LOCK_ATTEMPTS:-}" =~ ^[1-9][0-9]*$ ]] \
+      && (( CLAUDEX_TEST_UPDATE_LOCK_ATTEMPTS <= 100 )); then
+    attempt_limit="$CLAUDEX_TEST_UPDATE_LOCK_ATTEMPTS"
   fi
+  lock_nonce=""
+  mkdir -p "$update_dir"
+  for (( attempt=0; attempt<attempt_limit; attempt++ )); do
+    recover_lock_barriers
+    if lock_barrier_exists "$lock_dir"; then sleep 0.02; continue; fi
+    pid_file=$(mktemp "$update_dir/.lock-owner-pid.XXXXXX")
+    current_shell_pid "$pid_file"; read -r owner_pid < "$pid_file"; rm -f "$pid_file"
+    owner_identity=$(process_identity "$owner_pid" || true)
+    generation_nonce="${owner_pid}.$(date +%s).${RANDOM}.${RANDOM}"
+    generation_tmp=$(mktemp "$update_dir/.lock-generation.XXXXXX")
+    owner_tmp=$(mktemp "$update_dir/.lock-owner.XXXXXX")
+    printf '%s\n' "$generation_nonce" > "$generation_tmp"
+    # The numeric first line keeps this live owner visible to pre-generation
+    # Claudex releases while keyed fields protect current generation ownership.
+    printf '%s\npid=%s\nidentity=%s\nnonce=%s\n' "$owner_pid" "$owner_pid" "$owner_identity" "$generation_nonce" > "$owner_tmp"
+    chmod 600 "$generation_tmp" "$owner_tmp" 2>/dev/null || true
+    if mkdir "$lock_dir" 2>/dev/null; then
+      created_identity=$(lock_directory_identity "$lock_dir" || true)
+      lock_test_pause AFTER_MKDIR
+      current_identity=$(lock_directory_identity "$lock_dir" || true)
+      if [[ -n "$created_identity" && "$current_identity" == "$created_identity" ]] \
+          && publish_lock_file "$generation_tmp" "$lock_dir/generation" \
+          && [[ "$(lock_directory_identity "$lock_dir" || true)" == "$created_identity" ]] \
+          && [[ "$(read_generation_nonce "$lock_dir")" == "$generation_nonce" ]] \
+          && publish_lock_file "$owner_tmp" "$owner_file" \
+          && [[ "$(lock_directory_identity "$lock_dir" || true)" == "$created_identity" ]] \
+          && [[ "$(read_lock_field "$owner_file" nonce)" == "$generation_nonce" ]] \
+          && ! lock_barrier_exists "$lock_dir"; then
+        rm -f "$generation_tmp" "$owner_tmp"
+        lock_nonce="$generation_nonce"
+        lock_test_pause AFTER_PUBLISH
+        if [[ "$(lock_directory_identity "$lock_dir" || true)" != "$created_identity" ]] \
+            || [[ "$(read_generation_nonce "$lock_dir")" != "$generation_nonce" ]] || lock_barrier_exists "$lock_dir"; then
+          if recover_owned_lock_generation "$generation_nonce"; then trap release_lock EXIT; return 0; fi
+          lock_nonce=""; sleep 0.02; continue
+        fi
+        trap release_lock EXIT
+        return 0
+      fi
+      rm -f "$generation_tmp" "$owner_tmp"
+      if [[ -n "$created_identity" && "$(lock_directory_identity "$lock_dir" || true)" == "$created_identity" ]]; then
+        remove_owned_lock_generation "$generation_nonce" || remove_incomplete_lock_directory || true
+      fi
+      sleep 0.02; continue
+    fi
+    rm -f "$generation_tmp" "$owner_tmp"
+    age=$(lock_age_seconds "$lock_dir")
+    observed_nonce=$(read_lock_field "$owner_file" nonce)
+    if [[ -n "$observed_nonce" ]]; then
+      if ! lock_owner_is_current "$owner_file" && (( age >= 2 )); then remove_owned_lock_generation "$observed_nonce" || true; fi
+    elif [[ -n "$(read_generation_nonce "$lock_dir")" ]] && (( age >= 2 )); then
+      remove_owned_lock_generation "$(read_generation_nonce "$lock_dir")" || true
+    elif (( age >= 300 )) && ! legacy_lock_owner_is_current "$lock_dir"; then
+      quarantine="$lock_dir.quarantine.legacy.$$.$RANDOM"
+      if mv "$lock_dir" "$quarantine" 2>/dev/null; then
+        if [[ -n "$(read_generation_nonce "$quarantine")" || -n "$(read_lock_field "$quarantine/owner" nonce)" ]]; then restore_lock_barrier "$quarantine" || true
+        else remove_lock_directory_files "$quarantine"; fi
+      fi
+    fi
+    sleep 0.02
+  done
   return 1
 }
 

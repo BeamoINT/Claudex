@@ -5,6 +5,54 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.5.9] - 2026-07-16
+
+### Added
+
+- Kept authentication and proxy recovery watchers active for detached Claude
+  Code background agents until the managed agent registry becomes empty.
+- Added deterministic release archive generation with canonical gzip, tar, ZIP,
+  line ending, permission, ordering, and timestamp metadata on every host.
+- Added adversarial cross platform coverage for signals, process groups,
+  concurrent state writers, prior release lock formats, private environments,
+  installer rollback journals, and extracted release installations.
+
+### Changed
+
+- Made worktree skill discovery global only while retaining personal, managed,
+  system, and installed plugin skills without importing the source repository.
+- Improved Claude and Codex skill adaptation for nested commands, manifest
+  discovery, policy precedence, TOML arrays and inline tables, quoted model
+  metadata, collision aliases, and policy bound fallback generations.
+- Made packaged launchers preserve interactive terminal job control while
+  isolating noninteractive descendants and forwarding terminal signals.
+
+### Fixed
+
+- Prevented ABA races, PID reuse errors, stale owner theft, incomplete
+  publication loss, and mixed release corruption in proxy startup, automatic
+  updates, self updates, Codex session synchronization, usage refreshes, and
+  other private state writers on Unix and Windows.
+- Preserved Codex file credential lifecycle behavior, fractional refresh time
+  ordering, exact account projection, and destructive session serialization
+  without changing native Codex commands.
+- Preserved native Claude provider, hosted, Chrome, remote control, debug,
+  positional prompt, delimiter, model, and global flag semantics while keeping
+  managed provider state isolated.
+- Prevented update and status refresh helpers, plus unrelated Windows child
+  processes, from inheriting proxy credentials, provider routing, or managed
+  session secrets.
+- Hardened terminal status text against OSC, CSI, C1, bidi, and semantic label
+  injection while preserving benign Unicode and Claudex owned styling.
+- Made source installers fail closed from deleted working directories, protect
+  private directories and ACLs, canonicalize relative roots, sanitize journals,
+  and roll back paths containing newlines or tabs safely.
+- Made package bootstrap wrappers propagate normal and signal exits, resize and
+  job control events, and descendant cleanup without orphaning processes.
+- Fixed deterministic release checks for quoted checkout paths, CRLF source
+  trees, Windows execute bits, source links, unsupported files, and untracked
+  release directory contents.
+
 ## [1.5.8] - 2026-07-16
 
 ### Fixed
@@ -402,7 +450,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first party profile support.
 - Cross platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.5.8...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.5.9...HEAD
+[1.5.9]: https://github.com/BeamoINT/Claudex/compare/v1.5.8...v1.5.9
 [1.5.8]: https://github.com/BeamoINT/Claudex/compare/v1.5.7...v1.5.8
 [1.5.7]: https://github.com/BeamoINT/Claudex/compare/v1.5.6...v1.5.7
 [1.5.6]: https://github.com/BeamoINT/Claudex/compare/v1.5.5...v1.5.6

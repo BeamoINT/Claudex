@@ -153,12 +153,10 @@ default.
 - Plugin, MCP, IDE, worktree, Git, hook, and cloud behavior can depend on
   project configuration and external services. Claudex preserves the documented
   Claude interfaces; it cannot make an unavailable external service succeed.
-- `--bg` is forwarded and Claude Code detaches the agent, but Claudex's
-  authentication and proxy recovery watchers are scoped to the foreground
-  launcher session. A long running detached GPT backed agent is therefore not
-  guaranteed to follow later account switches or recover a later proxy outage;
-  native harness routes remain authoritative for harness specific background
-  lifecycle behavior.
+- `--bg` is forwarded and Claude Code detaches the agent. Claudex detaches its
+  authentication and proxy recovery watchers as well, verifies the launcher's
+  process identity, and keeps both watchers active while the managed
+  `claude agents --json` registry contains any live session.
 - Codex intentionally does not export access tokens through `account/read`.
   When Codex uses an OS keyring and no standard `auth.json` is present,
   `claudex --login` asks Codex itself to create a file backed local session.

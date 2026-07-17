@@ -25,7 +25,7 @@ fi
 
 claudex_is_maintenance_command() {
   case "$1" in
-    --help|-h|--version|-v|agents|attach|auth|auto-mode|doctor|gateway|install|kill|logs|mcp|plugin|plugins|project|respawn|rm|self-update|setup-token|skills|stop|ultrareview|update|upgrade) return 0 ;;
+    --help|-h|--version|-v|agents|attach|auth|auto-mode|doctor|gateway|install|kill|logs|mcp|plugin|plugins|project|remote-control|respawn|rm|self-update|setup-token|skills|stop|ultrareview|update|upgrade) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -61,8 +61,9 @@ classify_claude_argv() {
   parsed_no_session_persistence=0
   parsed_safe_mode=0
   parsed_background=0
+  parsed_worktree=0
 
-  local argv=("$@") index=0 count=$# token tool_values
+  local argv=("$@") index=0 count=$# token tool_values positional_seen=0
   while (( index < count )); do
     token="${argv[$index]}"
     [[ "$token" != -- ]] || return 0
@@ -128,13 +129,24 @@ classify_claude_argv() {
         index=$((index + 1)); continue
         ;;
       --remote-control|--rc|-r|--resume|--from-pr|--prompt-suggestions|-w|--worktree)
-        case "$token" in --remote-control|--rc) claude_first_party_route=1 ;; esac
+        case "$token" in
+          --remote-control|--rc) claude_first_party_route=1 ;;
+          -w|--worktree) parsed_worktree=1 ;;
+        esac
+        index=$((index + 1))
+        if (( index < count )) && [[ "${argv[$index]}" != -* ]]; then index=$((index + 1)); fi
+        continue
+        ;;
+      --debug|-d)
         index=$((index + 1))
         if (( index < count )) && [[ "${argv[$index]}" != -* ]]; then index=$((index + 1)); fi
         continue
         ;;
       --remote-control=*|--rc=*)
         claude_first_party_route=1; index=$((index + 1)); continue ;;
+      --debug=*|-d=*|-d?*|--from-pr=*|--prompt-suggestions=*|--resume=*|-r=*|-r?*|--worktree=*|-w=*|-w?*)
+        case "$token" in --worktree=*|-w=*|-w?*) parsed_worktree=1 ;; esac
+        index=$((index + 1)); continue ;;
       --safe-mode|--bare)
         parsed_safe_mode=1; index=$((index + 1)); continue ;;
       --no-session-persistence)
@@ -147,11 +159,13 @@ classify_claude_argv() {
       --tmux=*) index=$((index + 1)); continue ;;
       -*) return 0 ;;
       *)
-        if claudex_is_maintenance_command "$token"; then
+        if (( ! positional_seen )) && claudex_is_maintenance_command "$token"; then
           claude_maintenance_command="$token"
-          [[ "$token" != ultrareview ]] || claude_first_party_route=1
+          case "$token" in remote-control|ultrareview) claude_first_party_route=1 ;; esac
+          return 0
         fi
-        return 0
+        positional_seen=1
+        index=$((index + 1)); continue
         ;;
     esac
   done
@@ -185,11 +199,28 @@ scrub_managed_session_environment() {
 }
 
 scrub_third_party_claude_routing() {
-  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
-  unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY
-  unset ANTHROPIC_BEDROCK_BASE_URL ANTHROPIC_VERTEX_BASE_URL ANTHROPIC_FOUNDRY_BASE_URL
+  scrub_competing_provider_routing
+  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDEX_CHATGPT_PLAN_LABEL CLAUDEX_MANAGED_SESSION
+  unset CLAUDEX_PROXY_URL CLAUDEX_PROXY_CONFIG CLAUDEX_PROXY_BIN CLAUDEX_CODEX_AUTH_DIR CLAUDEX_CODEX_AUTH_FILE CLAUDEX_CODEX_SOURCE_AUTH_FILE
   unset ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_FABLE_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL
   unset ANTHROPIC_DEFAULT_OPUS_MODEL_NAME ANTHROPIC_DEFAULT_FABLE_MODEL_NAME ANTHROPIC_DEFAULT_SONNET_MODEL_NAME ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES
+  unset ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES
+  unset CLAUDE_CODE_AUTO_MODE_MODEL CLAUDE_CODE_BG_CLASSIFIER_MODEL CLAUDE_CODE_ALWAYS_ENABLE_EFFORT CLAUDE_CODE_SUBAGENT_MODEL
+  unset CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY CLAUDE_CODE_MAX_RETRIES CLAUDE_CODE_MAX_CONTEXT_TOKENS CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  unset CLAUDE_CODE_DISABLE_1M_CONTEXT CLAUDEX_NO_SESSION_PERSISTENCE
+  unset CLAUDEX_MODEL_MODE CLAUDEX_SESSION_MODE CLAUDEX_INTERACTIVE_TUI CLAUDE_CODE_EFFORT_LEVEL CLAUDE_CODE_NO_FLICKER CLAUDE_CODE_ACCESSIBILITY
+  strip_managed_bun_preload
+}
+
+scrub_competing_provider_routing() {
+  unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY
+  unset ANTHROPIC_BEDROCK_BASE_URL ANTHROPIC_BEDROCK_MANTLE_BASE_URL ANTHROPIC_VERTEX_BASE_URL ANTHROPIC_VERTEX_PROJECT_ID
+  unset ANTHROPIC_FOUNDRY_BASE_URL ANTHROPIC_FOUNDRY_RESOURCE ANTHROPIC_FOUNDRY_API_KEY
+  unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_CUSTOM_HEADERS
+  unset ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION
+  unset ANTHROPIC_CUSTOM_MODEL_OPTION ANTHROPIC_CUSTOM_MODEL_OPTION_NAME ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION
 }
 
 exec_native_codex() {
@@ -520,27 +551,551 @@ if [[ "${1:-}" == skills ]]; then
   exec node "$skill_bridge_helper" list --project "$PWD"
 fi
 
-acquire_state_lock() {
-  local lock_dir="$1" attempt mtime=0 now
-  mkdir -p "$(dirname "$lock_dir")"
-  for attempt in {1..100}; do
-    if mkdir "$lock_dir" 2>/dev/null; then return 0; fi
-    if stat -f '%m' "$lock_dir" >/dev/null 2>&1; then
-      mtime=$(stat -f '%m' "$lock_dir")
-    else
-      mtime=$(stat -c '%Y' "$lock_dir" 2>/dev/null || printf 0)
+current_shell_pid() {
+  local destination="$1"
+  # Bash 3.2 does not expose BASHPID. A short-lived child reports the real PID
+  # of whichever launcher or detached worker directly spawned it.
+  sh -c 'printf "%s\n" "$PPID" > "$1"' claudex-pid "$destination"
+}
+
+process_identity() {
+  local pid="$1" identity="" stat_line=""
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_PROCESS_IDENTITY:-}" ]]; then
+    printf '%s\n' "$CLAUDEX_TEST_PROCESS_IDENTITY"
+    return 0
+  fi
+  # Linux exposes a boot-relative process start tick even when ps is missing or
+  # denied by a sandbox. Strip the parenthesized command from /proc/PID/stat;
+  # starttime is field 20 of the remaining sequence (field 22 overall).
+  if [[ -r "/proc/$pid/stat" ]]; then
+    IFS= read -r stat_line < "/proc/$pid/stat" || stat_line=""
+    stat_line="${stat_line##*) }"
+    if [[ -n "$stat_line" ]]; then
+      set -- $stat_line
+      if (( $# >= 20 )) && [[ "${20}" =~ ^[0-9]+$ ]]; then
+        printf 'proc:%s\n' "${20}"
+        return 0
+      fi
     fi
-    now=$(date +%s)
-    if [[ "$mtime" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]] && (( now - mtime >= 60 )); then
-      rmdir "$lock_dir" 2>/dev/null || true
+  fi
+  identity=$(ps -p "$pid" -o lstart= 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]][[:space:]]*/ /g' || true)
+  if [[ -n "$identity" ]]; then
+    printf '%s\n' "$identity"
+    return 0
+  fi
+  return 1
+}
+
+lock_age_seconds() {
+  local path="$1" mtime=0 now
+  if stat -f '%m' "$path" >/dev/null 2>&1; then
+    mtime=$(stat -f '%m' "$path")
+  else
+    mtime=$(stat -c '%Y' "$path" 2>/dev/null || printf 0)
+  fi
+  now=$(date +%s)
+  if [[ "$mtime" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$(( now - mtime ))"
+  else
+    printf '%s\n' 0
+  fi
+}
+
+read_lock_field() {
+  local owner_file="$1" field="$2"
+  awk -F= -v field="$field" '$1 == field { sub(/^[^=]*=/, ""); print; exit }' "$owner_file" 2>/dev/null
+}
+
+lock_owner_is_current() {
+  local owner_file="$1" pid identity current
+  pid=$(read_lock_field "$owner_file" pid)
+  identity=$(read_lock_field "$owner_file" identity)
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  # Identity lookup can be transiently denied. A live PID is fail-safe in that
+  # case; reclaim only when a start identity is available and mismatched.
+  [[ -n "$identity" ]] || return 0
+  current=$(process_identity "$pid" || true)
+  [[ -z "$current" || "$current" == "$identity" ]]
+}
+
+lock_barrier_exists() {
+  local barrier
+  for barrier in "$1".quarantine.*; do [[ -e "$barrier" ]] && return 0; done
+  return 1
+}
+
+lock_test_pause() {
+  local stage="$1" lock_dir="$2" ready_variable continue_variable ready_file continue_file
+  [[ "${CLAUDEX_TEST_MODE:-0}" == 1 ]] || return 0
+  [[ -z "${CLAUDEX_TEST_LOCK_MATCH:-}" || "$lock_dir" == *"$CLAUDEX_TEST_LOCK_MATCH"* ]] || return 0
+  ready_variable="CLAUDEX_TEST_LOCK_${stage}_READY"
+  continue_variable="CLAUDEX_TEST_LOCK_${stage}_CONTINUE"
+  ready_file="${!ready_variable:-}"
+  continue_file="${!continue_variable:-}"
+  [[ -n "$ready_file" && -n "$continue_file" ]] || return 0
+  : > "$ready_file"
+  while [[ ! -e "$continue_file" ]]; do sleep 0.02; done
+}
+
+read_generation_nonce() {
+  local generation_file="$1/generation" nonce=""
+  [[ -r "$generation_file" ]] || return 0
+  IFS= read -r nonce < "$generation_file" || nonce=""
+  printf '%s\n' "$nonce"
+}
+
+remove_lock_directory_files() {
+  local directory="$1"
+  rm -f "$directory/owner" "$directory/generation" 2>/dev/null || true
+  rmdir "$directory" 2>/dev/null || true
+}
+
+read_legacy_lock_pid() {
+  local directory="$1" file line pid
+  for file in "$directory/owner" "$directory/owner-pid"; do
+    [[ -r "$file" ]] || continue
+    IFS= read -r line < "$file" || line=""
+    pid="${line%%[[:space:]]*}"
+    [[ "$pid" =~ ^[0-9]+$ ]] && { printf '%s\n' "$pid"; return 0; }
+  done
+  return 1
+}
+
+lock_directory_has_legacy_owner() {
+  local directory="$1"
+  [[ -e "$directory/owner-pid" ]] && return 0
+  [[ -s "$directory/owner" && -z "$(read_lock_field "$directory/owner" nonce)" ]]
+}
+
+lock_directory_has_unknown_entries() {
+  local directory="$1" entry base
+  for entry in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+    [[ -e "$entry" ]] || continue
+    base="${entry##*/}"
+    [[ "$base" == owner || "$base" == owner-pid || "$base" == generation ]] || return 0
+  done
+  return 1
+}
+
+lock_directory_identity() {
+  local directory="$1" identity=""
+  [[ -d "$directory" ]] || return 1
+  identity=$(stat -c '%d:%i' -- "$directory" 2>/dev/null || true)
+  if [[ ! "$identity" =~ ^[0-9]+:[0-9]+$ ]]; then
+    identity=$(stat -f '%d:%i' "$directory" 2>/dev/null || true)
+  fi
+  [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  printf '%s\n' "$identity"
+}
+
+remove_legacy_lock_directory_files() {
+  local directory="$1"
+  rm -f "$directory/owner" "$directory/owner-pid" "$directory/generation" 2>/dev/null || true
+  rmdir "$directory" 2>/dev/null || true
+}
+
+publish_lock_file() {
+  local source="$1" destination="$2"
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && "${CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE:-0}" == 1 ]]; then
+    if [[ -z "${CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE_MATCH:-}" \
+        || "$destination" == *"$CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE_MATCH"* ]]; then
+      return 1
     fi
+  fi
+  if [[ "${CLAUDEX_TEST_MODE:-0}" != 1 || "${CLAUDEX_TEST_FORCE_HARDLINK_FAILURE:-0}" != 1 ]]; then
+    ln "$source" "$destination" 2>/dev/null && return 0
+  fi
+  # FileMode CreateNew/O_EXCL is the portable fallback for filesystems that do
+  # not implement hard links. Keep the descriptor open while copying so a
+  # concurrent directory rename cannot redirect the write into a new owner.
+  (
+    set -C
+    umask 077
+    exec 9> "$destination" || exit 1
+    cat "$source" >&9
+  ) 2>/dev/null
+}
+
+remove_incomplete_lock_directory() {
+  local lock_dir="$1" expected_nonce="${2:-}" preserve_directory="${3:-0}"
+  local quarantine moved_nonce owner_nonce legacy_pid legacy_owner_text=""
+  [[ -d "$lock_dir" ]] || return 0
+  quarantine="$lock_dir.quarantine.incomplete.$$.$RANDOM"
+  mv "$lock_dir" "$quarantine" 2>/dev/null || return 1
+  moved_nonce=$(read_generation_nonce "$quarantine")
+  owner_nonce=$(read_lock_field "$quarantine/owner" nonce)
+  [[ -n "$moved_nonce" ]] || moved_nonce="$owner_nonce"
+  legacy_pid=$(read_legacy_lock_pid "$quarantine" || true)
+  [[ ! -s "$quarantine/owner" ]] || legacy_owner_text=1
+  [[ ! -s "$quarantine/owner-pid" ]] || legacy_owner_text=1
+  if [[ "$preserve_directory" == 1 ]]; then
+    if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_LOCK_PRESERVE_FILE:-}" ]]; then
+      : > "$CLAUDEX_TEST_LOCK_PRESERVE_FILE"
+    fi
+    if [[ -n "$expected_nonce" && "$moved_nonce" == "$expected_nonce" ]]; then
+      rm -f "$quarantine/generation" 2>/dev/null || true
+    fi
+    if [[ -n "$expected_nonce" && "$owner_nonce" == "$expected_nonce" ]]; then
+      rm -f "$quarantine/owner" 2>/dev/null || true
+    fi
+    restore_lock_barrier "$lock_dir" "$quarantine" || true
+    return 1
+  fi
+  if lock_directory_has_legacy_owner "$quarantine" \
+      || lock_directory_has_unknown_entries "$quarantine"; then
+    if [[ -n "$expected_nonce" && "$moved_nonce" == "$expected_nonce" ]]; then
+      rm -f "$quarantine/generation" 2>/dev/null || true
+    fi
+    if [[ -n "$expected_nonce" && "$owner_nonce" == "$expected_nonce" ]]; then
+      rm -f "$quarantine/owner" 2>/dev/null || true
+    fi
+    restore_lock_barrier "$lock_dir" "$quarantine" || true
+    return 1
+  fi
+  if [[ -n "$owner_nonce" && -n "$expected_nonce" && "$owner_nonce" == "$expected_nonce" \
+      && "$moved_nonce" == "$expected_nonce" ]]; then
+    remove_lock_directory_files "$quarantine"
+    return 0
+  fi
+  if [[ -n "$moved_nonce" && "$moved_nonce" != "$expected_nonce" ]]; then
+    restore_lock_barrier "$lock_dir" "$quarantine" || true
+    return 1
+  fi
+  remove_lock_directory_files "$quarantine"
+  [[ ! -e "$quarantine" ]]
+}
+
+restore_lock_barrier() {
+  local lock_dir="$1" barrier="$2" attempt
+  for attempt in {1..250}; do
+    if [[ ! -e "$lock_dir" ]] && mv "$barrier" "$lock_dir" 2>/dev/null; then return 0; fi
     sleep 0.02
   done
   return 1
 }
 
+recover_lock_barriers() {
+  local lock_dir="$1" legacy_ownerless_seconds="$2" barrier age nonce legacy_pid legacy_owner_present
+  for barrier in "$lock_dir".quarantine.*; do
+    [[ -d "$barrier" ]] || continue
+    nonce=$(read_lock_field "$barrier/owner" nonce)
+    legacy_pid=$(read_legacy_lock_pid "$barrier" || true)
+    legacy_owner_present=0
+    lock_directory_has_legacy_owner "$barrier" && legacy_owner_present=1
+    age=$(lock_age_seconds "$barrier")
+    if (( legacy_owner_present )); then
+      # owner-pid is the prior-format source of truth. A structured owner and
+      # generation beside it can only be an interrupted new creator, so remove
+      # that injection before using the legacy PID's liveness and grace rules.
+      rm -f "$barrier/generation" 2>/dev/null || true
+      [[ -z "$nonce" ]] || rm -f "$barrier/owner" 2>/dev/null || true
+      legacy_pid=$(read_legacy_lock_pid "$barrier" || true)
+      if [[ -n "$legacy_pid" ]] && kill -0 "$legacy_pid" 2>/dev/null; then
+        if [[ ! -e "$lock_dir" ]]; then mv "$barrier" "$lock_dir" 2>/dev/null || true; fi
+      elif [[ -n "$legacy_pid" ]] && (( age >= legacy_ownerless_seconds )); then
+        remove_legacy_lock_directory_files "$barrier"
+      else
+        if [[ ! -e "$lock_dir" ]]; then mv "$barrier" "$lock_dir" 2>/dev/null || true; fi
+      fi
+    elif [[ -n "$nonce" ]] && lock_owner_is_current "$barrier/owner"; then
+      if [[ ! -e "$lock_dir" ]]; then mv "$barrier" "$lock_dir" 2>/dev/null || true; fi
+    elif [[ -n "$nonce" && "$age" -ge 2 ]]; then
+      remove_lock_directory_files "$barrier"
+    elif [[ -n "$legacy_pid" && "$age" -ge "$legacy_ownerless_seconds" ]]; then
+      remove_legacy_lock_directory_files "$barrier"
+    elif [[ -n "$(read_generation_nonce "$barrier")" && "$age" -ge 2 ]]; then
+      remove_lock_directory_files "$barrier"
+    elif [[ -z "$(read_generation_nonce "$barrier")" && "$age" -ge "$legacy_ownerless_seconds" ]]; then
+      remove_lock_directory_files "$barrier"
+    fi
+  done
+}
+
+remove_owned_lock_generation() {
+  local lock_dir="$1" expected_nonce="$2"
+  local quarantine moved_nonce attempt current_nonce
+  current_nonce=$(read_generation_nonce "$lock_dir")
+  [[ -n "$current_nonce" ]] || current_nonce=$(read_lock_field "$lock_dir/owner" nonce)
+  [[ -n "$expected_nonce" && "$current_nonce" == "$expected_nonce" ]] || return 1
+  quarantine="$lock_dir.quarantine.$$.$RANDOM"
+  lock_test_pause BEFORE_RENAME "$lock_dir"
+  mv "$lock_dir" "$quarantine" 2>/dev/null || return 1
+  lock_test_pause AFTER_RENAME "$lock_dir"
+  [[ -d "$quarantine" ]] || return 1
+  moved_nonce=$(read_generation_nonce "$quarantine")
+  [[ -n "$moved_nonce" ]] || moved_nonce=$(read_lock_field "$quarantine/owner" nonce)
+  if lock_directory_has_legacy_owner "$quarantine" || lock_directory_has_unknown_entries "$quarantine"; then
+    [[ "$moved_nonce" != "$expected_nonce" ]] || rm -f "$quarantine/generation" 2>/dev/null || true
+    if [[ "$(read_lock_field "$quarantine/owner" nonce)" == "$expected_nonce" ]]; then
+      rm -f "$quarantine/owner" 2>/dev/null || true
+    fi
+    restore_lock_barrier "$lock_dir" "$quarantine" || true
+    return 1
+  fi
+  if [[ "$moved_nonce" == "$expected_nonce" ]]; then
+    remove_lock_directory_files "$quarantine"
+    return 0
+  fi
+  # The quarantine sibling is a global acquisition barrier. A contender that
+  # appeared during the rename gap must abort before entering its critical
+  # section; wait for it to withdraw, then restore the moved generation before
+  # the barrier path disappears.
+  restore_lock_barrier "$lock_dir" "$quarantine" || true
+  # Fail safe: leaving the barrier blocks new acquisitions and lets a later
+  # recovery pass restore or retire the proven generation.
+  return 1
+}
+
+recover_owned_lock_generation() {
+  local lock_dir="$1" expected_nonce="$2" barrier moved_nonce current_nonce
+  for barrier in "$lock_dir".quarantine.*; do
+    [[ -d "$barrier" ]] || continue
+    moved_nonce=$(read_generation_nonce "$barrier")
+    [[ -n "$moved_nonce" ]] || moved_nonce=$(read_lock_field "$barrier/owner" nonce)
+    [[ "$moved_nonce" == "$expected_nonce" ]] || continue
+    if lock_directory_has_legacy_owner "$barrier" || lock_directory_has_unknown_entries "$barrier"; then
+      rm -f "$barrier/generation" 2>/dev/null || true
+      if [[ "$(read_lock_field "$barrier/owner" nonce)" == "$expected_nonce" ]]; then
+        rm -f "$barrier/owner" 2>/dev/null || true
+      fi
+      if [[ ! -e "$lock_dir" ]]; then mv "$barrier" "$lock_dir" 2>/dev/null || true; fi
+      continue
+    fi
+    if [[ ! -e "$lock_dir" ]]; then mv "$barrier" "$lock_dir" 2>/dev/null || true; fi
+  done
+  current_nonce=$(read_generation_nonce "$lock_dir")
+  [[ -n "$current_nonce" ]] || current_nonce=$(read_lock_field "$lock_dir/owner" nonce)
+  if [[ "$current_nonce" == "$expected_nonce" ]] && ! lock_barrier_exists "$lock_dir"; then
+    if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE:-}" ]]; then
+      : > "$CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE"
+    fi
+    return 0
+  fi
+  # This contender can safely retire only its own proven generation. Doing so
+  # prevents a live orphan barrier when another barrier or canonical owner won.
+  if [[ "$current_nonce" == "$expected_nonce" ]]; then
+    remove_owned_lock_generation "$lock_dir" "$expected_nonce" || true
+  fi
+  for barrier in "$lock_dir".quarantine.*; do
+    [[ -d "$barrier" ]] || continue
+    moved_nonce=$(read_generation_nonce "$barrier")
+    [[ -n "$moved_nonce" ]] || moved_nonce=$(read_lock_field "$barrier/owner" nonce)
+    if [[ "$moved_nonce" == "$expected_nonce" ]] \
+        && ! lock_directory_has_legacy_owner "$barrier" \
+        && ! lock_directory_has_unknown_entries "$barrier"; then
+      remove_lock_directory_files "$barrier"
+    fi
+  done
+  return 1
+}
+
+owned_lock_directory=""
+owned_lock_nonce=""
+acquire_owned_lock() {
+  local lock_dir="$1" attempts="${2:-100}" delay="${3:-0.02}" legacy_ownerless_seconds="${4:-60}"
+  local attempt owner_file observed_nonce age pid_file owner_pid owner_identity owner_tmp generation_tmp generation_nonce quarantine
+  local publication_ok generation_published owner_published legacy_pid legacy_owner_present
+  local directory_identity current_directory_identity directory_replaced
+  owned_lock_directory=""
+  owned_lock_nonce=""
+  owner_file="$lock_dir/owner"
+  mkdir -p "$(dirname "$lock_dir")"
+  for (( attempt=0; attempt<attempts; attempt++ )); do
+    recover_lock_barriers "$lock_dir" "$legacy_ownerless_seconds"
+    if lock_barrier_exists "$lock_dir"; then sleep "$delay"; continue; fi
+
+    pid_file=$(mktemp "$(dirname "$lock_dir")/.lock-owner-pid.XXXXXX")
+    current_shell_pid "$pid_file"
+    read -r owner_pid < "$pid_file"
+    rm -f "$pid_file"
+    owner_identity=$(process_identity "$owner_pid" || true)
+    generation_nonce="${owner_pid}.$(date +%s).${RANDOM}.${RANDOM}"
+    generation_tmp=$(mktemp "$(dirname "$lock_dir")/.lock-generation.XXXXXX")
+    owner_tmp=$(mktemp "$(dirname "$lock_dir")/.lock-owner.XXXXXX")
+    printf '%s\n' "$generation_nonce" > "$generation_tmp"
+    {
+      printf 'pid=%s\n' "$owner_pid"
+      printf 'identity=%s\n' "$owner_identity"
+      printf 'nonce=%s\n' "$generation_nonce"
+    } > "$owner_tmp"
+    chmod 600 "$generation_tmp" "$owner_tmp" 2>/dev/null || true
+    if mkdir "$lock_dir" 2>/dev/null; then
+      directory_identity=$(lock_directory_identity "$lock_dir" || true)
+      lock_test_pause AFTER_MKDIR "$lock_dir"
+      publication_ok=0
+      generation_published=0
+      owner_published=0
+      directory_replaced=0
+      current_directory_identity=$(lock_directory_identity "$lock_dir" || true)
+      [[ -n "$directory_identity" && "$current_directory_identity" == "$directory_identity" ]] \
+        || directory_replaced=1
+      if (( ! directory_replaced )); then
+        if publish_lock_file "$generation_tmp" "$lock_dir/generation"; then
+          generation_published=1
+          if [[ "$(lock_directory_identity "$lock_dir" || true)" == "$directory_identity" ]] \
+              && [[ "$(read_generation_nonce "$lock_dir")" == "$generation_nonce" ]]; then
+            if publish_lock_file "$owner_tmp" "$owner_file"; then
+              owner_published=1
+              if [[ "$(lock_directory_identity "$lock_dir" || true)" == "$directory_identity" ]] \
+                  && [[ "$(read_lock_field "$owner_file" nonce)" == "$generation_nonce" ]] \
+                  && ! lock_barrier_exists "$lock_dir" \
+                  && ! lock_directory_has_legacy_owner "$lock_dir" \
+                  && ! lock_directory_has_unknown_entries "$lock_dir"; then
+                publication_ok=1
+              fi
+            fi
+          fi
+        fi
+      fi
+      if (( publication_ok )); then
+        rm -f "$generation_tmp" "$owner_tmp"
+        owned_lock_nonce="$generation_nonce"
+        owned_lock_directory="$lock_dir"
+        lock_test_pause AFTER_PUBLISH "$lock_dir"
+        if [[ "$(lock_directory_identity "$lock_dir" || true)" != "$directory_identity" ]] \
+            || [[ "$(read_generation_nonce "$lock_dir")" != "$generation_nonce" ]] \
+            || lock_barrier_exists "$lock_dir" || lock_directory_has_legacy_owner "$lock_dir" \
+            || lock_directory_has_unknown_entries "$lock_dir"; then
+          if [[ "$(lock_directory_identity "$lock_dir" || true)" != "$directory_identity" ]]; then
+            if recover_owned_lock_generation "$lock_dir" "$generation_nonce" \
+                && [[ "$(lock_directory_identity "$lock_dir" || true)" == "$directory_identity" ]]; then
+              return 0
+            fi
+            if [[ "$(read_generation_nonce "$lock_dir")" == "$generation_nonce" ]] \
+                || [[ "$(read_lock_field "$lock_dir/owner" nonce)" == "$generation_nonce" ]]; then
+              remove_incomplete_lock_directory "$lock_dir" "$generation_nonce" 1 || true
+            fi
+            owned_lock_nonce=""
+            owned_lock_directory=""
+            sleep "$delay"
+            continue
+          fi
+          if lock_directory_has_legacy_owner "$lock_dir" \
+              || lock_directory_has_unknown_entries "$lock_dir"; then
+            remove_incomplete_lock_directory "$lock_dir" "$generation_nonce" || true
+            owned_lock_nonce=""
+            owned_lock_directory=""
+            sleep "$delay"
+            continue
+          fi
+          if recover_owned_lock_generation "$lock_dir" "$generation_nonce"; then return 0; fi
+          owned_lock_nonce=""
+          owned_lock_directory=""
+          sleep "$delay"
+          continue
+        fi
+        if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE:-}" ]]; then
+          : > "$CLAUDEX_TEST_LOCK_SELF_RECOVERED_FILE"
+        fi
+        return 0
+      fi
+      rm -f "$generation_tmp" "$owner_tmp"
+      if (( directory_replaced )) \
+          || [[ "$(lock_directory_identity "$lock_dir" || true)" != "$directory_identity" ]]; then
+        if (( generation_published || owner_published )); then
+          remove_incomplete_lock_directory "$lock_dir" "$generation_nonce" 1 || true
+        fi
+      elif lock_directory_has_legacy_owner "$lock_dir" || lock_directory_has_unknown_entries "$lock_dir"; then
+        remove_incomplete_lock_directory "$lock_dir" "$generation_nonce" || true
+      elif (( owner_published )); then
+        remove_owned_lock_generation "$lock_dir" "$generation_nonce" \
+          || remove_incomplete_lock_directory "$lock_dir" "$generation_nonce" || true
+      else
+        remove_incomplete_lock_directory "$lock_dir" "$generation_nonce" || true
+      fi
+      sleep "$delay"
+      continue
+    fi
+    rm -f "$generation_tmp" "$owner_tmp"
+
+    age=$(lock_age_seconds "$lock_dir")
+    observed_nonce=$(read_lock_field "$owner_file" nonce)
+    legacy_pid=$(read_legacy_lock_pid "$lock_dir" || true)
+    legacy_owner_present=0
+    lock_directory_has_legacy_owner "$lock_dir" && legacy_owner_present=1
+    if (( legacy_owner_present )) && [[ -n "$observed_nonce" ]]; then
+      # A prior-format owner replaced the directory while a new creator was
+      # publishing. Quarantine the mixed state, strip only the injected
+      # structured generation, then apply the legacy owner's original age.
+      quarantine="$lock_dir.quarantine.legacy.$$.$RANDOM"
+      if mv "$lock_dir" "$quarantine" 2>/dev/null; then
+        if lock_directory_has_legacy_owner "$quarantine"; then
+          [[ "$(read_generation_nonce "$quarantine")" != "$observed_nonce" ]] \
+            || rm -f "$quarantine/generation" 2>/dev/null || true
+          [[ "$(read_lock_field "$quarantine/owner" nonce)" != "$observed_nonce" ]] \
+            || rm -f "$quarantine/owner" 2>/dev/null || true
+          legacy_pid=$(read_legacy_lock_pid "$quarantine" || true)
+          if [[ -n "$legacy_pid" ]] && kill -0 "$legacy_pid" 2>/dev/null; then
+            restore_lock_barrier "$lock_dir" "$quarantine" || true
+          elif [[ -n "$legacy_pid" ]] && (( age >= legacy_ownerless_seconds )); then
+            remove_legacy_lock_directory_files "$quarantine"
+          else
+            restore_lock_barrier "$lock_dir" "$quarantine" || true
+          fi
+        else
+          restore_lock_barrier "$lock_dir" "$quarantine" || true
+        fi
+      fi
+    elif [[ -n "$legacy_pid" ]] && kill -0 "$legacy_pid" 2>/dev/null; then
+      : # A prior-format live owner is never reclaimed solely because it is old.
+    elif (( legacy_owner_present )) && [[ -n "$legacy_pid" ]] && (( age >= legacy_ownerless_seconds )); then
+      quarantine="$lock_dir.quarantine.legacy.$$.$RANDOM"
+      if mv "$lock_dir" "$quarantine" 2>/dev/null; then
+        legacy_pid=$(read_legacy_lock_pid "$quarantine" || true)
+        if [[ -n "$legacy_pid" ]] && kill -0 "$legacy_pid" 2>/dev/null; then
+          restore_lock_barrier "$lock_dir" "$quarantine" || true
+        else
+          remove_legacy_lock_directory_files "$quarantine"
+        fi
+      fi
+    elif (( legacy_owner_present )); then
+      : # Unknown or recent prior formats are preserved conservatively.
+    elif [[ -n "$observed_nonce" ]]; then
+      if ! lock_owner_is_current "$owner_file" && (( age >= 2 )); then
+        remove_owned_lock_generation "$lock_dir" "$observed_nonce" || true
+      fi
+    elif [[ -n "$(read_generation_nonce "$lock_dir")" ]] && (( age >= 2 )); then
+      observed_nonce=$(read_generation_nonce "$lock_dir")
+      remove_owned_lock_generation "$lock_dir" "$observed_nonce" || true
+    elif (( age >= legacy_ownerless_seconds )); then
+      # A directory without a generation marker belongs to a pre-ownership
+      # release. Preserve its historical stale threshold during upgrades.
+      quarantine="$lock_dir.quarantine.legacy.$$.$RANDOM"
+      if mv "$lock_dir" "$quarantine" 2>/dev/null; then
+        legacy_pid=$(read_legacy_lock_pid "$quarantine" || true)
+        if [[ -n "$(read_generation_nonce "$quarantine")" || -n "$(read_lock_field "$quarantine/owner" nonce)" ]] \
+            || { [[ -n "$legacy_pid" ]] && kill -0 "$legacy_pid" 2>/dev/null; } \
+            || lock_directory_has_unknown_entries "$quarantine"; then
+          restore_lock_barrier "$lock_dir" "$quarantine" || true
+        elif [[ -n "$legacy_pid" ]]; then
+          remove_legacy_lock_directory_files "$quarantine"
+        else
+          remove_lock_directory_files "$quarantine"
+        fi
+      fi
+    fi
+    sleep "$delay"
+  done
+  return 1
+}
+
+release_owned_lock() {
+  local lock_dir="$1" nonce="$2"
+  [[ -n "$lock_dir" && -n "$nonce" ]] || return 0
+  remove_owned_lock_generation "$lock_dir" "$nonce" || true
+}
+
+state_lock_nonce=""
+acquire_state_lock() {
+  state_lock_nonce=""
+  acquire_owned_lock "$1" 100 0.02 || return 1
+  state_lock_nonce="$owned_lock_nonce"
+}
+
 release_state_lock() {
-  rmdir "$1" 2>/dev/null || true
+  release_owned_lock "$1" "$state_lock_nonce"
+  state_lock_nonce=""
 }
 
 # Claude Code's welcome banner does not use ANTHROPIC_CUSTOM_MODEL_OPTION_NAME.
@@ -724,17 +1279,84 @@ proxy_executable() {
 
 start_auth_watcher() {
   [[ "${CLAUDEX_SKIP_AUTH_WATCHER:-0}" != 1 ]] || return 0
-  "$codex_session_helper" watch "$$" >/dev/null 2>&1 &
+  local parent_identity
+  parent_identity=$(process_identity "$$" 2>/dev/null || true)
+  env \
+    -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN \
+    -u CLAUDEX_PROXY_TOKEN -u CLAUDEX_CODEX_AUTH_FILE \
+    "$codex_session_helper" watch "$$" "$parent_identity" "$parsed_background" \
+    </dev/null >/dev/null 2>&1 &
   auth_watcher_pid=$!
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_AUTH_WATCH_PID_FILE:-}" ]]; then
+    (umask 077; printf '%s\n' "$auth_watcher_pid" > "$CLAUDEX_TEST_AUTH_WATCH_PID_FILE")
+  fi
+  if (( parsed_background )); then disown "$auth_watcher_pid" 2>/dev/null || true; fi
+}
+
+watch_parent_is_current() {
+  local parent_pid="$1" expected_identity="$2" current_identity
+  kill -0 "$parent_pid" 2>/dev/null || return 1
+  [[ -n "$expected_identity" ]] || return 0
+  current_identity=$(process_identity "$parent_pid" 2>/dev/null || true)
+  [[ -n "$current_identity" && "$current_identity" == "$expected_identity" ]]
+}
+
+managed_background_registry_state() {
+  local registry
+  command -v claude >/dev/null 2>&1 || return 2
+  registry=$(env \
+    -u BUN_OPTIONS -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
+    -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_CUSTOM_HEADERS \
+    -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY \
+    -u ANTHROPIC_BEDROCK_BASE_URL -u ANTHROPIC_BEDROCK_MANTLE_BASE_URL \
+    -u ANTHROPIC_VERTEX_BASE_URL -u ANTHROPIC_VERTEX_PROJECT_ID \
+    -u ANTHROPIC_FOUNDRY_BASE_URL -u ANTHROPIC_FOUNDRY_RESOURCE -u ANTHROPIC_FOUNDRY_API_KEY \
+    -u ANTHROPIC_MODEL -u ANTHROPIC_SMALL_FAST_MODEL -u ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION \
+    -u ANTHROPIC_CUSTOM_MODEL_OPTION -u ANTHROPIC_CUSTOM_MODEL_OPTION_NAME -u ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION \
+    -u ANTHROPIC_DEFAULT_FABLE_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_HAIKU_MODEL \
+    -u ANTHROPIC_DEFAULT_FABLE_MODEL_NAME -u ANTHROPIC_DEFAULT_OPUS_MODEL_NAME -u ANTHROPIC_DEFAULT_SONNET_MODEL_NAME -u ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME \
+    -u ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION -u ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION -u ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION -u ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION \
+    -u ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES -u ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES \
+    -u ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES -u ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES \
+    -u CLAUDE_CODE_AUTO_MODE_MODEL -u CLAUDE_CODE_BG_CLASSIFIER_MODEL -u CLAUDE_CODE_SUBAGENT_MODEL \
+    -u CLAUDE_CODE_ALWAYS_ENABLE_EFFORT -u CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY -u CLAUDE_CODE_MAX_RETRIES \
+    -u CLAUDE_CODE_MAX_CONTEXT_TOKENS -u CLAUDE_CODE_AUTO_COMPACT_WINDOW -u CLAUDE_CODE_DISABLE_1M_CONTEXT \
+    -u CLAUDEX_PROXY_TOKEN -u CLAUDEX_PROXY_URL -u CLAUDEX_PROXY_CONFIG -u CLAUDEX_PROXY_BIN \
+    -u CLAUDEX_CODEX_AUTH_FILE -u CLAUDEX_CODEX_SOURCE_AUTH_FILE -u CLAUDEX_MANAGED_SESSION \
+    -u CLAUDEX_CHATGPT_PLAN_LABEL -u CLAUDEX_SESSION_MODE -u CLAUDEX_MODEL_MODE -u CLAUDEX_INTERACTIVE_TUI \
+    -u CLAUDEX_NO_SESSION_PERSISTENCE -u CLAUDEX_INSTRUCTION_BRIDGE -u CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD \
+    -u CLAUDE_CODE_EFFORT_LEVEL -u CLAUDE_CODE_NO_FLICKER -u CLAUDE_CODE_ACCESSIBILITY \
+    claude agents --json 2>/dev/null) || return 2
+  printf '%s' "$registry" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
+  if printf '%s' "$registry" | jq -e 'length > 0' >/dev/null 2>&1; then return 0; fi
+  return 1
 }
 
 start_proxy_watcher() {
   [[ "${CLAUDEX_SKIP_PROXY_WATCHER:-0}" != 1 ]] || return 0
-  local parent_pid=$$ consecutive_failures=0
+  local parent_pid=$$ parent_identity consecutive_failures=0
+  parent_identity=$(process_identity "$parent_pid" 2>/dev/null || true)
   (
-    while kill -0 "$parent_pid" 2>/dev/null; do
+    trap '' HUP
+    local registry_status=0 empty_polls=0
+    while :; do
+      if watch_parent_is_current "$parent_pid" "$parent_identity"; then
+        empty_polls=0
+      elif (( parsed_background )); then
+        registry_status=0
+        managed_background_registry_state || registry_status=$?
+        case "$registry_status" in
+          0) empty_polls=0 ;;
+          1)
+            empty_polls=$(( empty_polls + 1 ))
+            (( empty_polls < 3 )) || break
+            ;;
+          *) empty_polls=0 ;;
+        esac
+      else
+        break
+      fi
       sleep 1
-      kill -0 "$parent_pid" 2>/dev/null || break
       if proxy_reachable; then
         consecutive_failures=0
       else
@@ -745,36 +1367,15 @@ start_proxy_watcher() {
         fi
       fi
     done
-  ) &
+    if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_PROXY_WATCH_EXIT_FILE:-}" ]]; then
+      (umask 077; printf '%s\n' exited > "$CLAUDEX_TEST_PROXY_WATCH_EXIT_FILE")
+    fi
+  ) </dev/null >/dev/null 2>&1 &
   proxy_watcher_pid=$!
-}
-
-current_shell_pid() {
-  local destination="$1"
-  # Bash 3.2 does not expose BASHPID. A short-lived child reports the real PID
-  # of whichever launcher or watcher process directly spawned it. Write to a
-  # file so command substitution cannot insert another short-lived subshell.
-  sh -c 'printf "%s\n" "$PPID" > "$1"' claudex-pid "$destination"
-}
-
-process_identity() {
-  local pid="$1"
-  ps -p "$pid" -o lstart= 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]][[:space:]]*/ /g'
-}
-
-lock_age_seconds() {
-  local path="$1" mtime=0 now
-  if stat -f '%m' "$path" >/dev/null 2>&1; then
-    mtime=$(stat -f '%m' "$path")
-  else
-    mtime=$(stat -c '%Y' "$path" 2>/dev/null || printf 0)
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_PROXY_WATCH_PID_FILE:-}" ]]; then
+    (umask 077; printf '%s\n' "$proxy_watcher_pid" > "$CLAUDEX_TEST_PROXY_WATCH_PID_FILE")
   fi
-  now=$(date +%s)
-  if [[ "$mtime" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]]; then
-    printf '%s\n' "$(( now - mtime ))"
-  else
-    printf '%s\n' 0
-  fi
+  if (( parsed_background )); then disown "$proxy_watcher_pid" 2>/dev/null || true; fi
 }
 
 record_proxy_recovery() {
@@ -792,43 +1393,8 @@ record_proxy_recovery() {
   fi
 }
 
-read_lock_field() {
-  local owner_file="$1" field="$2"
-  awk -F= -v field="$field" '$1 == field { sub(/^[^=]*=/, ""); print; exit }' "$owner_file" 2>/dev/null
-}
-
-lock_owner_is_current() {
-  local owner_file="$1" pid identity current
-  pid=$(read_lock_field "$owner_file" pid)
-  identity=$(read_lock_field "$owner_file" identity)
-  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
-  [[ -n "$identity" ]] || return 0
-  current=$(process_identity "$pid")
-  [[ -n "$current" && "$current" == "$identity" ]]
-}
-
 release_proxy_lock() {
-  local lock_dir="$1" nonce="$2" owner_file="$lock_dir/owner"
-  [[ "$(read_lock_field "$owner_file" nonce)" == "$nonce" ]] || return 0
-  rm -f "$owner_file" 2>/dev/null || true
-  rmdir "$lock_dir" 2>/dev/null || true
-}
-
-reclaim_proxy_lock() {
-  local lock_dir="$1" observed_nonce="$2" owner_file="$lock_dir/owner"
-  local quarantine="$lock_dir.stale.$observed_nonce"
-  [[ -n "$observed_nonce" ]] || return 1
-  [[ "$(read_lock_field "$owner_file" nonce)" == "$observed_nonce" ]] || return 1
-  [[ ! -e "$quarantine" ]] || return 1
-  mv "$lock_dir" "$quarantine" 2>/dev/null || return 1
-  if [[ "$(read_lock_field "$quarantine/owner" nonce)" != "$observed_nonce" ]]; then
-    record_proxy_recovery "startup lock quarantine changed ownership unexpectedly"
-    return 1
-  fi
-  rm -f "$quarantine/owner" 2>/dev/null || true
-  rmdir "$quarantine" 2>/dev/null || true
-  record_proxy_recovery "reclaimed stale startup lock nonce=$observed_nonce"
+  release_owned_lock "$1" "$2"
 }
 
 write_managed_proxy_pid() {
@@ -836,7 +1402,7 @@ write_managed_proxy_pid() {
   pid_file="$run_dir/managed-proxy"
   identity=""
   for attempt in {1..10}; do
-    identity=$(process_identity "$pid")
+    identity=$(process_identity "$pid" || true)
     [[ -z "$identity" ]] || break
     kill -0 "$pid" 2>/dev/null || return 1
     sleep 0.02
@@ -858,7 +1424,7 @@ managed_proxy_is_current() {
   identity=$(read_lock_field "$pid_file" identity)
   [[ "$pid" =~ ^[0-9]+$ && -n "$identity" ]] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
-  current=$(process_identity "$pid")
+  current=$(process_identity "$pid" || true)
   [[ -n "$current" && "$current" == "$identity" ]]
 }
 
@@ -871,7 +1437,7 @@ stop_unhealthy_managed_proxy() {
     rm -f "$pid_file"
     return 0
   fi
-  current=$(process_identity "$pid")
+  current=$(process_identity "$pid" || true)
   [[ -n "$identity" && "$current" == "$identity" ]] || {
     record_proxy_recovery "ignored stale managed proxy pid metadata pid=$pid"
     rm -f "$pid_file"
@@ -882,7 +1448,7 @@ stop_unhealthy_managed_proxy() {
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
   done
-  if kill -0 "$pid" 2>/dev/null && [[ "$(process_identity "$pid")" == "$identity" ]]; then
+  if kill -0 "$pid" 2>/dev/null && [[ "$(process_identity "$pid" || true)" == "$identity" ]]; then
     kill -KILL "$pid" 2>/dev/null || true
   fi
   rm -f "$pid_file"
@@ -904,7 +1470,9 @@ ensure_proxy() {
     return 1
   fi
   local sync_status=0
-  "$codex_session_helper" sync || sync_status=$?
+  if [[ "${CLAUDEX_TEST_MODE:-0}" != 1 || "${CLAUDEX_TEST_SKIP_AUTH_SYNC:-0}" != 1 ]]; then
+    "$codex_session_helper" sync || sync_status=$?
+  fi
   if (( sync_status != 0 )); then
     claudex_auth_sync_failed=1
     claudex_auth_sync_status=$sync_status
@@ -934,55 +1502,28 @@ ensure_proxy() {
 
   # Concurrent Claudex tabs can notice a stopped bridge at the same time.
   # Serialize startup so only one process can bind the loopback port.
-  local run_dir="$CLAUDE_CONFIG_DIR/run" lock_dir owner_file attempt owner_tmp orphan_nonce orphan_tmp owner_pid_file
-  local lock_acquired=0 owner_pid owner_identity owner_nonce observed_nonce lock_age
+  local run_dir="$CLAUDE_CONFIG_DIR/run" lock_dir attempt
+  local lock_acquired=0 owner_nonce
   local lock_deadline startup_deadline proxy_pid startup_auth_failures=0
   lock_dir="$run_dir/proxy-start.lock"
-  owner_file="$lock_dir/owner"
   mkdir -p "$run_dir"
   lock_deadline=$(( SECONDS + 30 ))
   while (( SECONDS < lock_deadline )); do
-    if mkdir "$lock_dir" 2>/dev/null; then
-      owner_pid_file=$(mktemp "$run_dir/.proxy-owner-pid.XXXXXX")
-      current_shell_pid "$owner_pid_file"
-      read -r owner_pid < "$owner_pid_file"
-      rm -f "$owner_pid_file"
-      owner_identity=$(process_identity "$owner_pid")
-      owner_nonce="${owner_pid}.$(date +%s).${RANDOM}.${RANDOM}"
-      owner_tmp=$(mktemp "$run_dir/.proxy-start-owner.XXXXXX")
-      {
-        printf 'pid=%s\n' "$owner_pid"
-        printf 'identity=%s\n' "$owner_identity"
-        printf 'nonce=%s\n' "$owner_nonce"
-      } > "$owner_tmp"
-      chmod 600 "$owner_tmp" 2>/dev/null || true
-      if ! mv -f "$owner_tmp" "$owner_file"; then
-        rm -f "$owner_tmp" 2>/dev/null || true
-        rmdir "$lock_dir" 2>/dev/null || true
-        return 1
-      fi
+    if acquire_owned_lock "$lock_dir" 1 0 120; then
+      owner_nonce="$owned_lock_nonce"
       lock_acquired=1
+      if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE:-}" ]]; then
+        printf 'acquired %s\n' "$$" >> "$CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE"
+      fi
       break
+    fi
+    if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE:-}" ]]; then
+      printf 'blocked %s\n' "$$" >> "$CLAUDEX_TEST_PROXY_LOCK_ATTEMPT_FILE"
     fi
     if proxy_ready; then return 0
     elif (( $? == 41 )) && ! managed_proxy_is_current; then
       record_proxy_recovery "unmanaged proxy authentication failed while waiting for startup lock"
       return 1
-    fi
-    lock_age=$(lock_age_seconds "$lock_dir")
-    observed_nonce=$(read_lock_field "$owner_file" nonce)
-    if { [[ -n "$observed_nonce" ]] && ! lock_owner_is_current "$owner_file" && (( lock_age >= 2 )); } \
-        || { [[ -n "$observed_nonce" ]] && (( lock_age >= 20 )); }; then
-      reclaim_proxy_lock "$lock_dir" "$observed_nonce" || true
-    elif [[ -z "$observed_nonce" ]] && (( lock_age >= 2 )); then
-      # A crash between mkdir and the atomic owner-file rename leaves no nonce.
-      orphan_nonce="orphan.$(date +%s).${RANDOM}"
-      orphan_tmp=$(mktemp "$run_dir/.proxy-start-owner.XXXXXX")
-      printf 'nonce=%s\n' "$orphan_nonce" > "$orphan_tmp"
-      chmod 600 "$orphan_tmp" 2>/dev/null || true
-      if ln "$orphan_tmp" "$owner_file" 2>/dev/null; then :; fi
-      rm -f "$orphan_tmp"
-      reclaim_proxy_lock "$lock_dir" "$orphan_nonce" || true
     fi
     sleep 0.1
   done
@@ -991,6 +1532,7 @@ ensure_proxy() {
     printf '%s\n' "claudex: timed out waiting for another session to start the local proxy." >&2
     return 1
   fi
+  record_proxy_recovery "proxy startup lock acquired"
   trap 'release_proxy_lock "$lock_dir" "$owner_nonce"' EXIT
 
   if proxy_ready; then
@@ -1133,6 +1675,61 @@ ensure_proxy_for_launch() {
   return 0
 }
 
+run_claude_update_worker() {
+  local claude_path="$1" update_dir="$2" stamp="$3" interval="$4"
+  local now last=0 lock_dir="$update_dir/lock" lock_nonce completed temporary
+  mkdir -p "$update_dir"
+  now=$(date +%s)
+  if [[ -r "$stamp" ]]; then read -r last < "$stamp" || last=0; fi
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  (( now - last >= interval )) || return 0
+
+  # The worker publishes its own PID and process-start identity. A launcher
+  # exiting between spawn and ownership publication can therefore leave only a
+  # short ownerless generation, never a misleading parent-owned lock.
+  if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE:-}" ]]; then
+    printf 'start %s\n' "$$" >> "$CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE"
+  fi
+  if ! acquire_owned_lock "$lock_dir" 5 0.02 3600; then
+    if [[ "${CLAUDEX_TEST_MODE:-0}" == 1 && -n "${CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE:-}" ]]; then
+      printf 'blocked %s\n' "$$" >> "$CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE"
+    fi
+    return 0
+  fi
+  lock_nonce="$owned_lock_nonce"
+  trap 'release_owned_lock "$lock_dir" "$lock_nonce"' EXIT
+  trap 'release_owned_lock "$lock_dir" "$lock_nonce"; exit 130' INT
+  trap 'release_owned_lock "$lock_dir" "$lock_nonce"; exit 143' TERM
+
+  # Another worker may have completed between the parent's cadence check and
+  # lock acquisition. Recheck while serialized before invoking Claude.
+  now=$(date +%s)
+  last=0
+  if [[ -r "$stamp" ]]; then read -r last < "$stamp" || last=0; fi
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  if (( now - last < interval )); then
+    release_owned_lock "$lock_dir" "$lock_nonce"
+    trap - EXIT INT TERM
+    return 0
+  fi
+
+  # Claude's updater is a first-party maintenance route. Never project proxy,
+  # provider, session, or credential state into the detached process.
+  unset CLAUDEX_PROXY_TOKEN
+  scrub_managed_session_environment
+  scrub_competing_provider_routing
+  unset CLAUDE_CODE_SUBAGENT_MODEL
+  if "$claude_path" update; then
+    completed=$(date +%s)
+    temporary=$(mktemp "$update_dir/.last-success.XXXXXX")
+    printf '%s\n' "$completed" > "$temporary"
+    chmod 600 "$temporary" 2>/dev/null || true
+    mv -f "$temporary" "$stamp"
+  fi
+  release_owned_lock "$lock_dir" "$lock_nonce"
+  trap - EXIT INT TERM
+}
+
 maybe_update_claude() {
   [[ "$CLAUDEX_CLAUDE_AUTO_UPDATE" == on ]] || return 0
   [[ "${CLAUDEX_SKIP_AUTO_UPDATE:-0}" != 1 ]] || return 0
@@ -1148,29 +1745,15 @@ maybe_update_claude() {
   [[ "$last" =~ ^[0-9]+$ ]] || last=0
   (( now - last >= CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS )) || return 0
   mkdir -p "$update_dir"
-  local lock_dir="$update_dir/lock" lock_mtime=0
-  if [[ -d "$lock_dir" ]]; then
-    if stat -f '%m' "$lock_dir" >/dev/null 2>&1; then
-      lock_mtime=$(stat -f '%m' "$lock_dir")
-    else
-      lock_mtime=$(stat -c '%Y' "$lock_dir" 2>/dev/null || printf 0)
-    fi
-    if [[ "$lock_mtime" =~ ^[0-9]+$ ]] && (( now - lock_mtime >= 3600 )); then
-      rmdir "$lock_dir" 2>/dev/null || true
-    fi
-  fi
-  if mkdir "$lock_dir" 2>/dev/null; then
-    (
-      if claude update >"$update_dir/claude-update.log" 2>&1; then
-        local completed temporary
-        completed=$(date +%s)
-        temporary="$update_dir/.last-success.$$"
-        printf '%s\n' "$completed" > "$temporary"
-        mv -f "$temporary" "$stamp"
-      fi
-      rmdir "$lock_dir" 2>/dev/null || true
-    ) &
-  fi
+  local claude_path
+  claude_path=$(command -v claude)
+  # Keep the updater alive when the invoking terminal closes and prevent it
+  # from reading the interactive session. The worker owns all log redirection.
+  (
+    trap '' HUP
+    run_claude_update_worker "$claude_path" "$update_dir" "$stamp" \
+      "$CLAUDEX_CLAUDE_UPDATE_INTERVAL_SECONDS"
+  ) </dev/null >"$update_dir/claude-update.log" 2>&1 &
 }
 
 maybe_self_update() {
@@ -1185,7 +1768,21 @@ maybe_self_update() {
 
 claude_supports() {
   local option="$1"
-  [[ "${claude_help_cache:-}" == *"$option"* ]]
+  printf '%s\n' "${claude_help_cache:-}" | awk -v wanted="$option" '
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      count = split(line, fields, /[[:space:]]+/)
+      for (i = 1; i <= count; i++) {
+        candidate = fields[i]
+        sub(/,$/, "", candidate)
+        sub(/[= ].*$/, "", candidate)
+        if (candidate !~ /^-/) break
+        if (candidate == wanted) found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  '
 }
 
 load_claude_capabilities() {
@@ -1625,6 +2222,7 @@ prepare_chatgpt_plan_label() {
 
 # The preload provides GPT-specific input aliases and a one-shot welcome label.
 # Never inject it into first-party Claude/Chrome or maintenance commands.
+if (( use_proxy )); then scrub_competing_provider_routing; fi
 readonly claudex_preload="$claudex_config_dir/preload.cjs"
 inherited_bun_options="${BUN_OPTIONS:-}"
 escaped_claudex_preload="${claudex_preload// /\\ }"
@@ -1701,7 +2299,10 @@ if (( inject_skills )) && [[ "$CLAUDEX_SKILL_BRIDGE" == on ]]; then
   activate_managed_node
   node_supports_skill_bridge || { printf '%s\n' 'claudex: Node.js 18 or newer is required for Claude and Codex skill compatibility.' >&2; exit 1; }
   [[ -r "$skill_bridge_helper" ]] || { printf '%s\n' 'claudex: skill bridge helper is missing; reinstall Claudex.' >&2; exit 1; }
-  skill_bridge_json=$(node "$skill_bridge_helper" sync --project "$PWD") || {
+  skill_bridge_scope_args=()
+  if (( parsed_worktree )); then skill_bridge_scope_args+=(--global-only); fi
+  skill_bridge_json=$(node "$skill_bridge_helper" sync --project "$PWD" \
+    ${skill_bridge_scope_args[@]+"${skill_bridge_scope_args[@]}"}) || {
     printf '%s\n' 'claudex: skill discovery failed; run `claudex skills` for details.' >&2
     exit 1
   }
@@ -1902,15 +2503,27 @@ emit_mouse_pointer_shape() {
 }
 
 resume_marker=""
+claude_pid=""
+claude_signal_exit=0
+claude_signal_name=""
+claude_escalation_pid=""
 emit_mouse_pointer_shape "$CLAUDEX_MOUSE_POINTER_SHAPE"
 cleanup_session() {
   emit_mouse_pointer_shape default
   [[ -z "${resume_marker:-}" ]] || rm -f "$resume_marker"
-  if [[ -n "${auth_watcher_pid:-}" ]]; then
+  if [[ -n "${claude_pid:-}" ]] && kill -0 "$claude_pid" 2>/dev/null; then
+    kill -KILL "$claude_pid" 2>/dev/null || true
+    wait "$claude_pid" 2>/dev/null || true
+  fi
+  if [[ -n "${claude_escalation_pid:-}" ]]; then
+    kill "$claude_escalation_pid" 2>/dev/null || true
+    wait "$claude_escalation_pid" 2>/dev/null || true
+  fi
+  if (( ! parsed_background )) && [[ -n "${auth_watcher_pid:-}" ]]; then
     kill "$auth_watcher_pid" 2>/dev/null || true
     wait "$auth_watcher_pid" 2>/dev/null || true
   fi
-  if [[ -n "${proxy_watcher_pid:-}" ]]; then
+  if (( ! parsed_background )) && [[ -n "${proxy_watcher_pid:-}" ]]; then
     kill "$proxy_watcher_pid" 2>/dev/null || true
     wait "$proxy_watcher_pid" 2>/dev/null || true
   fi
@@ -1931,24 +2544,63 @@ if (( rewrite_resume_footer )); then
   resume_marker=$(mktemp "$claudex_config_dir/.resume-start.XXXXXX")
 fi
 
-run_claude() {
-  if (( ${#claude_args[@]} > 0 )); then
-    if (( ${#forwarded_args[@]} > 0 )); then
-      claude "${claude_args[@]}" "${forwarded_args[@]}"
+start_claude() {
+  (
+    # Bash gives asynchronous commands ignored INT/QUIT dispositions. Restore
+    # defaults before exec while explicitly preserving stdin so Claude remains
+    # the normal foreground TUI job rather than receiving /dev/null.
+    trap - INT QUIT TERM HUP
+    if (( ${#claude_args[@]} > 0 )); then
+      if (( ${#forwarded_args[@]} > 0 )); then
+        exec claude "${claude_args[@]}" "${forwarded_args[@]}"
+      else
+        exec claude "${claude_args[@]}"
+      fi
+    elif (( ${#forwarded_args[@]} > 0 )); then
+      exec claude "${forwarded_args[@]}"
     else
-      claude "${claude_args[@]}"
+      exec claude
     fi
-  elif (( ${#forwarded_args[@]} > 0 )); then
-    claude "${forwarded_args[@]}"
-  else
-    claude
+  ) <&0 &
+  claude_pid=$!
+}
+
+forward_claude_signal() {
+  local signal="$1" signal_exit="$2"
+  if (( claude_signal_exit == 0 )); then
+    claude_signal_name="$signal"
+    claude_signal_exit="$signal_exit"
+  fi
+  [[ -z "$claude_pid" ]] || kill -s "$signal" "$claude_pid" 2>/dev/null || true
+  if [[ -n "$claude_pid" && -z "$claude_escalation_pid" ]]; then
+    (
+      trap - EXIT TERM INT HUP
+      sleep 2
+      kill -KILL "$claude_pid" 2>/dev/null || true
+    ) &
+    claude_escalation_pid=$!
   fi
 }
 
+trap 'forward_claude_signal TERM 143' TERM
+trap 'forward_claude_signal INT 130' INT
+trap 'forward_claude_signal HUP 129' HUP
 set +e
-run_claude
+start_claude
+wait "$claude_pid"
 claude_exit=$?
+if (( claude_signal_exit != 0 )); then
+  if kill -0 "$claude_pid" 2>/dev/null; then wait "$claude_pid" 2>/dev/null || true; fi
+  if [[ -n "$claude_escalation_pid" ]]; then
+    kill "$claude_escalation_pid" 2>/dev/null || true
+    wait "$claude_escalation_pid" 2>/dev/null || true
+    claude_escalation_pid=""
+  fi
+  claude_exit="$claude_signal_exit"
+  rewrite_resume_footer=0
+fi
 set -e
+trap - TERM INT HUP
 
 if (( rewrite_resume_footer )); then
   project_key=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')

@@ -22,6 +22,8 @@ const FILE_FINGERPRINT_VERSION = 2;
 const DEFAULT_MAX_INSTRUCTION_BYTES = 32 * 1024;
 const MAX_WARNING_COUNT = 128;
 const MAX_WARNING_BYTES = 2048;
+const SCOPE_PROJECT = 'project';
+const SCOPE_GLOBAL_ONLY = 'global-only';
 const isWindows = process.platform === 'win32';
 const home = path.resolve(isWindows
   ? (process.env.USERPROFILE || os.homedir())
@@ -217,14 +219,20 @@ function instructionAt(directory, boundary, scope, warnings, fallbackFilenames =
   return null;
 }
 
-function discoverInstructions(projectDir, repoRoot, warnings, config = effectiveCodexProjectConfig(projectDir, repoRoot)) {
-  if (!instructionBridgeEnabled) return { files: [], signature: 'off', renderedBytes: 0, truncated: false };
+function discoverInstructions(projectDir, repoRoot, warnings, config = effectiveCodexProjectConfig(projectDir, repoRoot), globalOnly = false) {
+  if (!instructionBridgeEnabled) return {
+    files: [], signature: 'off', renderedBytes: 0, truncated: false,
+    maxBytes: config.projectDocMaxBytes, fallbackFilenames: config.fallbackFilenames,
+    projectTrusted: config.projectTrusted,
+  };
   const files = [];
   const global = instructionAt(codexHome, codexHome, 'global', warnings);
   if (global) files.push(global);
-  for (const directory of ancestry(projectDir, repoRoot).reverse()) {
-    const project = instructionAt(directory, repoRoot, 'project', warnings, config.fallbackFilenames);
-    if (project) files.push(project);
+  if (!globalOnly) {
+    for (const directory of ancestry(projectDir, repoRoot).reverse()) {
+      const project = instructionAt(directory, repoRoot, 'project', warnings, config.fallbackFilenames);
+      if (project) files.push(project);
+    }
   }
 
   let renderedBytes = 0;
@@ -253,8 +261,12 @@ function discoverInstructions(projectDir, repoRoot, warnings, config = effective
     })),
     maxBytes: config.projectDocMaxBytes,
     fallbackFilenames: config.fallbackFilenames,
+    projectTrusted: config.projectTrusted,
   })).digest('hex');
-  return { files, signature, renderedBytes, truncated, maxBytes: config.projectDocMaxBytes, fallbackFilenames: config.fallbackFilenames };
+  return {
+    files, signature, renderedBytes, truncated, maxBytes: config.projectDocMaxBytes,
+    fallbackFilenames: config.fallbackFilenames, projectTrusted: config.projectTrusted,
+  };
 }
 
 function decodeQuotedScalar(raw) {
@@ -392,15 +404,22 @@ function stripTomlComment(raw) {
   let quote = null;
   let escaped = false;
   const text = String(raw || '');
+  let result = '';
+  let comment = false;
   for (let index = 0; index < text.length; index += 1) {
     const character = text[index];
-    if (escaped) { escaped = false; continue; }
-    if (quote === '"' && character === '\\') { escaped = true; continue; }
-    if (quote) { if (character === quote) quote = null; continue; }
-    if (character === '"' || character === "'") { quote = character; continue; }
-    if (character === '#') return text.slice(0, index).trim();
+    if (comment) {
+      if (character === '\n') { comment = false; result += character; }
+      continue;
+    }
+    if (escaped) { escaped = false; result += character; continue; }
+    if (quote === '"' && character === '\\') { escaped = true; result += character; continue; }
+    if (quote) { if (character === quote) quote = null; result += character; continue; }
+    if (character === '"' || character === "'") { quote = character; result += character; continue; }
+    if (character === '#') { comment = true; continue; }
+    result += character;
   }
-  return text.trim();
+  return result.trim();
 }
 
 function tomlAssignment(line) {
@@ -446,6 +465,50 @@ function tomlStringArray(raw) {
   return result;
 }
 
+function tomlBalancedEnd(source, start, open, close) {
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  let comment = false;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (comment) { if (character === '\n') comment = false; continue; }
+    if (escaped) { escaped = false; continue; }
+    if (quote === '"' && character === '\\') { escaped = true; continue; }
+    if (quote) { if (character === quote) quote = null; continue; }
+    if (character === '#') { comment = true; continue; }
+    if (character === '"' || character === "'") { quote = character; continue; }
+    if (character === open) depth += 1;
+    else if (character === close && --depth === 0) return index;
+  }
+  return -1;
+}
+
+function splitTomlTopLevel(source) {
+  const parts = [];
+  let start = 0;
+  let square = 0;
+  let curly = 0;
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index <= source.length; index += 1) {
+    const character = source[index];
+    if (escaped) { escaped = false; continue; }
+    if (quote === '"' && character === '\\') { escaped = true; continue; }
+    if (quote) { if (character === quote) quote = null; continue; }
+    if (character === '"' || character === "'") { quote = character; continue; }
+    if (character === '[') square += 1;
+    else if (character === ']') square -= 1;
+    else if (character === '{') curly += 1;
+    else if (character === '}') curly -= 1;
+    if ((character === ',' && square === 0 && curly === 0) || index === source.length) {
+      parts.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  return parts;
+}
+
 function codexSystemConfigFile() {
   if (process.env.CLAUDEX_CODEX_SYSTEM_CONFIG_FILE) return path.resolve(expandHome(process.env.CLAUDEX_CODEX_SYSTEM_CONFIG_FILE));
   return isWindows
@@ -487,15 +550,17 @@ function codexConfigFiles(projectDir, repoRoot, projectTrusted = codexProjectTru
   return files;
 }
 
-function effectiveCodexProjectConfig(projectDir, repoRoot) {
-  const projectTrusted = codexProjectTrusted(repoRoot);
+function effectiveCodexProjectConfig(projectDir, repoRoot, globalOnly = false) {
+  const projectTrusted = globalOnly ? false : codexProjectTrusted(repoRoot);
   let projectDocMaxBytes = DEFAULT_MAX_INSTRUCTION_BYTES;
   let fallbackFilenames = [];
   for (const file of codexConfigFiles(projectDir, repoRoot, projectTrusted)) {
     let source;
     try { source = fs.readFileSync(file, 'utf8'); } catch { continue; }
     let inTopLevel = true;
-    for (const line of source.split(/\r?\n/)) {
+    const lines = source.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
       if (/^\s*\[/.test(line)) { inTopLevel = false; continue; }
       if (!inTopLevel) continue;
       const assignment = tomlAssignment(line);
@@ -503,7 +568,14 @@ function effectiveCodexProjectConfig(projectDir, repoRoot) {
       if (assignment.keys[0] === 'project_doc_max_bytes' && /^\d+$/.test(assignment.value)) {
         projectDocMaxBytes = Math.min(MAX_TREE_BYTES, Number(assignment.value));
       } else if (assignment.keys[0] === 'project_doc_fallback_filenames') {
-        const parsed = tomlStringArray(assignment.value);
+        let rawValue = assignment.value;
+        if (rawValue.trimStart().startsWith('[') && tomlBalancedEnd(rawValue, rawValue.indexOf('['), '[', ']') < 0) {
+          while (++index < lines.length) {
+            rawValue += `\n${lines[index]}`;
+            if (tomlBalancedEnd(rawValue, rawValue.indexOf('['), '[', ']') >= 0) break;
+          }
+        }
+        const parsed = tomlStringArray(rawValue);
         if (parsed) fallbackFilenames = [...new Set(parsed.filter((name) => typeof name === 'string' && name && path.basename(name) === name))];
       }
     }
@@ -517,45 +589,58 @@ function parseDisabledCodexSkills(projectDir, repoRoot, projectTrusted = codexPr
     let source = '';
     try { source = fs.readFileSync(file, 'utf8'); } catch { continue; }
     const baseDirectory = path.dirname(file);
-    let current = null;
-    const commit = () => {
-      if (!current || !current.path || typeof current.enabled !== 'boolean') return;
-      const configured = path.isAbsolute(current.path) ? current.path : path.resolve(baseDirectory, current.path);
-      const root = /SKILL\.md$/i.test(configured) ? path.dirname(configured) : configured;
-      states.set(canonical(root), current.enabled);
-    };
-    for (const line of source.split(/\r?\n/)) {
-      const header = line.match(/^\s*\[\[\s*([^\]]+)\s*\]\]\s*(?:#.*)?$/);
-      if (header) {
-        commit();
-        const keys = splitTomlDottedKey(header[1]);
-        current = keys && keys.length === 2 && keys[0] === 'skills' && keys[1] === 'config' ? {} : null;
-        continue;
+    const events = [];
+    const readConfig = (body) => {
+      const config = {};
+      for (const line of body.split(/\r?\n/)) {
+        const assignment = tomlAssignment(line);
+        if (!assignment || assignment.keys.length !== 1) continue;
+        if (assignment.keys[0] === 'path') config.path = tomlString(assignment.value);
+        if (assignment.keys[0] === 'enabled' && /^(?:true|false)$/i.test(assignment.value)) {
+          config.enabled = assignment.value.toLowerCase() === 'true';
+        }
       }
-      if (/^\s*\[/.test(line)) { commit(); current = null; continue; }
-      const assignment = tomlAssignment(line);
-      if (!assignment || !current || assignment.keys.length !== 1) continue;
-      if (assignment.keys[0] === 'path') current.path = tomlString(assignment.value);
-      if (assignment.keys[0] === 'enabled' && /^(?:true|false)$/i.test(assignment.value)) current.enabled = assignment.value.toLowerCase() === 'true';
+      return config;
+    };
+    const arrayTablePattern = /^\s*\[\[\s*([^\]]+)\s*\]\]\s*(?:#.*)?$/gm;
+    for (const header of source.matchAll(arrayTablePattern)) {
+      const keys = splitTomlDottedKey(header[1]);
+      if (!keys || keys.length !== 2 || keys[0] !== 'skills' || keys[1] !== 'config') continue;
+      const bodyStart = header.index + header[0].length;
+      const nextHeader = source.slice(bodyStart).search(/^\s*\[/m);
+      const bodyEnd = nextHeader < 0 ? source.length : bodyStart + nextHeader;
+      events.push({ index: header.index, ...readConfig(source.slice(bodyStart, bodyEnd)) });
     }
-    commit();
-    // Inline tables are accepted by Codex too. Keep this deliberately strict:
-    // malformed or ambiguous tables never silently re-enable a disabled skill.
-    const inlinePattern = /(?:^|\n)\s*(?:"skills"|'skills'|skills)\s*\.\s*(?:"config"|'config'|config)\s*=\s*\[([\s\S]*?)\]\s*(?:#.*)?(?:\n|$)/gm;
+
+    const inlinePattern = /(?:^|\n)\s*(?:"skills"|'skills'|skills)\s*\.\s*(?:"config"|'config'|config)\s*=\s*\[/gm;
     for (const inline of source.matchAll(inlinePattern)) {
-      for (const table of inline[1].matchAll(/\{([^{}]*)\}/g)) {
-        let configuredPath = null;
-        let enabled = null;
-        for (const piece of table[1].split(',')) {
+      const open = inline.index + inline[0].lastIndexOf('[');
+      const close = tomlBalancedEnd(source, open, '[', ']');
+      if (close < 0) continue;
+      const body = source.slice(open + 1, close);
+      for (let cursor = 0; cursor < body.length;) {
+        const relativeOpen = body.indexOf('{', cursor);
+        if (relativeOpen < 0) break;
+        const relativeClose = tomlBalancedEnd(body, relativeOpen, '{', '}');
+        if (relativeClose < 0) break;
+        const table = {};
+        for (const piece of splitTomlTopLevel(body.slice(relativeOpen + 1, relativeClose))) {
           const assignment = tomlAssignment(piece);
           if (!assignment || assignment.keys.length !== 1) continue;
-          if (assignment.keys[0] === 'path') configuredPath = tomlString(assignment.value);
-          if (assignment.keys[0] === 'enabled' && /^(?:true|false)$/i.test(assignment.value)) enabled = assignment.value.toLowerCase() === 'true';
+          if (assignment.keys[0] === 'path') table.path = tomlString(assignment.value);
+          if (assignment.keys[0] === 'enabled' && /^(?:true|false)$/i.test(assignment.value)) {
+            table.enabled = assignment.value.toLowerCase() === 'true';
+          }
         }
-        if (!configuredPath || enabled === null) continue;
-        const configured = path.isAbsolute(configuredPath) ? configuredPath : path.resolve(baseDirectory, configuredPath);
-        states.set(canonical(/SKILL\.md$/i.test(configured) ? path.dirname(configured) : configured), enabled);
+        events.push({ index: open + 1 + relativeOpen, ...table });
+        cursor = relativeClose + 1;
       }
+    }
+
+    for (const event of events.sort((left, right) => left.index - right.index)) {
+      if (!event.path || typeof event.enabled !== 'boolean') continue;
+      const configured = path.isAbsolute(event.path) ? event.path : path.resolve(baseDirectory, event.path);
+      states.set(canonical(/SKILL\.md$/i.test(configured) ? path.dirname(configured) : configured), event.enabled);
     }
   }
   return new Set([...states].filter(([, enabled]) => !enabled).map(([configured]) => configured));
@@ -591,14 +676,19 @@ function remapClaudeModel(markdown) {
   const parsed = frontmatter(markdown);
   if (!parsed) return { markdown, changed: false, mappings: [] };
   const mappings = [];
-  const replaced = parsed.body.replace(/^(model\s*:\s*)(["']?)([^\s#"']+)\2(\s*(?:#.*)?)$/gmi,
-    (line, prefix, quote, model, suffix) => {
-      const normalized = model.toLocaleLowerCase().replace(/\[1m\]$/, '');
-      if (!/(?:opus|sonnet|haiku|fable|best)/.test(normalized)) return line;
-      const family = /(?:opus|fable|best)/.test(normalized) ? 'gpt-5.6-sol' : /haiku/.test(normalized) ? 'gpt-5.6-luna' : 'gpt-5.6-terra';
-      mappings.push({ from: model, to: family });
-      return `${prefix}${quote}${family}${quote}${suffix}`;
-    });
+  const replaced = parsed.body.split(/\r?\n/).map((line) => {
+    const entry = yamlMappingEntry(line);
+    if (!entry || entry.indent !== 0 || entry.key.toLocaleLowerCase() !== 'model') return line;
+    const scalar = entry.value.match(/^(\s*)(["']?)([^\s#"']+)\2(\s*(?:#.*)?)$/);
+    if (!scalar) return line;
+    const [, whitespace, quote, model, suffix] = scalar;
+    const normalized = model.toLocaleLowerCase().replace(/\[1m\]$/, '');
+    if (!/(?:opus|sonnet|haiku|fable|best)/.test(normalized)) return line;
+    const family = /(?:opus|fable|best)/.test(normalized) ? 'gpt-5.6-sol' : /haiku/.test(normalized) ? 'gpt-5.6-luna' : 'gpt-5.6-terra';
+    mappings.push({ from: model, to: family });
+    const valueStart = line.length - entry.value.length;
+    return `${line.slice(0, valueStart)}${whitespace}${quote}${family}${quote}${suffix}`;
+  }).join(parsed.eol);
   const result = `${parsed.open}${parsed.eol}${replaced}${parsed.closePrefix}---${parsed.closeEol}${parsed.rest}`;
   return { markdown: result, changed: mappings.length > 0, mappings };
 }
@@ -681,6 +771,11 @@ function discoverSkillRoot(root, metadata, candidates, disabled, warnings) {
 }
 
 function discoverClaudeCommands(root, candidates, warnings, metadata = {}) {
+  const boundary = metadata.pluginRootBoundary || metadata.commandBoundary || (existsDirectory(root) ? root : path.dirname(root));
+  if (!isWithin(root, boundary)) {
+    warnings.push(`Ignored Claude command path outside its command boundary: ${root}`);
+    return;
+  }
   if (existsFile(root)) {
     if (!/\.md$/i.test(root)) return;
     const commandName = path.basename(root).replace(/\.md$/i, '');
@@ -696,9 +791,17 @@ function discoverClaudeCommands(root, candidates, warnings, metadata = {}) {
     return;
   }
   if (!existsDirectory(root)) return;
+  const realRoot = canonical(root);
+  const visited = metadata.commandVisited || new Set();
+  if (visited.has(realRoot)) {
+    warnings.push(`Ignored recursive Claude command directory cycle: ${root}`);
+    return;
+  }
+  visited.add(realRoot);
+  const recursiveMetadata = { ...metadata, commandBoundary: boundary, commandVisited: visited };
   if (existsFile(path.join(root, 'SKILL.md'))) {
     discoverSkillRoot(root, {
-      ...metadata, provider: 'claude', kind: metadata.kind || 'claude-command',
+      ...recursiveMetadata, provider: 'claude', kind: metadata.kind || 'claude-command',
       sourceTag: metadata.sourceTag || 'claude-command', priority: metadata.priority || 20,
     }, candidates, new Set(), warnings);
     return;
@@ -707,18 +810,24 @@ function discoverClaudeCommands(root, candidates, warnings, metadata = {}) {
   try { entries = fs.readdirSync(root, { withFileTypes: true }); }
   catch (error) { warnings.push(`Could not read Claude command directory ${root}: ${error.message}`); return; }
   for (const entry of entries) {
-    if ((entry.isDirectory() || entry.isSymbolicLink()) && existsFile(path.join(root, entry.name, 'SKILL.md'))) {
-      discoverSkillRoot(path.join(root, entry.name), {
-        ...metadata, provider: 'claude', kind: metadata.kind || 'claude-command',
-        sourceTag: metadata.sourceTag || 'claude-command', priority: metadata.priority || 20,
-      }, candidates, new Set(), warnings);
+    const entryPath = path.join(root, entry.name);
+    if (entry.isDirectory() || (entry.isSymbolicLink() && existsDirectory(entryPath))) {
+      if (!isWithin(entryPath, boundary)) {
+        warnings.push(`Ignored Claude command symlink outside its command boundary: ${entryPath}`);
+        continue;
+      }
+      discoverClaudeCommands(entryPath, candidates, warnings, recursiveMetadata);
       continue;
     }
-    if (!entry.isFile() || !/\.md$/i.test(entry.name)) continue;
+    if ((!entry.isFile() && !(entry.isSymbolicLink() && existsFile(entryPath))) || !/\.md$/i.test(entry.name)) continue;
+    if (!isWithin(entryPath, boundary)) {
+      warnings.push(`Ignored Claude command symlink outside its command boundary: ${entryPath}`);
+      continue;
+    }
     const commandName = entry.name.replace(/\.md$/i, '');
     const skillOverride = overrideState(metadata.skillOverrides && metadata.skillOverrides[commandName]);
     if (skillOverride === 'off') continue;
-    const commandFile = path.join(root, entry.name);
+    const commandFile = entryPath;
     candidates.push({
       provider: 'claude', kind: metadata.kind || 'claude-command', sourceTag: metadata.sourceTag || 'claude-command',
       priority: metadata.priority || 20, namespace: metadata.namespace || null,
@@ -750,10 +859,19 @@ function discoverNativeNamesAt(root, names) {
   }
 }
 
-function discoverNativeProjectNames(directories) {
+function claudeManagedSkillsRoot() {
+  if (process.env.CLAUDEX_CLAUDE_MANAGED_SKILLS_DIR) return path.resolve(expandHome(process.env.CLAUDEX_CLAUDE_MANAGED_SKILLS_DIR));
+  return isWindows
+    ? path.join(process.env.ProgramData || 'C:\\ProgramData', 'ClaudeCode', 'skills')
+    : process.platform === 'darwin'
+      ? '/Library/Application Support/ClaudeCode/skills'
+      : '/etc/claude-code/skills';
+}
+
+function discoverNativeReservedNames() {
   const names = new Set();
   discoverNativeNamesAt(configDir, names);
-  for (const directory of directories) discoverNativeNamesAt(path.join(directory, '.claude'), names);
+  discoverNativeNamesAt(path.dirname(claudeManagedSkillsRoot()), names);
   return names;
 }
 
@@ -773,23 +891,29 @@ function discoverNativePluginNames() {
   return names;
 }
 
-function mergedClaudeSettings(projectDir, repoRoot) {
+function mergedClaudeSettings(projectDir, repoRoot, globalOnly = false) {
   const settings = { enabledPlugins: {}, skillOverrides: {}, disableSideloadFlags: false, strictPluginOnlyCustomization: false };
   const apply = (file) => {
     const value = readJson(file, {});
     if (value && typeof value.enabledPlugins === 'object' && value.enabledPlugins) Object.assign(settings.enabledPlugins, value.enabledPlugins);
     if (value && typeof value.skillOverrides === 'object' && value.skillOverrides) Object.assign(settings.skillOverrides, value.skillOverrides);
     if (typeof value.disableSideloadFlags === 'boolean') settings.disableSideloadFlags = value.disableSideloadFlags;
-    if (typeof value.strictPluginOnlyCustomization === 'boolean') settings.strictPluginOnlyCustomization = value.strictPluginOnlyCustomization;
+    if (typeof value.strictPluginOnlyCustomization === 'boolean'
+        || (Array.isArray(value.strictPluginOnlyCustomization)
+          && value.strictPluginOnlyCustomization.every((entry) => typeof entry === 'string'))) {
+      settings.strictPluginOnlyCustomization = value.strictPluginOnlyCustomization;
+    }
   };
   apply(path.join(claudeHome, 'settings.json'));
-  apply(path.join(repoRoot, '.claude', 'settings.json'));
-  // Claude still reads legacy nested local settings, but the repository-root
-  // local file is authoritative when both forms exist.
-  for (const directory of ancestry(projectDir, repoRoot).slice(0, -1).reverse()) {
-    apply(path.join(directory, '.claude', 'settings.local.json'));
+  if (!globalOnly) {
+    apply(path.join(repoRoot, '.claude', 'settings.json'));
+    // Claude still reads legacy nested local settings, but the repository-root
+    // local file is authoritative when both forms exist.
+    for (const directory of ancestry(projectDir, repoRoot).slice(0, -1).reverse()) {
+      apply(path.join(directory, '.claude', 'settings.local.json'));
+    }
+    apply(path.join(repoRoot, '.claude', 'settings.local.json'));
   }
-  apply(path.join(repoRoot, '.claude', 'settings.local.json'));
   const managed = process.env.CLAUDEX_CLAUDE_MANAGED_SETTINGS_FILE || (isWindows
     ? path.join(process.env.SystemDrive || 'C:', 'Program Files', 'ClaudeCode', 'managed-settings.json')
     : process.platform === 'darwin'
@@ -926,10 +1050,10 @@ function discoverPluginContents(pluginRoot, metadata, candidates, disabled, warn
   }
 }
 
-function discoverClaudePlugins(projectDir, repoRoot, candidates, disabled, warnings) {
+function discoverClaudePlugins(projectDir, repoRoot, candidates, disabled, warnings, globalOnly = false, settings = null) {
   if (!pluginEnabled) return;
   const registry = readJson(path.join(claudeHome, 'plugins', 'installed_plugins.json'), {});
-  const enabled = mergedClaudeSettings(projectDir, repoRoot).enabledPlugins;
+  const enabled = (settings || mergedClaudeSettings(projectDir, repoRoot, globalOnly)).enabledPlugins;
   const plugins = registry && typeof registry.plugins === 'object' && registry.plugins ? registry.plugins : {};
   for (const [pluginId, installs] of Object.entries(plugins)) {
     if (!Array.isArray(installs)) continue;
@@ -937,6 +1061,7 @@ function discoverClaudePlugins(projectDir, repoRoot, candidates, disabled, warni
       if (!install || typeof install !== 'object') { warnings.push(`Ignored malformed Claude plugin record for ${pluginId}`); continue; }
       const scope = String(install.scope || 'user');
       if (scope !== 'user' && scope !== 'managed') {
+        if (globalOnly) continue;
         if (typeof install.projectPath !== 'string' || !isWithin(projectDir, install.projectPath)) continue;
       }
       const installPath = typeof install.installPath === 'string' ? path.resolve(install.installPath) : null;
@@ -951,7 +1076,27 @@ function discoverClaudePlugins(projectDir, repoRoot, candidates, disabled, warni
   }
 }
 
-function codexPluginInventory(warnings) {
+function insideGitWorktree(candidate) {
+  let cursor = path.resolve(candidate);
+  while (true) {
+    if (fs.existsSync(path.join(cursor, '.git'))) return true;
+    const parent = path.dirname(cursor);
+    if (parent === cursor) return false;
+    cursor = parent;
+  }
+}
+
+function neutralPluginInventoryCwd() {
+  for (const candidate of [os.tmpdir(), home, path.parse(configDir).root]) {
+    try {
+      const resolved = canonical(candidate);
+      if (existsDirectory(resolved) && !insideGitWorktree(resolved)) return resolved;
+    } catch { }
+  }
+  return null;
+}
+
+function codexPluginInventory(warnings, globalOnly = false) {
   if (!pluginEnabled) return [];
   if (process.env.CLAUDEX_TEST_CODEX_PLUGIN_LIST_FILE) {
     const fixture = readJson(process.env.CLAUDEX_TEST_CODEX_PLUGIN_LIST_FILE, {});
@@ -960,9 +1105,14 @@ function codexPluginInventory(warnings) {
   }
   let result;
   try {
+    const neutralCwd = globalOnly ? neutralPluginInventoryCwd() : null;
+    if (globalOnly && !neutralCwd) {
+      warnings.push('Could not inspect global Codex plugins from a neutral directory; standalone Codex skills are still available.');
+      return [];
+    }
     result = childProcess.spawnSync('codex', ['plugin', 'list', '--json'], {
       encoding: 'utf8', timeout: 5000, maxBuffer: 16 * 1024 * 1024,
-      windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], cwd: neutralCwd || undefined,
     });
   } catch (error) {
     warnings.push(`Could not inspect Codex plugins: ${error.message}`);
@@ -983,8 +1133,8 @@ function codexPluginInventory(warnings) {
   }
 }
 
-function discoverCodexPlugins(candidates, disabled, warnings) {
-  const inventory = codexPluginInventory(warnings);
+function discoverCodexPlugins(candidates, disabled, warnings, globalOnly = false) {
+  const inventory = codexPluginInventory(warnings, globalOnly);
   const cacheRoot = path.join(codexHome, 'plugins', 'cache');
   for (const plugin of inventory) {
     if (!plugin || typeof plugin !== 'object') { warnings.push('Ignored malformed Codex plugin record.'); continue; }
@@ -1272,6 +1422,7 @@ function currentInstructionSignature(instructions) {
   });
   return crypto.createHash('sha256').update(JSON.stringify({
     files, maxBytes: instructions.maxBytes, fallbackFilenames: instructions.fallbackFilenames,
+    projectTrusted: instructions.projectTrusted,
   })).digest('hex');
 }
 
@@ -1284,16 +1435,17 @@ function sourceSignature(mapping) {
   };
 }
 
-function discover(projectDir) {
+function discover(projectDir, scopeMode = SCOPE_PROJECT) {
+  const globalOnly = scopeMode === SCOPE_GLOBAL_ONLY;
   const warnings = [];
   const candidates = [];
-  const repoRoot = findRepoRoot(projectDir);
-  const codexConfig = effectiveCodexProjectConfig(projectDir, repoRoot);
-  const instructions = discoverInstructions(projectDir, repoRoot, warnings, codexConfig);
-  const directories = ancestry(projectDir, repoRoot);
+  const repoRoot = globalOnly ? null : findRepoRoot(projectDir);
+  const codexConfig = effectiveCodexProjectConfig(projectDir, repoRoot, globalOnly);
+  const instructions = discoverInstructions(projectDir, repoRoot, warnings, codexConfig, globalOnly);
+  const directories = globalOnly ? [] : ancestry(projectDir, repoRoot);
   const disabled = parseDisabledCodexSkills(projectDir, repoRoot, codexConfig.projectTrusted);
-  const claudeSettings = mergedClaudeSettings(projectDir, repoRoot);
-  const nativeNames = discoverNativeProjectNames(directories);
+  const claudeSettings = mergedClaudeSettings(projectDir, repoRoot, globalOnly);
+  const nativeNames = discoverNativeReservedNames();
   const nativePluginNames = discoverNativePluginNames();
   nativePluginNames.add('claudex-codex-skill-references');
 
@@ -1340,20 +1492,36 @@ function discover(projectDir) {
     }, candidates, disabled, warnings);
   }
 
-  discoverClaudePlugins(projectDir, repoRoot, candidates, disabled, warnings);
-  discoverCodexPlugins(candidates, disabled, warnings);
+  discoverClaudePlugins(projectDir, repoRoot, candidates, disabled, warnings, globalOnly, claudeSettings);
+  discoverCodexPlugins(candidates, disabled, warnings, globalOnly);
   const unique = uniqueCandidates(prepareCandidates(candidates, warnings));
   const allowPluginDirs = !claudeSettings.disableSideloadFlags;
+  const strictSkills = claudeSettings.strictPluginOnlyCustomization === true
+    || (Array.isArray(claudeSettings.strictPluginOnlyCustomization)
+      && claudeSettings.strictPluginOnlyCustomization.some((entry) => entry.toLocaleLowerCase() === 'skills'));
+  const strictCommands = claudeSettings.strictPluginOnlyCustomization === true
+    || (Array.isArray(claudeSettings.strictPluginOnlyCustomization)
+      && claudeSettings.strictPluginOnlyCustomization.some((entry) => entry.toLocaleLowerCase() === 'commands'));
   if (!allowPluginDirs) warnings.push(
     'Managed Claude settings disable --plugin-dir sideloading; imported skills from plugins and $skill reference hooks were omitted. Ask an administrator to install or allow those plugins.',
   );
+  if (strictSkills) warnings.push(
+    'Managed Claude settings require skills to come from plugins; standalone imported skills were omitted while plugin skills remain available.',
+  );
+  if (strictCommands && !strictSkills) warnings.push(
+    'Managed Claude settings require commands to come from plugins; standalone imported commands were omitted while unrelated skills remain available.',
+  );
+  const standalone = unique.filter((candidate) => candidate.kind === 'claude-command' ? !strictCommands : !strictSkills);
   return {
-    mappings: assignAliases(unique, nativeNames),
+    mappings: assignAliases(standalone, nativeNames),
     pluginMappings: allowPluginDirs ? assignPluginAliases(unique, nativePluginNames) : [],
     instructions,
     warnings,
     repoRoot,
+    scopeMode,
     allowPluginDirs,
+    strictSkills,
+    strictCommands,
   };
 }
 
@@ -1624,8 +1792,12 @@ function garbageCollect(generations, projectHash, active) {
   finally { try { fs.rmdirSync(lock); } catch { } }
 }
 
-function syncOnce(projectDir) {
-  const discovered = discover(projectDir);
+function bridgeCacheKey(projectDir, scopeMode) {
+  return scopeMode === SCOPE_GLOBAL_ONLY ? SCOPE_GLOBAL_ONLY : `${SCOPE_PROJECT}:${canonical(projectDir)}`;
+}
+
+function syncOnce(projectDir, scopeMode = SCOPE_PROJECT) {
+  const discovered = discover(projectDir, scopeMode);
   const allMappings = [...discovered.mappings, ...discovered.pluginMappings];
   const sortObjects = (values) => values.sort((left, right) => {
     const leftKey = JSON.stringify(left);
@@ -1638,19 +1810,28 @@ function syncOnce(projectDir) {
     kind: mapping.candidate.kind, provider: mapping.candidate.provider, manualOnly: mapping.candidate.manualOnly,
     overrideState: mapping.candidate.overrideState || 'on',
   })));
-  const policyInstructions = discovered.instructions.files.map((file) => ({
-    scope: file.scope, source: file.realSource, name: file.name,
-  }));
+  const policyInstructions = {
+    files: discovered.instructions.files.map((file) => ({
+      scope: file.scope, source: file.realSource, name: file.name,
+    })),
+    maxBytes: discovered.instructions.maxBytes,
+    fallbackFilenames: discovered.instructions.fallbackFilenames,
+    projectTrusted: discovered.instructions.projectTrusted,
+  };
   const policyFingerprint = crypto.createHash('sha256').update(JSON.stringify({
     format: BRIDGE_FORMAT, pluginEnabled, dollarReferencesEnabled, instructionBridgeEnabled,
-    allowPluginDirs: discovered.allowPluginDirs, skills: policySkills, instructions: policyInstructions,
+    scopeMode,
+    allowPluginDirs: discovered.allowPluginDirs, strictSkills: discovered.strictSkills,
+    strictCommands: discovered.strictCommands,
+    skills: policySkills, instructions: policyInstructions,
   })).digest('hex');
   const fingerprint = crypto.createHash('sha256').update(JSON.stringify({
     schema: BRIDGE_SCHEMA, format: BRIDGE_FORMAT, platform: process.platform,
+    scopeMode,
     signatures, instructionSignature: discovered.instructions.signature,
     dollarReferencesEnabled, instructionBridgeEnabled, policyFingerprint,
   })).digest('hex').slice(0, 20);
-  const projectHash = crypto.createHash('sha256').update(canonical(projectDir)).digest('hex').slice(0, 12);
+  const projectHash = crypto.createHash('sha256').update(bridgeCacheKey(projectDir, scopeMode)).digest('hex').slice(0, 12);
   const generations = path.join(configDir, 'skill-bridge', 'generations');
   const generation = path.join(generations, `${projectHash}-${fingerprint}`);
   const manifestPath = path.join(generation, 'manifest.json');
@@ -1734,7 +1915,8 @@ function syncOnce(projectDir) {
 
     const contentFiles = publishedContentInventory(stage);
     manifest = {
-      schema: BRIDGE_SCHEMA, format: BRIDGE_FORMAT, project: path.resolve(projectDir), repoRoot: discovered.repoRoot,
+      schema: BRIDGE_SCHEMA, format: BRIDGE_FORMAT, scopeMode,
+      project: scopeMode === SCOPE_GLOBAL_ONLY ? null : path.resolve(projectDir), repoRoot: discovered.repoRoot,
       fingerprint, policyFingerprint, publishedAt: Date.now(), skills: records, instructions: instructionRecords,
       pluginRelativeDirs, modelMappings, warnings: boundedWarnings(discovered.warnings), contentFiles,
       contentIntegrity: contentIntegrity(contentFiles),
@@ -1761,14 +1943,14 @@ function syncOnce(projectDir) {
   return generationResult(generation, manifest, [], discovered.warnings);
 }
 
-function sync(projectDir) {
+function sync(projectDir, scopeMode = SCOPE_PROJECT) {
   if (!bridgeEnabled) return { schema: BRIDGE_SCHEMA, enabled: false, overlay: null, addDirs: [], pluginDirs: [], skills: [], instructions: [], warnings: [] };
-  const projectHash = crypto.createHash('sha256').update(canonical(projectDir)).digest('hex').slice(0, 12);
+  const projectHash = crypto.createHash('sha256').update(bridgeCacheKey(projectDir, scopeMode)).digest('hex').slice(0, 12);
   const generations = path.join(configDir, 'skill-bridge', 'generations');
   let lastError;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const result = syncOnce(projectDir);
+      const result = syncOnce(projectDir, scopeMode);
       saveDigestCache();
       return result;
     }
@@ -1815,17 +1997,19 @@ function printList(result) {
 function parseArguments(argv) {
   const command = argv[0] || 'sync';
   let project = process.cwd();
+  let scopeMode = SCOPE_PROJECT;
   for (let index = 1; index < argv.length; index++) {
     if (argv[index] === '--project' && argv[index + 1]) project = argv[++index];
+    else if (argv[index] === '--global-only') scopeMode = SCOPE_GLOBAL_ONLY;
     else throw new Error(`unknown argument: ${argv[index]}`);
   }
-  return { command, project: path.resolve(project) };
+  return { command, project: path.resolve(project), scopeMode };
 }
 
 function main() {
-  const { command, project } = parseArguments(process.argv.slice(2));
+  const { command, project, scopeMode } = parseArguments(process.argv.slice(2));
   if (!['sync', 'list', 'doctor'].includes(command)) throw new Error(`unknown command: ${command}`);
-  const result = sync(project);
+  const result = sync(project, scopeMode);
   if (command === 'sync') process.stdout.write(`${JSON.stringify(result)}\n`);
   else printList(result);
 }
@@ -1840,5 +2024,6 @@ if (require.main === module) {
 
 module.exports = {
   assignAliases, codexPolicyDisablesImplicit, codexSkillIdentity, discover, ensureManualOnly,
-  findRepoRoot, frontmatter, parseDisabledCodexSkills, remapClaudeModel, safeName, scanTree, skillAlias, sync,
+  findRepoRoot, frontmatter, neutralPluginInventoryCwd, parseDisabledCodexSkills, remapClaudeModel,
+  safeName, scanTree, skillAlias, sync,
 };
