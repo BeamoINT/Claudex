@@ -44,6 +44,34 @@ function Wait-ForTestProcess([Diagnostics.Process] $Process, [string] $Message, 
     throw "assertion failed: $Message"
 }
 
+function Assert-TrackedTestProcessSucceeded([Diagnostics.Process] $Process, [string] $Label, [string] $Message) {
+    if ($Process.ExitCode -eq 0) { return }
+    $details = @()
+    foreach ($streamName in @('stdout', 'stderr')) {
+        $streamPath = Join-Path $temporary ($Label + '.' + $streamName + '.log')
+        if (Test-Path -LiteralPath $streamPath -PathType Leaf) {
+            try {
+                $streamText = [IO.File]::ReadAllText($streamPath).Trim()
+                if ($streamText) { $details += ($streamName + ': ' + $streamText) }
+            } catch {
+                $details += ($streamName + ' unavailable while its handle closes')
+            }
+        }
+    }
+    $suffix = if ($details.Count -gt 0) { ' (' + ($details -join '; ') + ')' } else { '' }
+    throw "assertion failed: $Message; exit code $($Process.ExitCode)$suffix"
+}
+
+function Remove-TestPathWithRetry([string] $Path, [int] $TimeoutMilliseconds = 5000) {
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $Path)) { return $true }
+        Start-Sleep -Milliseconds 20
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return -not (Test-Path -LiteralPath $Path)
+}
+
 try {
     [IO.Directory]::CreateDirectory($testConfig) | Out-Null
     [IO.Directory]::CreateDirectory($fakeBin) | Out-Null
@@ -1994,7 +2022,7 @@ process.stdout.write(JSON.stringify({
             $env:FAKE_UPDATE_DONE_FILE = $updateDone
             $detachedUpdateLauncher = Start-TrackedTestProcess $shellPath $updateLauncherArguments 'windows-detached-update-launcher'
             Wait-ForTestProcess $detachedUpdateLauncher 'Windows launcher exits while its detached updater remains active'
-            Assert-True ($detachedUpdateLauncher.ExitCode -eq 0) 'Windows detached updater launcher succeeds'
+            Assert-TrackedTestProcessSucceeded $detachedUpdateLauncher 'windows-detached-update-launcher' 'Windows detached updater launcher succeeds'
             for ($attempt = 0; $attempt -lt 200 -and
                 (-not (Test-Path -LiteralPath $updateReady -PathType Leaf) -or
                  -not (Test-Path -LiteralPath (Join-Path $updateDirectory 'lock\owner') -PathType Leaf)); $attempt++) {
@@ -2005,7 +2033,7 @@ process.stdout.write(JSON.stringify({
             $env:CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE = $updateAttempt
             $liveUpdateContender = Start-TrackedTestProcess $shellPath $updateLauncherArguments 'windows-live-update-contender'
             Wait-ForTestProcess $liveUpdateContender 'Windows live update owner contender launcher exits'
-            Assert-True ($liveUpdateContender.ExitCode -eq 0) 'Windows live update owner contender launcher succeeds'
+            Assert-TrackedTestProcessSucceeded $liveUpdateContender 'windows-live-update-contender' 'Windows live update owner contender launcher succeeds'
             for ($attempt = 0; $attempt -lt 200 -and
                 (-not (Test-Path -LiteralPath $updateAttempt) -or
                  -not ([IO.File]::ReadAllText($updateAttempt).Contains('blocked '))); $attempt++) { Start-Sleep -Milliseconds 20 }
@@ -2032,7 +2060,7 @@ process.stdout.write(JSON.stringify({
             Remove-Item -LiteralPath @('Env:FAKE_UPDATE_WAIT_FILE', 'Env:FAKE_UPDATE_READY_FILE', 'Env:FAKE_UPDATE_DONE_FILE') -ErrorAction SilentlyContinue
             $legacyUpdateContender = Start-TrackedTestProcess $shellPath $updateLauncherArguments 'windows-legacy-update-contender'
             Wait-ForTestProcess $legacyUpdateContender 'Windows legacy ownerless update contender launcher exits'
-            Assert-True ($legacyUpdateContender.ExitCode -eq 0) 'Windows legacy ownerless update contender launcher succeeds'
+            Assert-TrackedTestProcessSucceeded $legacyUpdateContender 'windows-legacy-update-contender' 'Windows legacy ownerless update contender launcher succeeds'
             for ($attempt = 0; $attempt -lt 200 -and
                 (-not (Test-Path -LiteralPath $legacyAttempt) -or
                  -not ([IO.File]::ReadAllText($legacyAttempt).Contains('blocked '))); $attempt++) { Start-Sleep -Milliseconds 20 }
@@ -2051,12 +2079,18 @@ process.stdout.write(JSON.stringify({
             Remove-Item Env:FAKE_UPDATE_DONE_FILE -ErrorAction SilentlyContinue
             $deadUpdateContender = Start-TrackedTestProcess $shellPath $updateLauncherArguments 'windows-dead-update-contender'
             Wait-ForTestProcess $deadUpdateContender 'Windows dead update owner contender launcher exits'
-            Assert-True ($deadUpdateContender.ExitCode -eq 0) 'Windows dead update owner contender launcher succeeds'
+            Assert-TrackedTestProcessSucceeded $deadUpdateContender 'windows-dead-update-contender' 'Windows dead update owner contender launcher succeeds'
             for ($attempt = 0; $attempt -lt 200 -and -not (Test-Path -LiteralPath (Join-Path $updateDirectory 'last-success') -PathType Leaf); $attempt++) {
                 Start-Sleep -Milliseconds 20
             }
             Assert-True (Test-Path -LiteralPath (Join-Path $updateDirectory 'last-success') -PathType Leaf) 'Windows dead update owner is reclaimed'
         } finally {
+            try { [IO.File]::WriteAllText($updateRelease, "release`n", $utf8) } catch { }
+            for ($attempt = 0; $attempt -lt 250 -and
+                (-not (Test-Path -LiteralPath (Join-Path $updateDirectory 'last-success') -PathType Leaf) -or
+                 (Test-Path -LiteralPath (Join-Path $updateDirectory 'lock') -PathType Container)); $attempt++) {
+                Start-Sleep -Milliseconds 20
+            }
             foreach ($name in @('FAKE_UPDATE_LOG', 'FAKE_UPDATE_ENV_LOG', 'FAKE_UPDATE_READY_FILE', 'FAKE_UPDATE_WAIT_FILE', 'FAKE_UPDATE_DONE_FILE', 'CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE')) {
                 Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
             }
@@ -2065,7 +2099,7 @@ process.stdout.write(JSON.stringify({
             if ($null -eq $savedAuthToken) { Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue } else { $env:ANTHROPIC_AUTH_TOKEN = $savedAuthToken }
             if ($null -eq $savedSubagentModel) { Remove-Item Env:CLAUDE_CODE_SUBAGENT_MODEL -ErrorAction SilentlyContinue } else { $env:CLAUDE_CODE_SUBAGENT_MODEL = $savedSubagentModel }
             if ($null -eq $savedLockTestMode) { Remove-Item Env:CLAUDEX_TEST_MODE -ErrorAction SilentlyContinue } else { $env:CLAUDEX_TEST_MODE = $savedLockTestMode }
-            Remove-Item -LiteralPath $updateDirectory -Recurse -Force -ErrorAction SilentlyContinue
+            [void] (Remove-TestPathWithRetry $updateDirectory)
         }
         Write-TestStage 'automatic update regressions passed'
     }
@@ -3097,5 +3131,5 @@ exit /b %ERRORLEVEL%
         try { $trackedTestProcess.Dispose() } catch { }
     }
     if ($isWindowsPlatform) { Remove-Item Function:\global:claude -ErrorAction SilentlyContinue }
-    if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+    if (Test-Path -LiteralPath $temporary) { [void] (Remove-TestPathWithRetry $temporary) }
 }

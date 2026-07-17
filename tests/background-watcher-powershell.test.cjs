@@ -63,5 +63,13 @@ assert.doesNotMatch(updateFixture, /& \$shellPath[\s\S]*--version \| Out-Null/,
   'detached updater regressions must not wait on a native descendant output pipeline');
 assert.equal((updateFixture.match(/Start-TrackedTestProcess \$shellPath \$updateLauncherArguments/g) || []).length, 4,
   'each detached updater launcher must use a bounded direct process handle');
+assert.equal((updateFixture.match(/Assert-TrackedTestProcessSucceeded/g) || []).length, 4,
+  'each updater launcher failure must preserve its captured process diagnostics');
+assert.match(suite, /streamName \+ ' unavailable while its handle closes'/,
+  'Windows process diagnostics must tolerate a transient inherited log handle');
+assert.match(updateFixture, /WriteAllText\(\$updateRelease,[\s\S]*Join-Path \$updateDirectory 'last-success'[\s\S]*Remove-TestPathWithRetry \$updateDirectory/,
+  'automatic update cleanup must release and drain a blocked detached worker before deleting its logs');
+assert.match(suite, /Remove-TestPathWithRetry \$temporary/,
+  'Windows suite cleanup must not mask a primary failure with a transient open file handle');
 
 console.log('PowerShell background watcher contract passed');
