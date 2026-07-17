@@ -2362,6 +2362,8 @@ HOME="$update_home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" CLAUD
   FAKE_UPDATE_WAIT_FILE="$replacement_update_release" FAKE_UPDATE_DONE_FILE="$replacement_update_done" \
   "$root/claudex" --claude-chrome --version >/dev/null
 for _ in {1..1000}; do [[ -e "$replacement_update_ready" && -s "$update_dir/lock/owner" ]] && break; sleep 0.02; done
+replacement_update_worker=$(awk -F= '$1 == "pid" { print $2; exit }' "$update_dir/lock/owner")
+[[ "$replacement_update_worker" =~ ^[0-9]+$ ]]
 mv "$update_dir/lock" "$update_dir/displaced-lock"
 mkdir "$update_dir/lock"
 printf 'pid=%s\nidentity=%s\nnonce=replacement-update-owner\n' "$$" 'test-process-identity' > "$update_dir/lock/owner"
@@ -2369,6 +2371,8 @@ printf 'pid=%s\nidentity=%s\nnonce=replacement-update-owner\n' "$$" 'test-proces
 for _ in {1..1000}; do [[ -e "$replacement_update_done" ]] && break; sleep 0.02; done
 [[ -e "$replacement_update_done" ]]
 grep -F 'nonce=replacement-update-owner' "$update_dir/lock/owner" >/dev/null
+for _ in {1..1000}; do kill -0 "$replacement_update_worker" 2>/dev/null || break; sleep 0.02; done
+! kill -0 "$replacement_update_worker" 2>/dev/null
 rm -rf "$update_dir"
 
 # A killed owner is reclaimed.
