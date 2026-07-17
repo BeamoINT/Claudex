@@ -2537,9 +2537,10 @@ process.stdout.write(JSON.stringify({
     Assert-True (-not [bool] $repairedBridge.disabled -and -not [bool] $repairedBridge.expired) 'repaired bridge credential enabled'
 
     $logoutAuthArgsLog = Join-Path $temporary 'codex-logout-auth-args.log'
+    $logoutStandardOutputLog = Join-Path $temporary 'codex-logout.stdout.log'
+    $logoutStandardErrorLog = Join-Path $temporary 'codex-logout.stderr.log'
     $savedLogoutPath = $env:PATH
     $savedFakeSegment = $null
-    $savedErrorPreference = $ErrorActionPreference
     try {
         if ($isWindowsPlatform) {
             $percentCodexBin = Join-Path $temporary '%CLAUDEX_FAKE_SEGMENT%&codex-shim'
@@ -2563,12 +2564,14 @@ process.stdout.write(JSON.stringify({
         $env:FAKE_CODEX_AUTH_ARGS_LOG = $logoutAuthArgsLog
         $env:FAKE_CODEX_DEFAULT_LOGOUT = '0'
         $env:FAKE_CODEX_FILE_LOGOUT = '9'
-        $ErrorActionPreference = 'Continue'
         $shellPath = (Get-Process -Id $PID).Path
-        $logoutOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'codex-session.ps1') logout 2>&1
-        $logoutExit = $LASTEXITCODE
+        $logoutProcess = Start-Process -FilePath $shellPath -ArgumentList @(
+            '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedSessionHelper, 'logout'
+        ) -RedirectStandardOutput $logoutStandardOutputLog -RedirectStandardError $logoutStandardErrorLog -PassThru
+        Wait-ForTestProcess $logoutProcess 'failed Codex logout process exits'
+        $logoutExit = $logoutProcess.ExitCode
+        $logoutOutput = [IO.File]::ReadAllText($logoutStandardOutputLog) + [IO.File]::ReadAllText($logoutStandardErrorLog)
     } finally {
-        $ErrorActionPreference = $savedErrorPreference
         Remove-Item Env:FAKE_CODEX_FILE_LOGOUT -ErrorAction SilentlyContinue
         Remove-Item Env:FAKE_CODEX_DEFAULT_LOGOUT -ErrorAction SilentlyContinue
         Remove-Item Env:FAKE_CODEX_AUTH_ARGS_LOG -ErrorAction SilentlyContinue
