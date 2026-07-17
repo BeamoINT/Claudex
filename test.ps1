@@ -753,8 +753,15 @@ exit 43
             Assert-True ($LASTEXITCODE -eq 29) 'full native Claude model selector preserves the child exit code'
             $nativeFullModelArguments = @([IO.File]::ReadAllLines($nativeModelArgumentLog))
             Assert-True (($nativeFullModelArguments -join '|') -eq "--model|$nativeFullModel|literal;not-shell") 'full native Claude model selector forwards the exact model ID and remaining argv'
-            $missingNativeModelOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --claude-model 2>&1
-            Assert-True ($LASTEXITCODE -eq 1 -and ($missingNativeModelOutput | Out-String).Contains('--claude-model requires a nonempty Claude model ID.')) 'empty native Claude model selector fails before managed config import'
+            $savedErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $missingNativeModelOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --claude-model 2>&1
+                $missingNativeModelExit = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $savedErrorActionPreference
+            }
+            Assert-True ($missingNativeModelExit -eq 1 -and ($missingNativeModelOutput | Out-String).Contains('--claude-model requires a nonempty Claude model ID.')) 'empty native Claude model selector fails before managed config import'
             Remove-Item Env:FAKE_CLAUDE_ARGUMENT_LOG -ErrorAction SilentlyContinue
 
             Remove-Item Env:CLAUDEX_MANAGED_SESSION -ErrorAction SilentlyContinue
