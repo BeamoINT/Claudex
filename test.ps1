@@ -2032,7 +2032,7 @@ process.stdout.write(JSON.stringify({
             Assert-True ($updateEnvironment.Contains("AUTH_TOKEN=`r`n") -or $updateEnvironment.Contains("AUTH_TOKEN=`n")) 'Windows updater does not inherit provider token'
             Assert-True ($updateEnvironment.Contains("SUBAGENT=`r`n") -or $updateEnvironment.Contains("SUBAGENT=`n")) 'Windows updater does not inherit subagent routing'
 
-            Remove-Item -LiteralPath $updateDirectory -Recurse -Force
+            Assert-True (Remove-TestPathWithRetry $updateDirectory) 'Windows completed updater releases its redirected log handles'
             Remove-Item -LiteralPath $updateLog -Force -ErrorAction SilentlyContinue
             [IO.Directory]::CreateDirectory((Join-Path $updateDirectory 'lock')) | Out-Null
             $legacyAttempt = Join-Path $temporary 'windows-legacy-update-attempt'
@@ -2048,7 +2048,7 @@ process.stdout.write(JSON.stringify({
             Assert-True (-not (Test-Path -LiteralPath $updateLog)) 'Windows legacy ownerless lock prevents duplicate update execution'
             Remove-Item Env:CLAUDEX_TEST_UPDATE_WORKER_ATTEMPT_FILE
 
-            Remove-Item -LiteralPath $updateDirectory -Recurse -Force
+            Assert-True (Remove-TestPathWithRetry $updateDirectory) 'Windows blocked legacy updater leaves resettable lock state'
             Remove-Item -LiteralPath $updateLog, $updateReady, $updateRelease, $updateDone -Force -ErrorAction SilentlyContinue
             [IO.Directory]::CreateDirectory((Join-Path $updateDirectory 'lock')) | Out-Null
             [IO.File]::WriteAllText((Join-Path $updateDirectory 'lock\owner'), "pid=2147483000`nidentity=dead`nnonce=dead-windows-update-owner`n", $utf8)

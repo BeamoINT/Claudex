@@ -72,6 +72,8 @@ assert.equal((updateFixture.match(/Start-TrackedTestProcess \$shellPath \$update
   'each detached updater launcher must use a bounded direct process handle');
 assert.match(updateFixture, /WriteAllText\(\$updateRelease,[\s\S]*Join-Path \$updateDirectory 'last-success'[\s\S]*Remove-TestPathWithRetry \$updateDirectory/,
   'automatic update cleanup must release and drain a blocked detached worker before deleting its logs');
+assert.equal((updateFixture.match(/Remove-TestPathWithRetry \$updateDirectory/g) || []).length, 3,
+  'every automatic updater state reset must tolerate transient Windows log handles');
 assert.match(suite, /Remove-TestPathWithRetry \$temporary/,
   'Windows suite cleanup must not mask a primary failure with a transient open file handle');
 
