@@ -726,7 +726,7 @@ CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=inherited CLAUDEX_SKILL_BRIDGE_HELP
 [[ "$(grep -c 'Unsafe skill ignored' "$tmp/warning-first.stderr")" == 1 ]]
 grep -F 'Plugin fallback using last known good snapshot' "$tmp/warning-first.stderr" >/dev/null
 grep -F 'Bidi safe' "$tmp/warning-first.stderr" >/dev/null
-if LC_ALL=C grep -q $'\u202E' "$tmp/warning-first.stderr"; then
+if LC_ALL=C grep -q $'\342\200\256' "$tmp/warning-first.stderr"; then
   printf '%s\n' 'skill warning retained a Unicode bidi control' >&2
   exit 1
 fi
@@ -1566,8 +1566,8 @@ hostile_status=$(printf '%s\n' '{"session_id":"hostile-session","model":{"id":"h
 hostile_unstyled=${hostile_status//$'\033[38;5;81m'/}
 hostile_unstyled=${hostile_unstyled//$'\033[1m'/}
 hostile_unstyled=${hostile_unstyled//$'\033[0m'/}
-[[ "$hostile_unstyled" != *$'\033'* && "$hostile_unstyled" != *$'\007'* && "$hostile_unstyled" != *$'\u009b'* ]]
-[[ "$hostile_unstyled" != *$'\u061c'* && "$hostile_unstyled" != *$'\u200e'* && "$hostile_unstyled" != *$'\u200f'* && "$hostile_unstyled" != *$'\u202e'* ]]
+[[ "$hostile_unstyled" != *$'\033'* && "$hostile_unstyled" != *$'\007'* && "$hostile_unstyled" != *$'\302\233'* ]]
+[[ "$hostile_unstyled" != *$'\330\234'* && "$hostile_unstyled" != *$'\342\200\216'* && "$hostile_unstyled" != *$'\342\200\217'* && "$hostile_unstyled" != *$'\342\200\256'* ]]
 
 safe_unicode_status=$(printf '%s\n' '{"session_id":"safe-label-session","model":{"id":"safe-\u6a21\u578b"},"effort":{"level":"future-tier"},"context_window":{"used_percentage":6}}' | \
   CLAUDEX_USAGE_DISPLAY=off CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
@@ -1577,7 +1577,10 @@ suffix_only_status=$(printf '%s\n' '{"session_id":"suffix-only-session","model":
   CLAUDEX_USAGE_DISPLAY=off CLAUDE_CONFIG_DIR="$tmp/home/.config/claudex" "$root/statusline")
 [[ "$suffix_only_status" == $'\033[38;5;81mClaudex\033[0m · \033[1msafe fallback\033[0m · adaptive effort · 7% context' ]]
 
-printf '%s\n' $'safe summary \033]0;CACHE-OSC\007 \u009d0;CACHE-C1-OSC\u009c \033[31mCACHE-CSI\033[0m \u009b31mCACHE-C1 \u202eCACHE-BIDI' \
+# Use byte escapes rather than locale-sensitive \u escapes. Bash intentionally
+# leaves \u escapes literal in a plain C locale, which would turn this control-
+# sequence fixture into printable text and produce a false sanitizer failure.
+printf '%s\n' $'safe summary \033]0;CACHE-OSC\007 \302\2350;CACHE-C1-OSC\302\234 \033[31mCACHE-CSI\033[0m \302\23331mCACHE-C1 \342\200\256CACHE-BIDI' \
   > "$tmp/home/.config/claudex/usage-cache/summary"
 date +%s > "$tmp/home/.config/claudex/usage-cache/last-success"
 hostile_cache_status=$(printf '%s\n' '{"session_id":"hostile-cache","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":5}}' | \
@@ -1587,7 +1590,7 @@ hostile_cache_status=$(printf '%s\n' '{"session_id":"hostile-cache","model":{"id
 hostile_cache_unstyled=${hostile_cache_status//$'\033[38;5;81m'/}
 hostile_cache_unstyled=${hostile_cache_unstyled//$'\033[1m'/}
 hostile_cache_unstyled=${hostile_cache_unstyled//$'\033[0m'/}
-[[ "$hostile_cache_unstyled" != *$'\033'* && "$hostile_cache_unstyled" != *$'\007'* && "$hostile_cache_unstyled" != *$'\u009b'* && "$hostile_cache_unstyled" != *$'\u202e'* ]]
+[[ "$hostile_cache_unstyled" != *$'\033'* && "$hostile_cache_unstyled" != *$'\007'* && "$hostile_cache_unstyled" != *$'\302\233'* && "$hostile_cache_unstyled" != *$'\342\200\256'* ]]
 
 status_refresh_config="$tmp/status-refresh-private-env"
 status_refresh_helper="$tmp/status-refresh-private-env-helper"

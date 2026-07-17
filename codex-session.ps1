@@ -649,12 +649,58 @@ function Get-CodexSourceSnapshot {
     return [pscustomobject]@{ Valid = [bool] $valid; Raw = $raw; Source = $source }
 }
 
+function ConvertTo-CodexCmdArgument([string] $Value) {
+    if ($null -eq $Value) { $Value = '' }
+    return '"' + $Value.Replace('%', '%%').Replace('"', '""') + '"'
+}
+
+$script:lastCodexCommandExitCode = 1
+function Invoke-CodexCommand($Codex, [string[]] $Arguments, [switch] $DiscardOutput) {
+    $commandPath = [string] $Codex.Source
+    $extension = [IO.Path]::GetExtension($commandPath).ToLowerInvariant()
+    if ($isWindowsPlatform -and $extension -in @('.cmd', '.bat')) {
+        $commandLine = (ConvertTo-CodexCmdArgument $commandPath) + ' ' +
+            (@($Arguments | ForEach-Object { ConvertTo-CodexCmdArgument ([string] $_) }) -join ' ')
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
+        $startInfo.Arguments = '/d /s /v:off /c "' + $commandLine + '"'
+        $startInfo.UseShellExecute = $false
+        if ($DiscardOutput) {
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+        }
+        $process = New-Object Diagnostics.Process
+        $process.StartInfo = $startInfo
+        try {
+            if (-not $process.Start()) { throw 'Codex command could not be started.' }
+            if ($DiscardOutput) {
+                $stdoutDrain = $process.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
+                $stderrDrain = $process.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
+            }
+            $process.WaitForExit()
+            if ($DiscardOutput) {
+                $stdoutDrain.GetAwaiter().GetResult()
+                $stderrDrain.GetAwaiter().GetResult()
+            }
+            $script:lastCodexCommandExitCode = [int] $process.ExitCode
+        } finally {
+            $process.Dispose()
+        }
+    } else {
+        $global:LASTEXITCODE = $null
+        if ($DiscardOutput) { & $commandPath @Arguments *> $null }
+        else { & $commandPath @Arguments }
+        $script:lastCodexCommandExitCode = if ($null -ne $LASTEXITCODE) { [int] $LASTEXITCODE } elseif ($?) { 0 } else { 1 }
+    }
+    $global:LASTEXITCODE = $script:lastCodexCommandExitCode
+}
+
 function Test-CodexLogin {
     $codex = Get-Command codex -ErrorAction SilentlyContinue
     if (-not $codex) { return $false }
     try {
-        & $codex.Source '-c' 'cli_auth_credentials_store=''file''' 'login' 'status' *> $null
-        return $LASTEXITCODE -eq 0
+        Invoke-CodexCommand -Codex $codex -Arguments @('-c', 'cli_auth_credentials_store="file"', 'login', 'status') -DiscardOutput
+        return $script:lastCodexCommandExitCode -eq 0
     } catch {
         return $false
     }
@@ -920,8 +966,8 @@ switch ($Action) {
         $codex = Get-Command codex -ErrorAction SilentlyContinue
         if (-not $codex) { Write-Failure 'Codex CLI was not found. Install Codex and retry.'; exit 10 }
         Write-Output 'Claudex is opening the official Codex sign-in flow...'
-        & $codex.Source '-c' 'cli_auth_credentials_store=''file''' 'login'
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Invoke-CodexCommand -Codex $codex -Arguments @('-c', 'cli_auth_credentials_store="file"', 'login')
+        if ($script:lastCodexCommandExitCode -ne 0) { exit $script:lastCodexCommandExitCode }
         $result = Sync-Session
         if ($result -ne 0) { exit $result }
         Write-Output 'Codex authentication is ready for Claudex.'
@@ -931,8 +977,8 @@ switch ($Action) {
         try {
             $codex = Get-Command codex -ErrorAction SilentlyContinue
             if ($codex) {
-                & $codex.Source '-c' 'cli_auth_credentials_store=''file''' 'logout'
-                $exitCode = $LASTEXITCODE
+                Invoke-CodexCommand -Codex $codex -Arguments @('-c', 'cli_auth_credentials_store="file"', 'logout')
+                $exitCode = $script:lastCodexCommandExitCode
             } else { $exitCode = 10 }
             Clear-OwnedSessionState
         }

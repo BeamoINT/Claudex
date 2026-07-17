@@ -504,7 +504,7 @@ exit 1
         $codexConfigArgument = if (Test-Path -LiteralPath $codexConfigArgumentLog -PathType Leaf) { [IO.File]::ReadAllText($codexConfigArgumentLog).Trim() } else { '<missing>' }
         $codexConfigCommand = if (Test-Path -LiteralPath $codexConfigCommandLog -PathType Leaf) { [IO.File]::ReadAllText($codexConfigCommandLog).Trim() } else { '<missing>' }
         Assert-True ($codexLiteralSyncExit -eq 0) "Windows Codex synchronization preserves the file credential override as one argument (config=$codexConfigArgument command=$codexConfigCommand exit=$codexLiteralSyncExit)"
-        Assert-True ($codexConfigArgument -eq "cli_auth_credentials_store='file'") 'Windows Codex synchronization uses a cmd safe TOML literal'
+        Assert-True ($codexConfigArgument -eq 'cli_auth_credentials_store="file"') 'Windows Codex synchronization preserves the canonical TOML override'
 
         $privateHelper = Join-Path $temporary 'private-environment-helper.ps1'
         $privateHelperLog = Join-Path $temporary 'private-environment-helper.log'
@@ -954,7 +954,7 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
         $classifierCodexArguments = if (Test-Path -LiteralPath $classifierCodexLog -PathType Leaf) {
             (@([IO.File]::ReadAllLines($classifierCodexLog)) | ForEach-Object { $_.Replace("`r", '\r').Replace("`n", '\n') }) -join '|'
         } else { '<not-invoked>' }
-        & (Join-Path $fakeBin 'codex.cmd') '-c' 'cli_auth_credentials_store=''file''' 'login' 'status' *> $null
+        & (Join-Path $fakeBin 'codex.cmd') '-c' 'cli_auth_credentials_store="file"' 'login' 'status' *> $null
         $directCodexStatusExit = $LASTEXITCODE
         throw "assertion failed: auto classifier; resolved Claude commands: $claudeResolution; Claude argv: $classifierClaudeArguments; Codex argv: $classifierCodexArguments; direct Codex status exit: $directCodexStatusExit; source auth exists: $(Test-Path -LiteralPath (Join-Path $testCodexDir 'auth.json') -PathType Leaf); sanitized output: $safeOutput; proxy diagnostics: $proxyRecoveryDetail"
     }
