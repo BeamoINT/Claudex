@@ -50,5 +50,9 @@ assert.match(suite, /Windows detached watchers exit after registry is stably emp
 assert.match(suite, /\[\{\"id\":\"managed-bg-test\",\"state\":\"working\"\}\]/, 'Windows fixture uses the documented id and state schema without kind');
 assert.match(suite, /Windows invalid registry root is not treated as empty/, 'Windows suite keeps watchers alive on an invalid registry root');
 assert.match(suite, /direct watcher registry query also scrubs inherited private families/, 'Windows suite injects and rejects private watcher environment');
+assert.match(suite, /testSuiteTimeoutSeconds = 600/, 'Windows CI suite has a bounded internal watchdog');
+assert.match(suite, /test\.ps1 watchdog timed out after/, 'Windows CI watchdog reports the active test stage');
+assert.match(suite, /Stop-Process -Id \$PID -Force/, 'Windows CI watchdog terminates a hung test host');
+assert.match(suite, /testSuiteWatchdog\.Kill\(\)/, 'Windows CI suite cleans up its watchdog after success or failure');
 
 console.log('PowerShell background watcher contract passed');

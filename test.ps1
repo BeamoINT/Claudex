@@ -9,12 +9,15 @@ $fakeBin = Join-Path $temporary 'bin'
 $utf8 = New-Object Text.UTF8Encoding($false)
 $isWindowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 $script:trackedTestProcesses = @()
+$script:testSuiteWatchdog = $null
+$script:testStageFile = Join-Path $temporary 'test-stage.txt'
 
 function Assert-True([bool] $Condition, [string] $Message) {
     if (-not $Condition) { throw "assertion failed: $Message" }
 }
 
 function Write-TestStage([string] $Message) {
+    try { [IO.File]::WriteAllText($script:testStageFile, $Message, $utf8) } catch { }
     [Console]::WriteLine("test.ps1: $Message")
 }
 
@@ -44,6 +47,29 @@ function Wait-ForTestProcess([Diagnostics.Process] $Process, [string] $Message, 
 try {
     [IO.Directory]::CreateDirectory($testConfig) | Out-Null
     [IO.Directory]::CreateDirectory($fakeBin) | Out-Null
+    if ($isWindowsPlatform -and $env:CI) {
+        $testSuiteTimeoutSeconds = 600
+        if ($env:CLAUDEX_TEST_SUITE_TIMEOUT_SECONDS) {
+            $configuredTimeout = 0
+            Assert-True ([int]::TryParse($env:CLAUDEX_TEST_SUITE_TIMEOUT_SECONDS, [ref] $configuredTimeout) -and
+                $configuredTimeout -ge 60 -and $configuredTimeout -le 1800) 'CLAUDEX_TEST_SUITE_TIMEOUT_SECONDS must be between 60 and 1800'
+            $testSuiteTimeoutSeconds = $configuredTimeout
+        }
+        Write-TestStage 'initialization'
+        $escapedStageFile = $script:testStageFile.Replace("'", "''")
+        $watchdogCommand = @"
+Start-Sleep -Seconds $testSuiteTimeoutSeconds
+`$stage = 'unknown stage'
+try { `$stage = [IO.File]::ReadAllText('$escapedStageFile').Trim() } catch { }
+[Console]::Error.WriteLine("test.ps1 watchdog timed out after $testSuiteTimeoutSeconds seconds during: `$stage")
+Stop-Process -Id $PID -Force -ErrorAction SilentlyContinue
+exit 124
+"@
+        $encodedWatchdog = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($watchdogCommand))
+        $script:testSuiteWatchdog = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @(
+            '-NoLogo', '-NoProfile', '-EncodedCommand', $encodedWatchdog
+        ) -NoNewWindow -PassThru
+    }
     $testAuthDir = Join-Path $testHome '.cli-proxy-api'
     [IO.Directory]::CreateDirectory($testAuthDir) | Out-Null
     $testCodexDir = Join-Path $testHome '.codex'
@@ -3047,6 +3073,10 @@ exit /b %ERRORLEVEL%
 
     [Console]::WriteLine('all Claudex Windows tests passed')
 } finally {
+    if ($script:testSuiteWatchdog -and -not $script:testSuiteWatchdog.HasExited) {
+        try { $script:testSuiteWatchdog.Kill() } catch { }
+        try { $null = $script:testSuiteWatchdog.WaitForExit(5000) } catch { }
+    }
     foreach ($trackedTestProcess in $script:trackedTestProcesses) {
         try {
             if (-not $trackedTestProcess.HasExited) {
