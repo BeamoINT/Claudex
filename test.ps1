@@ -14,6 +14,10 @@ function Assert-True([bool] $Condition, [string] $Message) {
     if (-not $Condition) { throw "assertion failed: $Message" }
 }
 
+function Write-TestStage([string] $Message) {
+    [Console]::WriteLine("test.ps1: $Message")
+}
+
 function Wait-ForTestPath([string] $Path, [string] $Message, [int] $TimeoutMilliseconds = 20000) {
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     while (-not (Test-Path -LiteralPath $Path) -and [DateTime]::UtcNow -lt $deadline) {
@@ -1707,6 +1711,7 @@ process.stdout.write(JSON.stringify({
     Assert-True (-not $proxyEnsureSource.Contains('Remove-Item -LiteralPath $lockDir -Recurse')) 'Windows proxy startup never recursively deletes a competing lock generation'
 
     if ($isWindowsPlatform) {
+        Write-TestStage 'starting model lock regressions'
         $savedModelLockSkipAuthSync = [Environment]::GetEnvironmentVariable('CLAUDEX_TEST_SKIP_AUTH_SYNC', 'Process')
         $savedModelLockSkipAuthWatcher = [Environment]::GetEnvironmentVariable('CLAUDEX_SKIP_AUTH_WATCHER', 'Process')
         $env:CLAUDEX_TEST_SKIP_AUTH_SYNC = '1'
@@ -1725,6 +1730,7 @@ process.stdout.write(JSON.stringify({
         Assert-True ($liveOwnerProcess.WaitForExit(20000)) 'Windows old live state owner contender exits'
         Assert-True (([IO.File]::ReadAllText((Join-Path $modelLock 'owner'))).Contains('nonce=live-windows-state-owner')) 'Windows old live state owner is not stolen'
         Remove-Item -LiteralPath $modelLock -Recurse -Force
+        Write-TestStage 'live model lock owner regression passed'
 
         $savedForcedLockSkipUpdate = $env:CLAUDEX_SKIP_AUTO_UPDATE
         $env:CLAUDEX_SKIP_AUTO_UPDATE = '1'
@@ -1735,6 +1741,7 @@ process.stdout.write(JSON.stringify({
         if ($null -eq $savedForcedLockSkipUpdate) { Remove-Item Env:CLAUDEX_SKIP_AUTO_UPDATE -ErrorAction SilentlyContinue } else { $env:CLAUDEX_SKIP_AUTO_UPDATE = $savedForcedLockSkipUpdate }
         Assert-True (-not (Test-Path -LiteralPath $modelLock)) 'Windows exclusive-create fallback publishes and releases state locks'
         Assert-True (@(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows exclusive-create fallback leaves no partial generation'
+        Write-TestStage 'model lock fallback regression passed'
 
         $env:CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE = '1'
         $publicationFailureProcess = Start-TrackedTestProcess $shellPath @($modelLockLauncherBaseArguments + 'windows-lock-forced-publication-failure-test') 'windows-lock-publication-failure'
@@ -1742,6 +1749,7 @@ process.stdout.write(JSON.stringify({
         Remove-Item Env:CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE
         Assert-True (-not (Test-Path -LiteralPath $modelLock)) 'Windows publication failure removes its incomplete lock'
         Assert-True (@(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows publication failure leaves no quarantine barrier'
+        Write-TestStage 'model lock publication failure regression passed'
 
         $lockLauncherArguments = @($modelLockLauncherBaseArguments + 'windows-lock-aba-test')
         $env:CLAUDEX_TEST_LOCK_MATCH = 'model-display.lock'
@@ -1762,6 +1770,7 @@ process.stdout.write(JSON.stringify({
         Assert-True (([IO.File]::ReadAllText((Join-Path $modelLock 'owner'))).Contains($abaBNonce)) 'Windows paused creator cannot overwrite B generation'
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-b-continue'), "continue`n", $utf8)
         Assert-True ($abaB.WaitForExit(10000)) 'Windows publication ABA owner exits'
+        Write-TestStage 'model lock publication ABA regression passed'
 
         Remove-Item -LiteralPath $modelLock -Recurse -Force -ErrorAction SilentlyContinue
         [IO.Directory]::CreateDirectory($modelLock) | Out-Null
@@ -1790,6 +1799,7 @@ process.stdout.write(JSON.stringify({
         Assert-True ($abaX.WaitForExit(10000)) 'Windows stale remover exits'
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-y-continue'), "continue`n", $utf8)
         Assert-True ($abaY.WaitForExit(10000)) 'Windows Y owner exits'
+        Write-TestStage 'model lock rename ABA regression passed'
 
         Remove-Item -LiteralPath $modelLock -Recurse -Force -ErrorAction SilentlyContinue
         Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
@@ -1818,6 +1828,7 @@ process.stdout.write(JSON.stringify({
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-self-x-after-continue'), "continue`n", $utf8)
         Assert-True ($selfX.WaitForExit(10000)) 'Windows paused remover exits after owner recovery'
         Assert-True (-not (Test-Path -LiteralPath $modelLock) -and @(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows self recovery leaves no lock generation'
+        Write-TestStage 'model lock self recovery regression passed'
 
         $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_READY = Join-Path $temporary 'windows-legacy-a-mkdir'
         $env:CLAUDEX_TEST_LOCK_AFTER_MKDIR_CONTINUE = Join-Path $temporary 'windows-legacy-a-continue'
@@ -1923,6 +1934,7 @@ process.stdout.write(JSON.stringify({
         Assert-True ($deadCanonicalProcess.WaitForExit(20000)) 'Windows dead canonical legacy owner contender exits'
         Assert-True (-not (Test-Path -LiteralPath $modelLock) -and
             @(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows dead canonical legacy owner ignores and removes live structured injection after grace'
+        Write-TestStage 'model lock regressions passed'
         Remove-Item Env:CLAUDEX_TEST_LOCK_MATCH -ErrorAction SilentlyContinue
         if ($null -eq $savedModelLockSkipAuthSync) { Remove-Item Env:CLAUDEX_TEST_SKIP_AUTH_SYNC -ErrorAction SilentlyContinue }
         else { $env:CLAUDEX_TEST_SKIP_AUTH_SYNC = $savedModelLockSkipAuthSync }
@@ -1937,6 +1949,7 @@ process.stdout.write(JSON.stringify({
         $updateRelease = Join-Path $temporary 'windows-detached-update-release'
         $updateDone = Join-Path $temporary 'windows-detached-update-done'
         $updateAttempt = Join-Path $temporary 'windows-detached-update-attempt'
+        Write-TestStage 'starting automatic update regressions'
         $savedSkipUpdate = $env:CLAUDEX_SKIP_AUTO_UPDATE
         $savedProxyToken = $env:CLAUDEX_PROXY_TOKEN
         $savedAuthToken = $env:ANTHROPIC_AUTH_TOKEN
@@ -2018,6 +2031,7 @@ process.stdout.write(JSON.stringify({
             if ($null -eq $savedLockTestMode) { Remove-Item Env:CLAUDEX_TEST_MODE -ErrorAction SilentlyContinue } else { $env:CLAUDEX_TEST_MODE = $savedLockTestMode }
             Remove-Item -LiteralPath $updateDirectory -Recurse -Force -ErrorAction SilentlyContinue
         }
+        Write-TestStage 'automatic update regressions passed'
     }
 
     Remove-Item -LiteralPath $resumeCapture -Force
@@ -2034,6 +2048,7 @@ process.stdout.write(JSON.stringify({
     Assert-True (-not (Test-Path -LiteralPath $resumeCapture -PathType Leaf)) 'background launch does not claim a synchronous resume footer'
 
     if ($isWindowsPlatform) {
+        Write-TestStage 'starting background watcher lifecycle regressions'
         $backgroundRegistry = Join-Path $temporary 'background-agent-registry.json'
         $backgroundRegistryLog = Join-Path $temporary 'background-agent-registry.log'
         $backgroundAuthPidFile = Join-Path $temporary 'background-auth-watcher.pid'
@@ -2166,6 +2181,7 @@ process.stdout.write(JSON.stringify({
                 else { [Environment]::SetEnvironmentVariable($name, [string] $value, 'Process') }
             }
         }
+        Write-TestStage 'background watcher lifecycle regressions passed'
     }
 
     $env:FAKE_CLAUDE_RESUME = '1'
@@ -2189,6 +2205,7 @@ process.stdout.write(JSON.stringify({
     Remove-Item Env:FAKE_SAME_CWD_RESUME
     Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT
     Remove-Item Env:CLAUDEX_TEST_RESUME_CAPTURE_FILE
+    Write-TestStage 'resume footer regressions passed'
 
     $bare = (& (Join-Path $root 'claudex.ps1') --bare --print test-prompt | Out-String)
     Assert-True (-not $bare.Contains('--agents')) 'bare mode custom agents suppressed'
@@ -2330,6 +2347,7 @@ process.stdout.write(JSON.stringify({
     Assert-True (Test-Path -LiteralPath $bridgeAuthFile -PathType Leaf) 'invalid sync preserves bridge while a live publisher owns the lock'
     Assert-True (Test-Path -LiteralPath (Join-Path $testConfig 'usage-cache\summary') -PathType Leaf) 'invalid sync preserves usage state while a live publisher owns the lock'
     [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), ('{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T03:00:01.123456Z","tokens":{"access_token":"codex-revalidated-access","refresh_token":"codex-source-refresh","id_token":"' + $managedIdToken + '","account_id":"account-test"}}'), $utf8)
+    Write-TestStage 'starting session and usage lock regressions'
     Remove-Item -LiteralPath $sessionSyncLock -Recurse -Force
     Wait-ForTestProcess $serializedSync 'invalid sync exits after publication ownership transfers'
     Assert-True ($serializedSync.ExitCode -eq 0) 'invalid sync revalidates a repaired source after ownership transfer'
@@ -2532,6 +2550,7 @@ process.stdout.write(JSON.stringify({
         Assert-True ($legacyDeadProcess.ExitCode -eq 0) 'dead legacy usage owner is reclaimed after grace'
         Assert-True (-not (Test-Path -LiteralPath $usageRefreshLock -PathType Container)) 'reclaimed legacy usage owner is released after refresh'
     }
+    Write-TestStage 'session and usage lock regressions passed'
 
     $usage = (& (Join-Path $root 'claudex.ps1') --usage-limit | Out-String)
     Assert-True ($usage.Contains('Codex usage limits (Pro plan)')) 'usage plan'
