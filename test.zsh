@@ -2166,12 +2166,15 @@ HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CODEX_AUTH_DIR="$tmp/home/.cli-pr
   CLAUDEX_AUTH_WATCH_SECONDS=1 CLAUDEX_AUTH_WATCH_READY_FILE="$auth_watch_ready" \
   "$tmp/home/.config/claudex/codex-session" watch "$auth_watch_parent" &
 auth_watcher=$!
-for _ in {1..50}; do [[ -s "$auth_watch_ready" ]] && break; sleep 0.02; done
+# Match the PowerShell suite's 20 second process startup bound. Loaded CI hosts
+# can spend more than one second starting the helper before it signals ready.
+for _ in {1..1000}; do [[ -s "$auth_watch_ready" ]] && break; sleep 0.02; done
 [[ -s "$auth_watch_ready" ]]
 cat > "$tmp/home/.codex/auth.json" <<'EOF'
 {"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T02:00:00Z","tokens":{"access_token":"codex-switched-access","refresh_token":"codex-switched-refresh","id_token":"codex-switched-id","account_id":"account-switched"}}
 EOF
-for _ in {1..50}; do
+# Match the PowerShell suite's 10 second account synchronization bound.
+for _ in {1..200}; do
   if jq -e '.account_id == "account-switched" and .access_token == "codex-switched-access"' \
       "$tmp/home/.cli-proxy-api/codex-claudex-managed.json" >/dev/null 2>&1; then break; fi
   sleep 0.05
