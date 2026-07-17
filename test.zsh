@@ -175,8 +175,12 @@ if [[ -n "${FAKE_FABLEPLAN_TERRA_PROMPT_FILE:-}" ]]; then
       printf '%s' "$fableplan_directory" > "$FAKE_FABLEPLAN_TERRA_DIRECTORY_FILE"
       cat "$fableplan_directory/plan.txt" > "$FAKE_FABLEPLAN_TERRA_PLAN_FILE"
       if [[ -n "${FAKE_FABLEPLAN_TERRA_PERMISSIONS_FILE:-}" ]]; then
-        directory_mode=$(stat -f '%Lp' "$fableplan_directory" 2>/dev/null || stat -c '%a' "$fableplan_directory")
-        plan_mode=$(stat -f '%Lp' "$fableplan_directory/plan.txt" 2>/dev/null || stat -c '%a' "$fableplan_directory/plan.txt")
+        if directory_mode=$(stat -c '%a' -- "$fableplan_directory" 2>/dev/null); then
+          plan_mode=$(stat -c '%a' -- "$fableplan_directory/plan.txt")
+        else
+          directory_mode=$(stat -f '%Lp' "$fableplan_directory")
+          plan_mode=$(stat -f '%Lp' "$fableplan_directory/plan.txt")
+        fi
         printf 'DIRECTORY=%s\nPLAN=%s\n' "$directory_mode" "$plan_mode" > "$FAKE_FABLEPLAN_TERRA_PERMISSIONS_FILE"
       fi
     fi
