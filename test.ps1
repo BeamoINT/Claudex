@@ -232,6 +232,7 @@ if "%1"=="app-server" (
   exit /b 0
 )
 if "%1"=="-c" (
+  if not "%FAKE_CODEX_CONFIG_ARG_LOG%"=="" >"%FAKE_CODEX_CONFIG_ARG_LOG%" echo %~2
   if not "%FAKE_CODEX_AUTH_ARGS_LOG%"=="" echo file:%~3 %~4>>"%FAKE_CODEX_AUTH_ARGS_LOG%"
   if "%3"=="login" if "%4"=="status" (
     if not "%FAKE_CODEX_FILE_STATUS%"=="" exit /b %FAKE_CODEX_FILE_STATUS%
@@ -489,6 +490,17 @@ exit 1
     Remove-Item Env:CLAUDEX_MOUSE_POINTER_SHAPE -ErrorAction SilentlyContinue
 
     if ($isWindowsPlatform) {
+        $codexConfigArgumentLog = Join-Path $temporary 'codex-config-argument.log'
+        $env:FAKE_CODEX_CONFIG_ARG_LOG = $codexConfigArgumentLog
+        try {
+            & (Join-Path $testConfig 'codex-session.ps1') sync
+            $codexLiteralSyncExit = $LASTEXITCODE
+        } finally {
+            Remove-Item Env:FAKE_CODEX_CONFIG_ARG_LOG -ErrorAction SilentlyContinue
+        }
+        Assert-True ($codexLiteralSyncExit -eq 0) 'Windows Codex synchronization preserves the file credential override as one argument'
+        Assert-True ([IO.File]::ReadAllText($codexConfigArgumentLog).Trim() -eq "cli_auth_credentials_store='file'") 'Windows Codex synchronization uses a cmd safe TOML literal'
+
         $privateHelper = Join-Path $temporary 'private-environment-helper.ps1'
         $privateHelperLog = Join-Path $temporary 'private-environment-helper.log'
         [IO.File]::WriteAllText($privateHelper, @'
@@ -937,7 +949,7 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
         $classifierCodexArguments = if (Test-Path -LiteralPath $classifierCodexLog -PathType Leaf) {
             (@([IO.File]::ReadAllLines($classifierCodexLog)) | ForEach-Object { $_.Replace("`r", '\r').Replace("`n", '\n') }) -join '|'
         } else { '<not-invoked>' }
-        & (Join-Path $fakeBin 'codex.cmd') '-c' 'cli_auth_credentials_store="file"' 'login' 'status' *> $null
+        & (Join-Path $fakeBin 'codex.cmd') '-c' 'cli_auth_credentials_store=''file''' 'login' 'status' *> $null
         $directCodexStatusExit = $LASTEXITCODE
         throw "assertion failed: auto classifier; resolved Claude commands: $claudeResolution; Claude argv: $classifierClaudeArguments; Codex argv: $classifierCodexArguments; direct Codex status exit: $directCodexStatusExit; source auth exists: $(Test-Path -LiteralPath (Join-Path $testCodexDir 'auth.json') -PathType Leaf); sanitized output: $safeOutput; proxy diagnostics: $proxyRecoveryDetail"
     }

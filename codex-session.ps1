@@ -653,7 +653,7 @@ function Test-CodexLogin {
     $codex = Get-Command codex -ErrorAction SilentlyContinue
     if (-not $codex) { return $false }
     try {
-        & $codex.Source '-c' 'cli_auth_credentials_store="file"' 'login' 'status' *> $null
+        & $codex.Source '-c' 'cli_auth_credentials_store=''file''' 'login' 'status' *> $null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
@@ -920,7 +920,7 @@ switch ($Action) {
         $codex = Get-Command codex -ErrorAction SilentlyContinue
         if (-not $codex) { Write-Failure 'Codex CLI was not found. Install Codex and retry.'; exit 10 }
         Write-Output 'Claudex is opening the official Codex sign-in flow...'
-        & $codex.Source '-c' 'cli_auth_credentials_store="file"' 'login'
+        & $codex.Source '-c' 'cli_auth_credentials_store=''file''' 'login'
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         $result = Sync-Session
         if ($result -ne 0) { exit $result }
@@ -931,7 +931,7 @@ switch ($Action) {
         try {
             $codex = Get-Command codex -ErrorAction SilentlyContinue
             if ($codex) {
-                & $codex.Source '-c' 'cli_auth_credentials_store="file"' 'logout'
+                & $codex.Source '-c' 'cli_auth_credentials_store=''file''' 'logout'
                 $exitCode = $LASTEXITCODE
             } else { $exitCode = 10 }
             Clear-OwnedSessionState
