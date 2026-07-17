@@ -46,6 +46,19 @@ function Start-Check {
     return Start-Process -FilePath $shell -ArgumentList $arguments -PassThru -WindowStyle Hidden
 }
 
+function Invoke-ExpectedFailedCheck {
+    $savedErrorPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 promotes a native child's stderr to a
+        # NativeCommandError when the caller uses Stop. The nonzero result is
+        # expected in these contention cases, so collect it without allowing
+        # the diagnostic stream to abort the regression before its assertions.
+        $ErrorActionPreference = 'Continue'
+        & $shell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Check 2>$null | Out-Null
+        return [int] $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedErrorPreference }
+}
+
 try {
     [IO.Directory]::CreateDirectory($config) | Out-Null
     [IO.Directory]::CreateDirectory($fixture) | Out-Null
@@ -141,8 +154,8 @@ try {
     [IO.File]::WriteAllText((Join-Path $mixedBarrier 'owner'), "pid=2147483000`nidentity=dead`nnonce=injected-a`n", $utf8)
     [IO.File]::WriteAllText((Join-Path $mixedBarrier 'owner.json'), "{`"pid`":$PID,`"token`":`"legacy-b-crash`"}`n", $utf8)
     Set-Old $mixedBarrier
-    & $shell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Check 2>$null | Out-Null
-    Assert-True ($LASTEXITCODE -ne 0) 'mixed protocol crash recovery keeps contender outside update section'
+    $mixedCrashExit = Invoke-ExpectedFailedCheck
+    Assert-True ($mixedCrashExit -ne 0) 'mixed protocol crash recovery keeps contender outside update section'
     Assert-True ([IO.File]::ReadAllText((Join-Path $lock 'owner.json')).Contains('legacy-b-crash')) 'mixed protocol crash recovery restores live B'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $lock 'generation'))) 'mixed protocol crash recovery removes injected A generation'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $lock 'owner'))) 'mixed protocol crash recovery removes injected A owner'
@@ -186,8 +199,8 @@ try {
     Assert-True ($LASTEXITCODE -eq 0 -and -not (Test-Path -LiteralPath $lock)) 'CreateNew fallback succeeds'
     Remove-Item Env:CLAUDEX_TEST_FORCE_HARDLINK_FAILURE
     $env:CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE = '1'
-    & $shell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Check 2>$null | Out-Null
-    Assert-True ($LASTEXITCODE -ne 0 -and -not (Test-Path -LiteralPath $lock)) 'incomplete publication is removed'
+    $publicationFailureExit = Invoke-ExpectedFailedCheck
+    Assert-True ($publicationFailureExit -ne 0 -and -not (Test-Path -LiteralPath $lock)) 'incomplete publication is removed'
     Assert-True (@(Get-ChildItem -LiteralPath $update -Directory -Filter 'lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'incomplete publication leaves no barrier'
     Remove-Item Env:CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE
 
@@ -211,20 +224,20 @@ try {
     Set-Old $lock
     $legacyVisibleOwner = Get-Content -LiteralPath (Join-Path $lock 'owner.json') -Raw | ConvertFrom-Json
     Assert-True ([int]$legacyVisibleOwner.pid -eq $PID -and $null -ne (Get-Process -Id ([int]$legacyVisibleOwner.pid) -ErrorAction SilentlyContinue)) 'previous PowerShell updater recognizes current live owner'
-    & $shell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Check 2>$null | Out-Null
-    Assert-True ($LASTEXITCODE -ne 0 -and (Test-Path -LiteralPath (Join-Path $lock 'owner.json'))) 'current contender also preserves old live generation'
+    $liveGenerationExit = Invoke-ExpectedFailedCheck
+    Assert-True ($liveGenerationExit -ne 0 -and (Test-Path -LiteralPath (Join-Path $lock 'owner.json'))) 'current contender also preserves old live generation'
     Remove-Item -LiteralPath $lock -Recurse -Force
     [IO.Directory]::CreateDirectory($lock) | Out-Null
-    & $shell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Check 2>$null | Out-Null
-    Assert-True ($LASTEXITCODE -ne 0 -and (Test-Path -LiteralPath $lock)) 'recent legacy ownerless lock is retained'
+    $ownerlessGraceExit = Invoke-ExpectedFailedCheck
+    Assert-True ($ownerlessGraceExit -ne 0 -and (Test-Path -LiteralPath $lock)) 'recent legacy ownerless lock is retained'
     Set-Old $lock
     & $shell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Check | Out-Null
     Assert-True ($LASTEXITCODE -eq 0 -and -not (Test-Path -LiteralPath $lock)) 'expired legacy ownerless lock is reclaimed'
     [IO.Directory]::CreateDirectory($lock) | Out-Null
     [IO.File]::WriteAllText((Join-Path $lock 'owner.json'), "{`"pid`":$PID,`"token`":`"legacy`"}`n", $utf8)
     Set-Old $lock
-    & $shell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Check 2>$null | Out-Null
-    Assert-True ($LASTEXITCODE -ne 0 -and (Test-Path -LiteralPath (Join-Path $lock 'owner.json'))) 'old live legacy owner is retained'
+    $legacyOwnerExit = Invoke-ExpectedFailedCheck
+    Assert-True ($legacyOwnerExit -ne 0 -and (Test-Path -LiteralPath (Join-Path $lock 'owner.json'))) 'old live legacy owner is retained'
     Remove-Item -LiteralPath $lock -Recurse -Force
 
     # The exit path validates its nonce and cannot delete a replacement owner.
