@@ -908,7 +908,17 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
         $proxyRecoveryDetail = if (Test-Path -LiteralPath $proxyRecoveryLog -PathType Leaf) {
             Get-Content -LiteralPath $proxyRecoveryLog -Raw
         } else { 'proxy recovery log was not created' }
-        throw "assertion failed: auto classifier; proxy diagnostics: $proxyRecoveryDetail"
+        $safeOutput = [regex]::Replace($output,
+            '(?m)^(AUTH_TOKEN|PROXY_TOKEN|API_KEY|OAUTH_TOKEN|CUSTOM_HEADERS|CODEX_AUTH_FILE|CODEX_SOURCE_AUTH_FILE)=.*$',
+            '$1=<redacted>')
+        $safeOutput = $safeOutput.Replace("`r", '\r').Replace("`n", '\n')
+        if ($safeOutput.Length -gt 4000) { $safeOutput = $safeOutput.Substring(0, 4000) + '<truncated>' }
+        $claudeResolution = @(
+            Get-Command claude -All -ErrorAction SilentlyContinue | ForEach-Object {
+                "$($_.CommandType):$($_.Name):$($_.Source)"
+            }
+        ) -join '; '
+        throw "assertion failed: auto classifier; resolved Claude commands: $claudeResolution; sanitized output: $safeOutput; proxy diagnostics: $proxyRecoveryDetail"
     }
     Assert-True ($output.Contains('BG=gpt-5.6-luna')) 'background classifier'
     Assert-True ($output.Contains('SUBAGENT=') -and -not $output.Contains('SUBAGENT=gpt-5.6-terra')) 'native Claude subagent routing is not globally overridden'

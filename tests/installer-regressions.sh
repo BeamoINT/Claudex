@@ -9,6 +9,7 @@ trap 'rm -rf "$temporary"' EXIT
 readonly home="$temporary/home"
 readonly config="$home/.config/claudex"
 readonly fake_bin="$temporary/bin"
+readonly real_stat="$(command -v stat)"
 mkdir -p "$config/bin" "$home/.codex" "$fake_bin"
 mkdir -p "$home/.local/bin"
 chmod 0777 "$home/.local/bin"
@@ -33,21 +34,51 @@ cat > "$fake_bin/claude" <<'EOF'
 [[ "${1:-}" != update ]] || exit 0
 exit 0
 EOF
+cat > "$fake_bin/stat" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == -f && "${2:-}" == '%Lp' ]]; then
+  # GNU stat accepts this BSD-shaped invocation as a filesystem report and
+  # exits zero. The installer must reject the multiline output rather than
+  # treating command success as proof that it received a permission mode.
+  printf '%s\n' '  File: "/fixture"' '    ID: fixture Namelen: 255 Type: overlayfs' '700'
+  exit 0
+fi
+if [[ "${1:-}" == -c && "${2:-}" == '%a' ]]; then
+  mode=$("$CLAUDEX_TEST_REAL_STAT" -c '%a' "$3" 2>/dev/null || \
+    "$CLAUDEX_TEST_REAL_STAT" -f '%Lp' "$3" 2>/dev/null || true)
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || exit 1
+  printf '%s\n' "$mode"
+  exit 0
+fi
+exec "$CLAUDEX_TEST_REAL_STAT" "$@"
+EOF
 cat > "$config/bin/cliproxyapi" <<'EOF'
 #!/usr/bin/env bash
 [[ "${1:-}" == -version ]] && { printf '%s\n' 'Version: 7.2.80'; exit 0; }
 exit 0
 EOF
-chmod +x "$fake_bin/codex" "$fake_bin/claude" "$config/bin/cliproxyapi"
+chmod +x "$fake_bin/codex" "$fake_bin/claude" "$fake_bin/stat" "$config/bin/cliproxyapi"
+
+directory_mode() {
+  local directory="$1" mode
+  mode=$(stat -c '%a' "$directory" 2>/dev/null || true)
+  if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then mode=$(stat -f '%Lp' "$directory" 2>/dev/null || true); fi
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]]
+  printf '%s\n' "$mode"
+}
 
 installer_env=(
   HOME="$home"
   PATH="$fake_bin:$PATH"
   CLAUDEX_SKIP_DEPENDENCY_INSTALL=1
   CLAUDEX_SKIP_SERVICE_START=1
+  CLAUDEX_TEST_REAL_STAT="$real_stat"
 )
+misleading_bsd_probe=$(env PATH="$fake_bin:$PATH" CLAUDEX_TEST_REAL_STAT="$real_stat" \
+  stat -f '%Lp' "$home/.local/bin")
+[[ "$misleading_bsd_probe" == *'Type: overlayfs'* && "$misleading_bsd_probe" == *$'\n700' ]]
 env "${installer_env[@]}" CLAUDEX_PROXY_TOKEN=stable-installer-token "$root/install.sh" >/dev/null
-direct_bin_mode=$(stat -f '%Lp' "$home/.local/bin" 2>/dev/null || stat -c '%a' "$home/.local/bin")
+direct_bin_mode=$(directory_mode "$home/.local/bin")
 [[ "$direct_bin_mode" == 700 ]]
 if [[ "$(uname -s)" == Darwin ]]; then
   ! ls -lde "$home/.local/bin" | grep -F 'everyone:allow:delete_child' >/dev/null
@@ -204,7 +235,7 @@ if [[ "$(uname -s)" == Darwin ]]; then
 fi
 env "${installer_env[@]}" CLAUDEX_BIN_DIR="$custom_direct_bin" CLAUDEX_INSTALL_METHOD=archive \
   "$root/install.sh" >/dev/null
-custom_direct_mode=$(stat -f '%Lp' "$custom_direct_bin" 2>/dev/null || stat -c '%a' "$custom_direct_bin")
+custom_direct_mode=$(directory_mode "$custom_direct_bin")
 [[ "$custom_direct_mode" == 700 ]]
 if [[ "$(uname -s)" == Darwin ]]; then
   ! ls -lde "$custom_direct_bin" | grep -F 'everyone:allow:delete_child' >/dev/null
@@ -217,7 +248,7 @@ mkdir -p "$package_bin"
 chmod 0755 "$package_bin"
 env "${installer_env[@]}" CLAUDEX_BIN_DIR="$package_bin" CLAUDEX_INSTALL_METHOD=homebrew \
   CLAUDEX_PACKAGE_ROOT="$root" "$root/install.sh" >/dev/null
-package_bin_mode=$(stat -f '%Lp' "$package_bin" 2>/dev/null || stat -c '%a' "$package_bin")
+package_bin_mode=$(directory_mode "$package_bin")
 [[ "$package_bin_mode" == 755 ]]
 
 # Relative installer roots are anchored to the invocation directory before

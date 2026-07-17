@@ -58,11 +58,16 @@ EOF
 chmod +x "$archive_bin/codex" "$archive_bin/claude"
 
 extracted="$archive_smoke/claudex-$version"
-HOME="$archive_home" PATH="$archive_bin:$PATH" \
-  CLAUDEX_BIN_DIR="$archive_install_bin" CLAUDEX_CONFIG_DIR="$archive_config" \
-  CLAUDEX_PROXY_TOKEN=artifact-test-token CLAUDEX_INSTALL_METHOD=archive \
-  CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 CLAUDEX_SKIP_SERVICE_START=1 \
-  "$extracted/install.sh" >"$temporary/archive-install.stdout" 2>"$temporary/archive-install.stderr"
+if ! HOME="$archive_home" PATH="$archive_bin:$PATH" \
+    CLAUDEX_BIN_DIR="$archive_install_bin" CLAUDEX_CONFIG_DIR="$archive_config" \
+    CLAUDEX_PROXY_TOKEN=artifact-test-token CLAUDEX_INSTALL_METHOD=archive \
+    CLAUDEX_SKIP_DEPENDENCY_INSTALL=1 CLAUDEX_SKIP_SERVICE_START=1 \
+    "$extracted/install.sh" >"$temporary/archive-install.stdout" 2>"$temporary/archive-install.stderr"; then
+  printf '%s\n' 'extracted release installer failed; captured output follows' >&2
+  cat "$temporary/archive-install.stdout" >&2
+  cat "$temporary/archive-install.stderr" >&2
+  exit 1
+fi
 test "$(jq -r '.version // empty' "$archive_config/install.json")" = "$version"
 test "$(jq -r '.method // empty' "$archive_config/install.json")" = archive
 test -f "$archive_config/skill-bridge.cjs"
@@ -156,10 +161,15 @@ cat > "$canonical_bin/tar" <<'EOF'
 case " $* " in
   *' -c'*|*' --create '*) exit 99 ;;
 esac
-exec "$CLAUDEX_TEST_REAL_TAR" "$@"
+# GNU tar resolves its gzip reader through PATH, while bsdtar decompresses in
+# process. Restore the caller's tool path only for this read-only delegation so
+# the poison gzip continues to catch archive construction without breaking
+# independent consumption on Linux.
+PATH="$CLAUDEX_TEST_REAL_TOOL_PATH" exec "$CLAUDEX_TEST_REAL_TAR" "$@"
 EOF
 chmod +x "$canonical_bin/zip" "$canonical_bin/gzip" "$canonical_bin/tar"
-CLAUDEX_TEST_REAL_TAR="$(command -v tar)" PATH="$canonical_bin:$PATH" \
+CLAUDEX_TEST_REAL_TAR="$(command -v tar)" CLAUDEX_TEST_REAL_TOOL_PATH="$PATH" \
+  PATH="$canonical_bin:$PATH" \
   TZ=Etc/GMT+12 "$canonical_fixture/scripts/build-release.sh" "$version" >/dev/null
 for asset in "claudex-$version.tar.gz" "claudex-$version-windows.zip" SHA256SUMS; do
   cmp "$root/dist/$asset" "$canonical_fixture/dist/$asset"

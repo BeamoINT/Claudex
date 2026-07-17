@@ -257,6 +257,17 @@ fi
 if [[ -n "${FAKE_PROXY_READY_FILE:-}" ]]; then
   [[ "${FAKE_PROXY_NEVER_READY:-0}" == 1 ]] || : > "$FAKE_PROXY_READY_FILE"
   [[ -z "${FAKE_PROXY_START_LOG:-}" ]] || printf '%s\n' "$$" >> "$FAKE_PROXY_START_LOG"
+  [[ -z "${FAKE_PROXY_ENV_LOG:-}" ]] || {
+    printf 'BASE_URL=%s\n' "${ANTHROPIC_BASE_URL:-}"
+    printf 'AUTH_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-}"
+    printf 'API_KEY=%s\n' "${ANTHROPIC_API_KEY:-}"
+    printf 'PROXY_TOKEN=%s\n' "${CLAUDEX_PROXY_TOKEN:-}"
+    printf 'CLAUDE_CONFIG=%s\n' "${CLAUDE_CONFIG_DIR:-}"
+    printf 'AUTO_MODEL=%s\n' "${CLAUDE_CODE_AUTO_MODE_MODEL:-}"
+    printf 'BG_MODEL=%s\n' "${CLAUDE_CODE_BG_CLASSIFIER_MODEL:-}"
+    printf 'SUBAGENT_MODEL=%s\n' "${CLAUDE_CODE_SUBAGENT_MODEL:-}"
+    printf 'BUN_OPTIONS=%s\n' "${BUN_OPTIONS:-}"
+  } >> "$FAKE_PROXY_ENV_LOG"
   trap 'exit 0' TERM INT
   while :; do sleep 1; done
 fi
@@ -930,15 +941,21 @@ stop_fake_managed_proxy
 
 proxy_ready_file="$tmp/proxy-ready"
 proxy_start_log="$tmp/proxy-start.log"
+proxy_env_log="$tmp/proxy-env.log"
 : > "$proxy_ready_file"
 proxy_recovery_output=$(HOME="$tmp/home" PATH="$tmp/bin:$PATH" CLAUDEX_CURL_BIN="$tmp/bin/curl" \
   CLAUDEX_SKIP_AUTO_UPDATE=1 CLAUDEX_SKIP_AUTH_WATCHER=1 CLAUDEX_SKIP_PROXY_WATCHER=0 \
   CLAUDEX_TEST_MODE=1 CLAUDEX_TEST_SKIP_AUTH_SYNC=1 CLAUDEX_SKILL_BRIDGE=off CLAUDEX_TEST_PROCESS_IDENTITY=test-process-identity \
   CLAUDEX_TEST_PROXY_REACHABLE_FILE="$proxy_ready_file" \
-  FAKE_PROXY_READY_FILE="$proxy_ready_file" FAKE_PROXY_START_LOG="$proxy_start_log" \
+  ANTHROPIC_BASE_URL=https://caller.invalid ANTHROPIC_AUTH_TOKEN=caller-anthropic-secret \
+  ANTHROPIC_API_KEY=caller-api-secret CLAUDEX_PROXY_TOKEN=test-token \
+  CLAUDE_CODE_AUTO_MODE_MODEL=caller-auto CLAUDE_CODE_BG_CLASSIFIER_MODEL=caller-background \
+  CLAUDE_CODE_SUBAGENT_MODEL=caller-subagent BUN_OPTIONS='--preload /caller/preload.cjs' \
+  FAKE_PROXY_READY_FILE="$proxy_ready_file" FAKE_PROXY_START_LOG="$proxy_start_log" FAKE_PROXY_ENV_LOG="$proxy_env_log" \
   FAKE_PROXY_RECOVERY=1 "$root/claudex" recovery-test)
 [[ "$proxy_recovery_output" == *'PROXY_RECOVERED=1'* ]]
 [[ "$(wc -l < "$proxy_start_log" | tr -d ' ')" == 1 ]]
+[[ "$(<"$proxy_env_log")" == $'BASE_URL=\nAUTH_TOKEN=\nAPI_KEY=\nPROXY_TOKEN=\nCLAUDE_CONFIG=\nAUTO_MODEL=\nBG_MODEL=\nSUBAGENT_MODEL=\nBUN_OPTIONS=' ]]
 [[ ! -e "$tmp/home/.config/claudex/run/proxy-start.lock" ]]
 
 # Lock age alone must never evict a live proxy-start owner. Simulate a slow

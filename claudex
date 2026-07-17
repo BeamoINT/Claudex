@@ -1573,11 +1573,20 @@ ensure_proxy() {
     }
     log_dir="$CLAUDE_CONFIG_DIR/logs"
     mkdir -p "$log_dir"
-    if [[ -r "$proxy_config" ]]; then
-      nohup "$proxy_bin" -config "$proxy_config" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
-    else
-      nohup "$proxy_bin" >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
-    fi
+    (
+      # CLIProxyAPI is a long-lived infrastructure process, not a managed
+      # Claude session. Match the PowerShell launch boundary and keep caller
+      # credentials, model routing, and runtime preloads out of its environment.
+      scrub_managed_session_environment
+      scrub_competing_provider_routing
+      unset BUN_OPTIONS CLAUDE_CODE_SUBAGENT_MODEL CLAUDEX_PROXY_TOKEN
+      unset CLAUDEX_CONFIG_DIR CLAUDEX_CLAUDE_CONFIG_DIR CLAUDEX_INSTRUCTION_BRIDGE
+      if [[ -r "$proxy_config" ]]; then
+        exec nohup "$proxy_bin" -config "$proxy_config"
+      else
+        exec nohup "$proxy_bin"
+      fi
+    ) >"$log_dir/cliproxyapi.log" 2>&1 </dev/null &
     proxy_pid=$!
     if ! write_managed_proxy_pid "$proxy_pid"; then
       kill -TERM "$proxy_pid" 2>/dev/null || true

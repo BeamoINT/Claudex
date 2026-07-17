@@ -118,7 +118,10 @@ protect_private_launcher_directory() {
     chmod -N "$directory" || fail "direct/archive installs require a private launcher directory; could not remove inherited ACLs from $directory"
   fi
   chmod 700 "$directory" || fail "direct/archive installs require a private launcher directory; could not protect $directory"
-  mode=$(stat -f '%Lp' "$directory" 2>/dev/null || stat -c '%a' "$directory" 2>/dev/null || true)
+  mode=$(stat -c '%a' "$directory" 2>/dev/null || true)
+  if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then mode=$(stat -f '%Lp' "$directory" 2>/dev/null || true); fi
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || \
+    fail "direct/archive installs require a private launcher directory; could not verify permissions on $directory"
   [[ "$mode" == 700 ]] || fail "direct/archive installs require a private launcher directory; $directory remained mode ${mode:-unknown}"
 }
 
