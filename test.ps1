@@ -902,7 +902,16 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
     Assert-True ($skillsOutput.Contains('/existing-claude')) 'existing Claude skill discovered'
     Assert-True ($skillsOutput.Contains('/existing-codex')) 'existing Codex skill discovered'
 
-    $output = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
+    $classifierClaudeLog = Join-Path $temporary 'classifier-claude-args.log'
+    $classifierCodexLog = Join-Path $temporary 'classifier-codex-args.log'
+    $env:FAKE_CLAUDE_ARGUMENT_LOG = $classifierClaudeLog
+    $env:FAKE_CODEX_AUTH_ARGS_LOG = $classifierCodexLog
+    try {
+        $output = (& (Join-Path $root 'claudex.ps1') --terra test-prompt | Out-String)
+    } finally {
+        Remove-Item Env:FAKE_CLAUDE_ARGUMENT_LOG -ErrorAction SilentlyContinue
+        Remove-Item Env:FAKE_CODEX_AUTH_ARGS_LOG -ErrorAction SilentlyContinue
+    }
     if (-not $output.Contains('AUTO=gpt-5.6-terra')) {
         $proxyRecoveryLog = Join-Path $testConfig 'logs\proxy-recovery.log'
         $proxyRecoveryDetail = if (Test-Path -LiteralPath $proxyRecoveryLog -PathType Leaf) {
@@ -918,7 +927,19 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
                 "$($_.CommandType):$($_.Name):$($_.Source)"
             }
         ) -join '; '
-        throw "assertion failed: auto classifier; resolved Claude commands: $claudeResolution; sanitized output: $safeOutput; proxy diagnostics: $proxyRecoveryDetail"
+        $classifierClaudeArguments = if (Test-Path -LiteralPath $classifierClaudeLog -PathType Leaf) {
+            $classifierClaudeLines = @([IO.File]::ReadAllLines($classifierClaudeLog))
+            $classifierClaudeFirst = if ($classifierClaudeLines.Count -gt 0) {
+                ([string] $classifierClaudeLines[0]).Replace("`r", '\r').Replace("`n", '\n')
+            } else { '<empty>' }
+            "count=$($classifierClaudeLines.Count),first=$classifierClaudeFirst"
+        } else { '<not-invoked>' }
+        $classifierCodexArguments = if (Test-Path -LiteralPath $classifierCodexLog -PathType Leaf) {
+            (@([IO.File]::ReadAllLines($classifierCodexLog)) | ForEach-Object { $_.Replace("`r", '\r').Replace("`n", '\n') }) -join '|'
+        } else { '<not-invoked>' }
+        & (Join-Path $fakeBin 'codex.cmd') '-c' 'cli_auth_credentials_store="file"' 'login' 'status' *> $null
+        $directCodexStatusExit = $LASTEXITCODE
+        throw "assertion failed: auto classifier; resolved Claude commands: $claudeResolution; Claude argv: $classifierClaudeArguments; Codex argv: $classifierCodexArguments; direct Codex status exit: $directCodexStatusExit; source auth exists: $(Test-Path -LiteralPath (Join-Path $testCodexDir 'auth.json') -PathType Leaf); sanitized output: $safeOutput; proxy diagnostics: $proxyRecoveryDetail"
     }
     Assert-True ($output.Contains('BG=gpt-5.6-luna')) 'background classifier'
     Assert-True ($output.Contains('SUBAGENT=') -and -not $output.Contains('SUBAGENT=gpt-5.6-terra')) 'native Claude subagent routing is not globally overridden'
