@@ -2823,7 +2823,8 @@ process.stdout.write(JSON.stringify({
     $env:CLAUDEX_USAGE_DISPLAY = 'off'
     try { $hostileStatus = ($hostileStatusJson | & (Join-Path $root 'statusline.ps1') | Out-String) }
     finally { Remove-Item Env:CLAUDEX_USAGE_DISPLAY -ErrorAction SilentlyContinue }
-    $expectedHostileStatus = "$([char]27)[38;5;81mClaudex$([char]27)[0m · $([char]27)[1mhostile$([char]27)[0m · high effort · 5% context"
+    $statusSeparator = [char] 0x00B7
+    $expectedHostileStatus = "$([char]27)[38;5;81mClaudex$([char]27)[0m $statusSeparator $([char]27)[1mhostile$([char]27)[0m $statusSeparator high effort $statusSeparator 5% context"
     Assert-True ($hostileStatus.TrimEnd() -ceq $expectedHostileStatus) 'status label sanitizer preserves only the safe semantic prefix and owned SGR'
     foreach ($forbiddenStatusText in @('MODEL-OSC', 'MODEL-C1-OSC', 'https://attacker.invalid')) {
         Assert-True (-not $hostileStatus.Contains($forbiddenStatusText)) "status sanitizer removes $forbiddenStatusText"
@@ -2837,14 +2838,15 @@ process.stdout.write(JSON.stringify({
     $env:CLAUDEX_USAGE_DISPLAY = 'off'
     try { $safeUnicodeStatus = ($safeUnicodeStatusJson | & (Join-Path $root 'statusline.ps1') | Out-String) }
     finally { Remove-Item Env:CLAUDEX_USAGE_DISPLAY -ErrorAction SilentlyContinue }
-    $expectedSafeUnicodeStatus = "$([char]27)[38;5;81mClaudex$([char]27)[0m · $([char]27)[1msafe-模型$([char]27)[0m · future-tier effort · 6% context"
+    $safeUnicodeModel = 'safe-' + [char] 0x6A21 + [char] 0x578B
+    $expectedSafeUnicodeStatus = "$([char]27)[38;5;81mClaudex$([char]27)[0m $statusSeparator $([char]27)[1m$safeUnicodeModel$([char]27)[0m $statusSeparator future-tier effort $statusSeparator 6% context"
     Assert-True ($safeUnicodeStatus.TrimEnd() -ceq $expectedSafeUnicodeStatus) 'status label sanitizer preserves safe Unicode, future effort labels, and owned SGR'
 
     $suffixOnlyStatusJson = '{"session_id":"suffix-only-session","model":{"id":"\u001b]0;ignored\u0007gpt-5.6-sol","display_name":"safe fallback"},"effort":{"level":"\u001b]0;ignored\u0007max"},"context_window":{"used_percentage":7}}'
     $env:CLAUDEX_USAGE_DISPLAY = 'off'
     try { $suffixOnlyStatus = ($suffixOnlyStatusJson | & (Join-Path $root 'statusline.ps1') | Out-String) }
     finally { Remove-Item Env:CLAUDEX_USAGE_DISPLAY -ErrorAction SilentlyContinue }
-    $expectedSuffixOnlyStatus = "$([char]27)[38;5;81mClaudex$([char]27)[0m · $([char]27)[1msafe fallback$([char]27)[0m · adaptive effort · 7% context"
+    $expectedSuffixOnlyStatus = "$([char]27)[38;5;81mClaudex$([char]27)[0m $statusSeparator $([char]27)[1msafe fallback$([char]27)[0m $statusSeparator adaptive effort $statusSeparator 7% context"
     Assert-True ($suffixOnlyStatus.TrimEnd() -ceq $expectedSuffixOnlyStatus) 'status label sanitizer cannot select model or effort from a post-control suffix'
 
     [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\summary'), "safe summary $([char]27)]0;CACHE-OSC$([char]7) $([char]0x009d)0;CACHE-C1-OSC$([char]0x009c) $([char]27)[31mCACHE-CSI$([char]27)[0m $([char]0x009b)31mCACHE-C1 $([char]0x202e)CACHE-BIDI`n", $utf8)
