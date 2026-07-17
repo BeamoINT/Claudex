@@ -80,6 +80,10 @@ assert.match(suite, /CLAUDEX_CODEX_AUTH_DIR = \$testAuthDir[\s\S]*CLAUDEX_CODEX_
   'the direct account watcher fixture must receive the same private auth paths and parent identity as production');
 assert.doesNotMatch(suite, /Remove-Item Env:CLAUDEX_CODEX_(?:AUTH_DIR|SOURCE_AUTH_FILE)/,
   'direct session regressions after the watcher must retain the production auth paths they exercise');
+assert.match(suite, /\$strictAuthOutput = & \$shellPath[\s\S]*\$strictAuthExit = \$LASTEXITCODE[\s\S]*\$strictAuthExit -eq 14/,
+  'expected Windows credential failures must use the reliable child shell exit capture');
+assert.doesNotMatch(suite, /\$strictAuthProcess\.ExitCode/,
+  'PowerShell 5.1 process objects must not be the authority for the expected credential failure exit');
 assert.match(suite, /Remove-TestPathWithRetry \$temporary/,
   'Windows suite cleanup must not mask a primary failure with a transient open file handle');
 

@@ -2437,10 +2437,14 @@ process.stdout.write(JSON.stringify({
     & (Join-Path $root 'codex-session.ps1') sync
 
     [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","tokens":{"access_token":123,"refresh_token":"codex-source-refresh","account_id":"account-test"}}', $utf8)
-    $strictAuthError = Join-Path $temporary 'strict-auth-error.log'
-    $strictAuthProcess = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedSessionHelper, 'sync') -RedirectStandardError $strictAuthError -PassThru
-    Wait-ForTestProcess $strictAuthProcess 'strict credential validation process exits'
-    Assert-True ($strictAuthProcess.ExitCode -eq 14) 'non-string Codex credential JSON is rejected'
+    $savedErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $strictAuthOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'codex-session.ps1') sync 2>&1
+        $strictAuthExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedErrorPreference }
+    Assert-True ($strictAuthExit -eq 14) "non-string Codex credential JSON is rejected: $($strictAuthOutput | Out-String)"
+    Assert-True (($strictAuthOutput | Out-String).Contains('Codex auth.json is invalid or is not a ChatGPT session.')) 'invalid typed Codex credentials report the repair path'
     Assert-True (-not (Test-Path -LiteralPath $bridgeAuthFile -PathType Leaf)) 'invalid typed Codex credentials clear the managed bridge session'
     [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T03:00:00Z","tokens":{"access_token":"codex-source-access","refresh_token":"codex-source-refresh","id_token":"codex-source-id","account_id":"account-test"}}', $utf8)
     & (Join-Path $root 'codex-session.ps1') sync
