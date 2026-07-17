@@ -27,11 +27,10 @@ for (const required of [
   'StartTime.ToUniversalTime().Ticks',
   'GetFileInformationByHandle',
   'FileIndexHigh.ToString("x8")',
-  "EnvironmentVariables[$commandVariable] = $commandPath",
-  "EnvironmentVariables[$argumentVariable] = $argumentValue",
-  "@('\"%%' + $commandVariable + '%%\"')",
-  '/d /s /v:off /c "call ',
-  'internal Codex shim arguments cannot contain quotes or control line breaks',
+  '& $commandPath @Arguments',
+  '$commandSucceeded = $?',
+  '$commandExitCode = $LASTEXITCODE',
+  "cli_auth_credentials_store='file'",
   'pid=$PID`nidentity=$identity`nnonce=$nonce',
   "'.quarantine.'",
   "Invoke-LockTestPause 'AFTER_MKDIR'",
@@ -63,6 +62,8 @@ assert(!source.includes('function ConvertTo-CodexCmdArgument'),
   'Windows Codex shim paths must not be embedded directly in cmd source text');
 assert(!source.includes(".Replace('%',"),
   'Windows Codex shim environment values must not use ineffective percent doubling');
+assert(!source.includes('CLAUDEX_CODEX_SHIM_PATH'),
+  'Windows Codex shim invocation must not feed paths back through cmd expansion');
 assert(!source.includes('owner.EndsWith(" " + lockToken'),
   'legacy PID/token suffix cleanup remains reachable');
 

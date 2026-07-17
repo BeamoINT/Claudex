@@ -652,54 +652,16 @@ function Get-CodexSourceSnapshot {
 $script:lastCodexCommandExitCode = 1
 function Invoke-CodexCommand($Codex, [string[]] $Arguments, [switch] $DiscardOutput) {
     $commandPath = [string] $Codex.Source
-    $extension = [IO.Path]::GetExtension($commandPath).ToLowerInvariant()
-    if ($isWindowsPlatform -and $extension -in @('.cmd', '.bat')) {
-        $startInfo = New-Object Diagnostics.ProcessStartInfo
-        $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
-        $startInfo.UseShellExecute = $false
-        # CALL is required for a batch shim's `exit /b` status to return to this
-        # cmd host. Double each placeholder so CALL expands the actual value on
-        # its final parse only. cmd substitution is nonrecursive, so percent
-        # shaped text inside the path remains data, while quotes and /v:off keep
-        # other metacharacters and exclamation marks inert.
-        $commandVariable = 'CLAUDEX_CODEX_SHIM_PATH'
-        $startInfo.EnvironmentVariables[$commandVariable] = $commandPath
-        $commandParts = @('"%%' + $commandVariable + '%%"')
-        for ($argumentIndex = 0; $argumentIndex -lt $Arguments.Count; $argumentIndex++) {
-            $argumentVariable = 'CLAUDEX_CODEX_SHIM_ARG_' + $argumentIndex
-            $argumentValue = [string] $Arguments[$argumentIndex]
-            if ($argumentValue -match '["\x00\r\n]') { throw 'internal Codex shim arguments cannot contain quotes or control line breaks' }
-            $startInfo.EnvironmentVariables[$argumentVariable] = $argumentValue
-            $commandParts += '"%%' + $argumentVariable + '%%"'
-        }
-        $startInfo.Arguments = '/d /s /v:off /c "call ' + ($commandParts -join ' ') + '"'
-        if ($DiscardOutput) {
-            $startInfo.RedirectStandardOutput = $true
-            $startInfo.RedirectStandardError = $true
-        }
-        $process = New-Object Diagnostics.Process
-        $process.StartInfo = $startInfo
-        try {
-            if (-not $process.Start()) { throw 'Codex command could not be started.' }
-            if ($DiscardOutput) {
-                $stdoutDrain = $process.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
-                $stderrDrain = $process.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
-            }
-            $process.WaitForExit()
-            if ($DiscardOutput) {
-                $stdoutDrain.GetAwaiter().GetResult()
-                $stderrDrain.GetAwaiter().GetResult()
-            }
-            $script:lastCodexCommandExitCode = [int] $process.ExitCode
-        } finally {
-            $process.Dispose()
-        }
-    } else {
-        $global:LASTEXITCODE = $null
-        if ($DiscardOutput) { & $commandPath @Arguments *> $null }
-        else { & $commandPath @Arguments }
-        $script:lastCodexCommandExitCode = if ($null -ne $LASTEXITCODE) { [int] $LASTEXITCODE } elseif ($?) { 0 } else { 1 }
-    }
+    # PowerShell's native invocation boundary already handles variable command
+    # paths as data, including literal percent signs and cmd metacharacters, and
+    # preserves a batch shim's exit status in LASTEXITCODE. The arguments here
+    # are fixed internal auth commands with a cmd safe single quoted TOML value.
+    $global:LASTEXITCODE = $null
+    if ($DiscardOutput) { & $commandPath @Arguments *> $null }
+    else { & $commandPath @Arguments }
+    $commandSucceeded = $?
+    $commandExitCode = $LASTEXITCODE
+    $script:lastCodexCommandExitCode = if ($null -ne $commandExitCode) { [int] $commandExitCode } elseif ($commandSucceeded) { 0 } else { 1 }
     $global:LASTEXITCODE = $script:lastCodexCommandExitCode
 }
 
