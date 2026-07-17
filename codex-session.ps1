@@ -663,7 +663,9 @@ function Invoke-CodexCommand($Codex, [string[]] $Arguments, [switch] $DiscardOut
             (@($Arguments | ForEach-Object { ConvertTo-CodexCmdArgument ([string] $_) }) -join ' ')
         $startInfo = New-Object Diagnostics.ProcessStartInfo
         $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
-        $startInfo.Arguments = '/d /s /v:off /c "' + $commandLine + '"'
+        # CALL returns control to this cmd.exe context so a batch shim's
+        # `exit /b` status becomes the process exit code observed by Claudex.
+        $startInfo.Arguments = '/d /s /v:off /c "call ' + $commandLine + '"'
         $startInfo.UseShellExecute = $false
         if ($DiscardOutput) {
             $startInfo.RedirectStandardOutput = $true

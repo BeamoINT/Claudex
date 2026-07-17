@@ -2458,7 +2458,7 @@ process.stdout.write(JSON.stringify({
     $logoutAuthArgsLog = Join-Path $temporary 'codex-logout-auth-args.log'
     $env:FAKE_CODEX_AUTH_ARGS_LOG = $logoutAuthArgsLog
     $env:FAKE_CODEX_DEFAULT_LOGOUT = '0'
-    $env:FAKE_CODEX_LOGOUT_EXIT = '9'
+    $env:FAKE_CODEX_FILE_LOGOUT = '9'
     $savedErrorPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -2467,14 +2467,15 @@ process.stdout.write(JSON.stringify({
         $logoutExit = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $savedErrorPreference
-        Remove-Item Env:FAKE_CODEX_LOGOUT_EXIT -ErrorAction SilentlyContinue
+        Remove-Item Env:FAKE_CODEX_FILE_LOGOUT -ErrorAction SilentlyContinue
         Remove-Item Env:FAKE_CODEX_DEFAULT_LOGOUT -ErrorAction SilentlyContinue
         Remove-Item Env:FAKE_CODEX_AUTH_ARGS_LOG -ErrorAction SilentlyContinue
     }
-    Assert-True ($logoutExit -eq 9) 'failed Codex logout exit propagated'
+    $logoutAuthArgs = if (Test-Path -LiteralPath $logoutAuthArgsLog -PathType Leaf) { [IO.File]::ReadAllText($logoutAuthArgsLog).Trim() } else { '<missing>' }
+    Assert-True ($logoutExit -eq 9) "failed Codex file logout exit propagated; exit=$logoutExit; args=$logoutAuthArgs; output=$($logoutOutput | Out-String)"
     Assert-True (-not (Test-Path -LiteralPath $bridgeAuthFile)) 'failed Codex logout clears bridge credential'
     Assert-True (($logoutOutput | Out-String).Contains('Codex logout failed, but the local Claudex bridge session was cleared.')) 'failed logout diagnostic'
-    Assert-True ([IO.File]::ReadAllText($logoutAuthArgsLog).Trim() -eq 'file:logout') 'Codex logout uses the Claudex file credential store'
+    Assert-True ($logoutAuthArgs -eq 'file:logout') 'Codex logout uses the Claudex file credential store'
 
     if ($isWindowsPlatform) {
         $usageHelper = Join-Path $testConfig 'usage-limit.ps1'

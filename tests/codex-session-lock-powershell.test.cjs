@@ -27,6 +27,7 @@ for (const required of [
   'StartTime.ToUniversalTime().Ticks',
   'GetFileInformationByHandle',
   'FileIndexHigh.ToString("x8")',
+  '/d /s /v:off /c "call ',
   'pid=$PID`nidentity=$identity`nnonce=$nonce',
   "'.quarantine.'",
   "Invoke-LockTestPause 'AFTER_MKDIR'",
