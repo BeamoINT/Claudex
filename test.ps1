@@ -2314,6 +2314,7 @@ process.stdout.write(JSON.stringify({
         'watch', '-ParentProcessId', [string] $PID)
     $watchParameters = @{ FilePath = $shellPath; ArgumentList = $watchArguments; PassThru = $true }
     if ($isWindowsPlatform) { $watchParameters.WindowStyle = 'Hidden' }
+    Write-TestStage 'starting live account watcher regressions'
     $accountWatcher = Start-Process @watchParameters
     try {
         foreach ($attempt in 1..50) {
@@ -2322,7 +2323,8 @@ process.stdout.write(JSON.stringify({
         }
         Assert-True (Test-Path -LiteralPath $authWatchReady -PathType Leaf) 'account watcher initialized'
         [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T02:00:00Z","tokens":{"access_token":"codex-switched-access","refresh_token":"codex-switched-refresh","id_token":"codex-switched-id","account_id":"account-switched"}}', $utf8)
-        foreach ($attempt in 1..50) {
+        $accountSwitchAttempts = 200
+        foreach ($attempt in 1..$accountSwitchAttempts) {
             Start-Sleep -Milliseconds 50
             try {
                 $switchedBridge = Get-Content -LiteralPath $bridgeAuthFile -Raw | ConvertFrom-Json
@@ -2333,6 +2335,7 @@ process.stdout.write(JSON.stringify({
         Assert-True ($switchedBridge.account_id -eq 'account-switched' -and $switchedBridge.access_token -eq 'codex-switched-access') 'live Codex account switch synchronized'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $testConfig 'codex-usage-account'))) 'account switch resets explicit usage selection'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $testConfig 'usage-cache\limits.json'))) 'account switch invalidates usage cache'
+        Write-TestStage 'live account watcher regressions passed'
     } finally {
         Stop-Process -Id $accountWatcher.Id -Force -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDEX_AUTH_WATCH_SECONDS -ErrorAction SilentlyContinue

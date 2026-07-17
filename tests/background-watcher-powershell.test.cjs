@@ -74,6 +74,8 @@ assert.match(updateFixture, /WriteAllText\(\$updateRelease,[\s\S]*Join-Path \$up
   'automatic update cleanup must release and drain a blocked detached worker before deleting its logs');
 assert.equal((updateFixture.match(/Remove-TestPathWithRetry \$updateDirectory/g) || []).length, 3,
   'every automatic updater state reset must tolerate transient Windows log handles');
+assert.match(suite, /Write-TestStage 'starting live account watcher regressions'[\s\S]*accountSwitchAttempts = 200[\s\S]*Write-TestStage 'live account watcher regressions passed'/,
+  'Windows account watcher synchronization must have a bounded CI window and named stages');
 assert.match(suite, /Remove-TestPathWithRetry \$temporary/,
   'Windows suite cleanup must not mask a primary failure with a transient open file handle');
 
