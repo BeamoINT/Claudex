@@ -27,8 +27,7 @@ for (const required of [
   'StartTime.ToUniversalTime().Ticks',
   'GetFileInformationByHandle',
   'FileIndexHigh.ToString("x8")',
-  ".Replace('%', '%%%%')",
-  '/d /s /v:off /c "call ',
+  ".Replace('%', '%%')",
   'pid=$PID`nidentity=$identity`nnonce=$nonce',
   "'.quarantine.'",
   "Invoke-LockTestPause 'AFTER_MKDIR'",
@@ -56,6 +55,8 @@ for (const required of [
 
 assert(!source.includes('Directory.Delete(quarantine, true)'),
   'process-exit cleanup can recursively delete a replacement generation');
+assert(!source.includes('/d /s /v:off /c "call '),
+  'Windows Codex shim invocation must not add CALL percent re-expansion');
 assert(!source.includes('owner.EndsWith(" " + lockToken'),
   'legacy PID/token suffix cleanup remains reachable');
 

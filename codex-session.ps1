@@ -651,10 +651,7 @@ function Get-CodexSourceSnapshot {
 
 function ConvertTo-CodexCmdArgument([string] $Value) {
     if ($null -eq $Value) { $Value = '' }
-    # cmd.exe parses the /c text once and CALL expands it again. Four percent
-    # signs survive both passes as one literal percent without expanding an
-    # environment shaped segment in a trusted executable path.
-    return '"' + $Value.Replace('%', '%%%%').Replace('"', '""') + '"'
+    return '"' + $Value.Replace('%', '%%').Replace('"', '""') + '"'
 }
 
 $script:lastCodexCommandExitCode = 1
@@ -666,9 +663,7 @@ function Invoke-CodexCommand($Codex, [string[]] $Arguments, [switch] $DiscardOut
             (@($Arguments | ForEach-Object { ConvertTo-CodexCmdArgument ([string] $_) }) -join ' ')
         $startInfo = New-Object Diagnostics.ProcessStartInfo
         $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
-        # CALL returns control to this cmd.exe context so a batch shim's
-        # `exit /b` status becomes the process exit code observed by Claudex.
-        $startInfo.Arguments = '/d /s /v:off /c "call ' + $commandLine + '"'
+        $startInfo.Arguments = '/d /s /v:off /c "' + $commandLine + '"'
         $startInfo.UseShellExecute = $false
         if ($DiscardOutput) {
             $startInfo.RedirectStandardOutput = $true
