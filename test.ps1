@@ -1802,10 +1802,10 @@ process.stdout.write(JSON.stringify({
         Wait-ForTestPath (Join-Path $temporary 'windows-aba-b-publish') 'Windows publication ABA replacement publishes before nonce capture'
         $abaBNonce = ([IO.File]::ReadAllLines((Join-Path $modelLock 'owner')) | Where-Object { $_.StartsWith('nonce=') })[0]
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-a-continue'), "continue`n", $utf8)
-        Assert-True ($abaA.WaitForExit(10000)) 'Windows publication ABA creator exits'
+        Wait-ForTestProcess $abaA 'Windows publication ABA creator exits'
         Assert-True (([IO.File]::ReadAllText((Join-Path $modelLock 'owner'))).Contains($abaBNonce)) 'Windows paused creator cannot overwrite B generation'
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-b-continue'), "continue`n", $utf8)
-        Assert-True ($abaB.WaitForExit(10000)) 'Windows publication ABA owner exits'
+        Wait-ForTestProcess $abaB 'Windows publication ABA owner exits'
         Write-TestStage 'model lock publication ABA regression passed'
 
         Remove-Item -LiteralPath $modelLock -Recurse -Force -ErrorAction SilentlyContinue
@@ -1829,12 +1829,12 @@ process.stdout.write(JSON.stringify({
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-x-before-continue'), "continue`n", $utf8)
         Wait-ForTestPath (Join-Path $temporary 'windows-aba-x-after') 'Windows rename ABA stale owner pauses behind quarantine barrier'
         $abaZ = Start-TrackedTestProcess $shellPath $lockLauncherArguments 'windows-aba-z'
-        Assert-True ($abaZ.WaitForExit(10000)) 'Windows Z contender finishes behind quarantine barrier'
+        Wait-ForTestProcess $abaZ 'Windows Z contender finishes behind quarantine barrier'
         Assert-True (([IO.File]::ReadAllText((Join-Path $modelLock 'owner'))).Contains($abaYNonce)) 'Windows rename ABA restores Y and excludes Z'
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-x-after-continue'), "continue`n", $utf8)
-        Assert-True ($abaX.WaitForExit(10000)) 'Windows stale remover exits'
+        Wait-ForTestProcess $abaX 'Windows stale remover exits'
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-aba-y-continue'), "continue`n", $utf8)
-        Assert-True ($abaY.WaitForExit(10000)) 'Windows Y owner exits'
+        Wait-ForTestProcess $abaY 'Windows Y owner exits'
         Write-TestStage 'model lock rename ABA regression passed'
 
         Remove-Item -LiteralPath $modelLock -Recurse -Force -ErrorAction SilentlyContinue
@@ -1860,9 +1860,9 @@ process.stdout.write(JSON.stringify({
         Wait-ForTestPath (Join-Path $temporary 'windows-self-x-after') 'Windows self recovery stale owner pauses after rename'
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-self-y-continue'), "continue`n", $utf8)
         Wait-ForTestPath (Join-Path $temporary 'windows-self-y-recovered') 'Windows owner restores its own moved generation'
-        Assert-True ($selfY.WaitForExit(10000)) 'Windows recovered owner exits without lock timeout'
+        Wait-ForTestProcess $selfY 'Windows recovered owner exits without lock timeout'
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-self-x-after-continue'), "continue`n", $utf8)
-        Assert-True ($selfX.WaitForExit(10000)) 'Windows paused remover exits after owner recovery'
+        Wait-ForTestProcess $selfX 'Windows paused remover exits after owner recovery'
         Assert-True (-not (Test-Path -LiteralPath $modelLock) -and @(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows self recovery leaves no lock generation'
         Write-TestStage 'model lock self recovery regression passed'
 
@@ -1875,7 +1875,7 @@ process.stdout.write(JSON.stringify({
         [IO.Directory]::CreateDirectory($modelLock) | Out-Null
         [IO.File]::WriteAllText((Join-Path $modelLock 'owner-pid'), "$PID old-token`n", $utf8)
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-legacy-a-continue'), "continue`n", $utf8)
-        Assert-True ($legacyA.WaitForExit(10000)) 'Windows mixed-version creator withdraws'
+        Wait-ForTestProcess $legacyA 'Windows mixed-version creator withdraws'
         Assert-True (([IO.File]::ReadAllText((Join-Path $modelLock 'owner-pid')).Trim() -eq "$PID old-token") -and
             -not (Test-Path -LiteralPath (Join-Path $modelLock 'owner')) -and
             -not (Test-Path -LiteralPath (Join-Path $modelLock 'generation'))) 'Windows prior-format replacement survives exact'
@@ -1890,7 +1890,7 @@ process.stdout.write(JSON.stringify({
         [IO.Directory]::CreateDirectory($modelLock) | Out-Null
         [IO.File]::WriteAllText((Join-Path $modelLock 'owner-pid'), '', $utf8)
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-legacy-zero-continue'), "continue`n", $utf8)
-        Assert-True ($legacyZero.WaitForExit(10000)) 'Windows zero-length owner-pid creator withdraws'
+        Wait-ForTestProcess $legacyZero 'Windows zero-length owner-pid creator withdraws'
         Assert-True ((Test-Path -LiteralPath (Join-Path $modelLock 'owner-pid') -PathType Leaf) -and
             (Get-Item -LiteralPath (Join-Path $modelLock 'owner-pid')).Length -eq 0 -and
             -not (Test-Path -LiteralPath (Join-Path $modelLock 'owner')) -and
@@ -1910,7 +1910,7 @@ process.stdout.write(JSON.stringify({
         Move-Item -LiteralPath $modelLock -Destination (Join-Path $temporary 'windows-legacy-absent-created')
         [IO.Directory]::CreateDirectory($modelLock) | Out-Null
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-legacy-absent-continue'), "continue`n", $utf8)
-        Assert-True ($legacyAbsent.WaitForExit(10000)) 'Windows creator withdraws from empty replacement directory'
+        Wait-ForTestProcess $legacyAbsent 'Windows creator withdraws from empty replacement directory'
         Assert-True ((Test-Path -LiteralPath $modelLock -PathType Container) -and
             -not (Test-Path -LiteralPath (Join-Path $modelLock 'owner-pid')) -and
             -not (Test-Path -LiteralPath (Join-Path $modelLock 'owner')) -and
@@ -1930,7 +1930,7 @@ process.stdout.write(JSON.stringify({
         [IO.Directory]::CreateDirectory($modelLock) | Out-Null
         [IO.File]::WriteAllText((Join-Path $modelLock 'owner.json'), "future-owner`n", $utf8)
         [IO.File]::WriteAllText((Join-Path $temporary 'windows-unknown-owner-continue'), "continue`n", $utf8)
-        Assert-True ($unknownOwner.WaitForExit(10000)) 'Windows future-format owner creator withdraws'
+        Wait-ForTestProcess $unknownOwner 'Windows future-format owner creator withdraws'
         Assert-True (([IO.File]::ReadAllText((Join-Path $modelLock 'owner.json')).Trim() -eq 'future-owner') -and
             -not (Test-Path -LiteralPath (Join-Path $modelLock 'owner')) -and
             -not (Test-Path -LiteralPath (Join-Path $modelLock 'generation'))) 'Windows future-format owner survives structured publication'

@@ -54,6 +54,13 @@ assert.match(suite, /testSuiteTimeoutSeconds = 600/, 'Windows CI suite has a bou
 assert.match(suite, /test\.ps1 watchdog timed out after/, 'Windows CI watchdog reports the active test stage');
 assert.match(suite, /Stop-Process -Id \$PID -Force/, 'Windows CI watchdog terminates a hung test host');
 assert.match(suite, /testSuiteWatchdog\.Kill\(\)/, 'Windows CI suite cleans up its watchdog after success or failure');
+const modelLockFixtureStart = suite.indexOf("Write-TestStage 'starting model lock regressions'");
+const modelLockFixtureEnd = suite.indexOf("Write-TestStage 'model lock regressions passed'", modelLockFixtureStart);
+assert.notEqual(modelLockFixtureStart, -1, 'Windows suite is missing model lock regressions');
+assert.notEqual(modelLockFixtureEnd, -1, 'Windows model lock regressions are missing their completion boundary');
+const modelLockFixture = suite.slice(modelLockFixtureStart, modelLockFixtureEnd);
+assert.doesNotMatch(modelLockFixture, /\.WaitForExit\(10000\)/,
+  'Windows model lock races must use the common bounded process wait instead of a shorter host timing threshold');
 const updateFixtureStart = suite.indexOf("Write-TestStage 'starting automatic update regressions'");
 const updateFixtureEnd = suite.indexOf("Write-TestStage 'automatic update regressions passed'", updateFixtureStart);
 assert.notEqual(updateFixtureStart, -1, 'Windows suite is missing automatic update regressions');
