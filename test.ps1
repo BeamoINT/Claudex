@@ -1543,7 +1543,7 @@ process.stdout.write(JSON.stringify({
         Assert-True (@(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows exclusive-create fallback leaves no partial generation'
 
         $env:CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE = '1'
-        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --terra windows-lock-forced-publication-failure-test | Out-Null
         Remove-Item Env:CLAUDEX_TEST_FORCE_PUBLICATION_FAILURE
         Assert-True (-not (Test-Path -LiteralPath $modelLock)) 'Windows publication failure removes its incomplete lock'
         Assert-True (@(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows publication failure leaves no quarantine barrier'
@@ -1701,7 +1701,7 @@ process.stdout.write(JSON.stringify({
         [IO.File]::WriteAllText((Join-Path $mixedBarrier 'owner'), "pid=2147483000`nidentity=dead`nnonce=injected-generation`n", $utf8)
         [IO.File]::WriteAllText((Join-Path $mixedBarrier 'owner-pid'), '', $utf8)
         (Get-Item -LiteralPath $mixedBarrier).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
-        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --terra windows-lock-mixed-barrier-test | Out-Null
         Assert-True ((Test-Path -LiteralPath (Join-Path $modelLock 'owner-pid') -PathType Leaf) -and
             (Get-Item -LiteralPath (Join-Path $modelLock 'owner-pid')).Length -eq 0 -and
             -not (Test-Path -LiteralPath (Join-Path $modelLock 'owner')) -and
@@ -1714,7 +1714,7 @@ process.stdout.write(JSON.stringify({
         [IO.File]::WriteAllText((Join-Path $mixedDeadBarrier 'owner'), "pid=$PID`nidentity=`nnonce=injected-live`n", $utf8)
         [IO.File]::WriteAllText((Join-Path $mixedDeadBarrier 'owner-pid'), "2147483000 old-token`n", $utf8)
         (Get-Item -LiteralPath $mixedDeadBarrier).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
-        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --terra windows-lock-dead-barrier-test | Out-Null
         Assert-True (-not (Test-Path -LiteralPath $modelLock) -and
             @(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows dead legacy barrier ignores and removes live structured injection after grace'
 
@@ -1723,7 +1723,7 @@ process.stdout.write(JSON.stringify({
         [IO.File]::WriteAllText((Join-Path $modelLock 'owner'), "pid=$PID`nidentity=`nnonce=injected-live`n", $utf8)
         [IO.File]::WriteAllText((Join-Path $modelLock 'owner-pid'), "2147483000 old-token`n", $utf8)
         (Get-Item -LiteralPath $modelLock).LastWriteTimeUtc = [DateTime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()
-        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --version | Out-Null
+        & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'claudex.ps1') --terra windows-lock-dead-canonical-test | Out-Null
         Assert-True (-not (Test-Path -LiteralPath $modelLock) -and
             @(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows dead canonical legacy owner ignores and removes live structured injection after grace'
         Remove-Item Env:CLAUDEX_TEST_LOCK_MATCH -ErrorAction SilentlyContinue
