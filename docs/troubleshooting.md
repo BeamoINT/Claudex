@@ -159,6 +159,14 @@ This applies only to that process and does not change the machine wide policy.
 If organizational policy still blocks scripts, consult the machine
 administrator.
 
+## Windows reports a missing Codex PowerShell shim
+
+The official Codex npm installation provides `codex.cmd` and `codex.ps1`
+together. Claudex does not run a batch shim by itself because Windows
+PowerShell 5.1 can change quoted Codex configuration arguments at that
+boundary. Rerun the documented Claudex installer so it repairs the official
+`@openai/codex` installation, then retry the command.
+
 ## Still stuck
 
 Read [SUPPORT.md](../SUPPORT.md) and open the appropriate discussion or issue.

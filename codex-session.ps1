@@ -650,13 +650,18 @@ function Get-CodexSourceSnapshot {
 }
 
 $script:lastCodexCommandExitCode = 1
+$script:codexResolutionFailure = ''
 function Resolve-CodexCommand {
+    $script:codexResolutionFailure = ''
     $command = Get-Command codex -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $command -or -not $command.Source) { return $command }
     $extension = [IO.Path]::GetExtension([string] $command.Source).ToLowerInvariant()
     if ($extension -notin @('.cmd', '.bat')) { return $command }
     $powerShellShim = [IO.Path]::ChangeExtension([string] $command.Source, '.ps1')
-    if (-not (Test-Path -LiteralPath $powerShellShim -PathType Leaf)) { return $command }
+    if (-not (Test-Path -LiteralPath $powerShellShim -PathType Leaf)) {
+        $script:codexResolutionFailure = 'The Codex Windows installation is incomplete: codex.ps1 is missing beside the selected batch shim. Reinstall Codex and retry.'
+        return $null
+    }
     # Windows PowerShell 5.1 may refuse Get-Command on an exact script path
     # under its process execution policy. The sibling is already inside the
     # selected Codex installation directory and the child host applies Bypass.
@@ -726,7 +731,8 @@ function Sync-Session {
                 if (Resolve-CodexCommand) { continue }
                 Clear-OwnedSessionState
             } finally { Release-SessionSyncLock }
-            Write-Failure 'Codex CLI was not found. Install Codex, run `codex login`, and retry.'
+            if ($script:codexResolutionFailure) { Write-Failure $script:codexResolutionFailure }
+            else { Write-Failure 'Codex CLI was not found. Install Codex, run `codex login`, and retry.' }
             return 10
         }
         if (-not (Test-CodexLogin)) {
@@ -969,7 +975,11 @@ switch ($Action) {
     }
     'login' {
         $codex = Resolve-CodexCommand
-        if (-not $codex) { Write-Failure 'Codex CLI was not found. Install Codex and retry.'; exit 10 }
+        if (-not $codex) {
+            if ($script:codexResolutionFailure) { Write-Failure $script:codexResolutionFailure }
+            else { Write-Failure 'Codex CLI was not found. Install Codex and retry.' }
+            exit 10
+        }
         Write-Output 'Claudex is opening the official Codex sign-in flow...'
         Invoke-CodexCommand -Codex $codex -Arguments @('-c', "cli_auth_credentials_store='file'", 'login')
         if ($script:lastCodexCommandExitCode -ne 0) { exit $script:lastCodexCommandExitCode }
@@ -990,6 +1000,7 @@ switch ($Action) {
         finally { Release-SessionSyncLock }
         if ($exitCode -ne 0) {
             if ($codex) { Write-Failure 'Codex logout failed, but the local Claudex bridge session was cleared.' }
+            elseif ($script:codexResolutionFailure) { Write-Failure "$($script:codexResolutionFailure) The local Claudex bridge session was cleared." }
             else { Write-Failure 'Codex CLI was not found; the local Claudex bridge session was cleared.' }
             exit $exitCode
         }

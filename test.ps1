@@ -2533,30 +2533,30 @@ process.stdout.write(JSON.stringify({
     $logoutAuthArgsLog = Join-Path $temporary 'codex-logout-auth-args.log'
     $savedLogoutPath = $env:PATH
     $savedFakeSegment = $null
-    if ($isWindowsPlatform) {
-        $percentCodexBin = Join-Path $temporary '%CLAUDEX_FAKE_SEGMENT%&codex-shim'
-        [IO.Directory]::CreateDirectory($percentCodexBin) | Out-Null
-        Copy-Item -LiteralPath (Join-Path $fakeBin 'codex.cmd') -Destination (Join-Path $percentCodexBin 'codex.cmd')
-        Copy-Item -LiteralPath (Join-Path $fakeBin 'codex.ps1') -Destination (Join-Path $percentCodexBin 'codex.ps1')
-        $savedFakeSegment = [Environment]::GetEnvironmentVariable('CLAUDEX_FAKE_SEGMENT', 'Process')
-        $env:CLAUDEX_FAKE_SEGMENT = 'must-not-expand'
-        $fakeBinPrefix = "$fakeBin$([IO.Path]::PathSeparator)"
-        Assert-True ($savedLogoutPath.StartsWith($fakeBinPrefix, [StringComparison]::OrdinalIgnoreCase)) 'Windows fake Codex directory is the leading test PATH entry'
-        $env:PATH = "$percentCodexBin$([IO.Path]::PathSeparator)$($savedLogoutPath.Substring($fakeBinPrefix.Length))"
-        $resolvedPercentCodex = [string] (Get-Command codex -ErrorAction Stop).Source
-        $resolvedPercentCodexPath = [IO.Path]::GetFullPath($resolvedPercentCodex)
-        $resolvedPercentCodexDirectory = [IO.Path]::GetDirectoryName($resolvedPercentCodexPath)
-        $resolvedPercentCodexName = [IO.Path]::GetFileName($resolvedPercentCodexPath)
-        Assert-True (
-            $resolvedPercentCodexDirectory -eq [IO.Path]::GetFullPath($percentCodexBin) -and
-            $resolvedPercentCodexName -in @('codex.cmd', 'codex.ps1')
-        ) 'Codex logout resolves an official shim from the literal percent and metacharacter directory'
-    }
-    $env:FAKE_CODEX_AUTH_ARGS_LOG = $logoutAuthArgsLog
-    $env:FAKE_CODEX_DEFAULT_LOGOUT = '0'
-    $env:FAKE_CODEX_FILE_LOGOUT = '9'
     $savedErrorPreference = $ErrorActionPreference
     try {
+        if ($isWindowsPlatform) {
+            $percentCodexBin = Join-Path $temporary '%CLAUDEX_FAKE_SEGMENT%&codex-shim'
+            [IO.Directory]::CreateDirectory($percentCodexBin) | Out-Null
+            Copy-Item -LiteralPath (Join-Path $fakeBin 'codex.cmd') -Destination (Join-Path $percentCodexBin 'codex.cmd')
+            Copy-Item -LiteralPath (Join-Path $fakeBin 'codex.ps1') -Destination (Join-Path $percentCodexBin 'codex.ps1')
+            $savedFakeSegment = [Environment]::GetEnvironmentVariable('CLAUDEX_FAKE_SEGMENT', 'Process')
+            $env:CLAUDEX_FAKE_SEGMENT = 'must-not-expand'
+            $fakeBinPrefix = "$fakeBin$([IO.Path]::PathSeparator)"
+            Assert-True ($savedLogoutPath.StartsWith($fakeBinPrefix, [StringComparison]::OrdinalIgnoreCase)) 'Windows fake Codex directory is the leading test PATH entry'
+            $env:PATH = "$percentCodexBin$([IO.Path]::PathSeparator)$($savedLogoutPath.Substring($fakeBinPrefix.Length))"
+            $resolvedPercentCodex = [string] (Get-Command codex -ErrorAction Stop).Source
+            $resolvedPercentCodexPath = [IO.Path]::GetFullPath($resolvedPercentCodex)
+            $resolvedPercentCodexDirectory = [IO.Path]::GetDirectoryName($resolvedPercentCodexPath)
+            $resolvedPercentCodexName = [IO.Path]::GetFileName($resolvedPercentCodexPath)
+            Assert-True (
+                $resolvedPercentCodexDirectory -eq [IO.Path]::GetFullPath($percentCodexBin) -and
+                $resolvedPercentCodexName -in @('codex.cmd', 'codex.ps1')
+            ) 'Codex logout resolves an official shim from the literal percent and metacharacter directory'
+        }
+        $env:FAKE_CODEX_AUTH_ARGS_LOG = $logoutAuthArgsLog
+        $env:FAKE_CODEX_DEFAULT_LOGOUT = '0'
+        $env:FAKE_CODEX_FILE_LOGOUT = '9'
         $ErrorActionPreference = 'Continue'
         $shellPath = (Get-Process -Id $PID).Path
         $logoutOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'codex-session.ps1') logout 2>&1
@@ -2579,6 +2579,28 @@ process.stdout.write(JSON.stringify({
     Assert-True ($logoutAuthArgs -eq 'file:logout') 'Codex logout uses the Claudex file credential store'
 
     if ($isWindowsPlatform) {
+        $cmdOnlyCodexBin = Join-Path $temporary 'cmd-only-codex'
+        [IO.Directory]::CreateDirectory($cmdOnlyCodexBin) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $fakeBin 'codex.cmd') -Destination (Join-Path $cmdOnlyCodexBin 'codex.cmd')
+        $cmdOnlyAuthLog = Join-Path $temporary 'cmd-only-codex-auth.log'
+        $savedCmdOnlyPath = $env:PATH
+        $fakeBinPrefix = "$fakeBin$([IO.Path]::PathSeparator)"
+        $env:PATH = "$cmdOnlyCodexBin$([IO.Path]::PathSeparator)$($savedCmdOnlyPath.Substring($fakeBinPrefix.Length))"
+        $env:FAKE_CODEX_AUTH_ARGS_LOG = $cmdOnlyAuthLog
+        $savedErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $cmdOnlyOutput = & $shellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'codex-session.ps1') status 2>&1
+            $cmdOnlyExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $savedErrorPreference
+            $env:PATH = $savedCmdOnlyPath
+            Remove-Item Env:FAKE_CODEX_AUTH_ARGS_LOG -ErrorAction SilentlyContinue
+        }
+        Assert-True ($cmdOnlyExit -eq 10) 'Windows Codex batch only installation fails closed'
+        Assert-True (($cmdOnlyOutput | Out-String).Contains('codex.ps1 is missing beside the selected batch shim')) 'Windows Codex batch only installation reports its repair path'
+        Assert-True (-not (Test-Path -LiteralPath $cmdOnlyAuthLog -PathType Leaf)) 'Windows Codex batch only installation never executes the unreliable batch shim'
+
         $usageHelper = Join-Path $testConfig 'usage-limit.ps1'
         $quotedUsageHelper = '"' + $usageHelper + '"'
         $blockedCurlLog = Join-Path $temporary 'blocked-usage-url-curl.log'

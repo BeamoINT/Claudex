@@ -29,6 +29,8 @@ for (const required of [
   'FileIndexHigh.ToString("x8")',
   'function Resolve-CodexCommand',
   "[IO.Path]::ChangeExtension([string] $command.Source, '.ps1')",
+  'The Codex Windows installation is incomplete: codex.ps1 is missing beside the selected batch shim.',
+  'return $null',
   "return [pscustomobject]@{ Source = $powerShellShim; CommandType = 'ExternalScript' }",
   '$payloadBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))',
   "'-EncodedCommand'",
