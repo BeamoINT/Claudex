@@ -1530,6 +1530,10 @@ process.stdout.write(JSON.stringify({
     Assert-True (-not $proxyEnsureSource.Contains('Remove-Item -LiteralPath $lockDir -Recurse')) 'Windows proxy startup never recursively deletes a competing lock generation'
 
     if ($isWindowsPlatform) {
+        $savedModelLockSkipAuthSync = [Environment]::GetEnvironmentVariable('CLAUDEX_TEST_SKIP_AUTH_SYNC', 'Process')
+        $savedModelLockSkipAuthWatcher = [Environment]::GetEnvironmentVariable('CLAUDEX_SKIP_AUTH_WATCHER', 'Process')
+        $env:CLAUDEX_TEST_SKIP_AUTH_SYNC = '1'
+        $env:CLAUDEX_SKIP_AUTH_WATCHER = '1'
         $runDirectory = Join-Path $testConfig 'run'
         $modelLock = Join-Path $runDirectory 'model-display.lock'
         Remove-Item -LiteralPath $modelLock -Recurse -Force -ErrorAction SilentlyContinue
@@ -1736,6 +1740,10 @@ process.stdout.write(JSON.stringify({
         Assert-True (-not (Test-Path -LiteralPath $modelLock) -and
             @(Get-ChildItem -LiteralPath $runDirectory -Directory -Filter 'model-display.lock.quarantine.*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows dead canonical legacy owner ignores and removes live structured injection after grace'
         Remove-Item Env:CLAUDEX_TEST_LOCK_MATCH -ErrorAction SilentlyContinue
+        if ($null -eq $savedModelLockSkipAuthSync) { Remove-Item Env:CLAUDEX_TEST_SKIP_AUTH_SYNC -ErrorAction SilentlyContinue }
+        else { $env:CLAUDEX_TEST_SKIP_AUTH_SYNC = $savedModelLockSkipAuthSync }
+        if ($null -eq $savedModelLockSkipAuthWatcher) { Remove-Item Env:CLAUDEX_SKIP_AUTH_WATCHER -ErrorAction SilentlyContinue }
+        else { $env:CLAUDEX_SKIP_AUTH_WATCHER = $savedModelLockSkipAuthWatcher }
 
         $updateDirectory = Join-Path $testConfig 'update'
         Remove-Item -LiteralPath $updateDirectory -Recurse -Force -ErrorAction SilentlyContinue
