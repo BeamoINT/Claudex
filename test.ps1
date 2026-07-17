@@ -2457,8 +2457,18 @@ process.stdout.write(JSON.stringify({
     [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), '{"auth_mode":"chatgpt","tokens":{"access_token":123,"refresh_token":"invalid","account_id":"account-test"}}', $utf8)
     [IO.Directory]::CreateDirectory($sessionSyncLock) | Out-Null
     [IO.File]::WriteAllText((Join-Path $sessionSyncLock 'owner'), "$PID held-invalid-sync`n", $utf8)
-    $serializedSync = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedSessionHelper, 'sync') -PassThru
-    Start-Sleep -Milliseconds 250
+    $serializedSyncReady = Join-Path $temporary 'serialized-sync-lock-wait-ready'
+    $savedSessionLockTestMode = [Environment]::GetEnvironmentVariable('CLAUDEX_TEST_MODE', 'Process')
+    $env:CLAUDEX_TEST_MODE = '1'
+    $env:CLAUDEX_TEST_SESSION_SYNC_LOCK_WAIT_READY_FILE = $serializedSyncReady
+    try {
+        $serializedSync = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedSessionHelper, 'sync') -PassThru
+        Wait-ForTestPath $serializedSyncReady 'invalid sync waits for publication ownership'
+    } finally {
+        Remove-Item Env:CLAUDEX_TEST_SESSION_SYNC_LOCK_WAIT_READY_FILE -ErrorAction SilentlyContinue
+        if ($null -eq $savedSessionLockTestMode) { Remove-Item Env:CLAUDEX_TEST_MODE -ErrorAction SilentlyContinue }
+        else { $env:CLAUDEX_TEST_MODE = $savedSessionLockTestMode }
+    }
     Assert-True (Test-Path -LiteralPath $bridgeAuthFile -PathType Leaf) 'invalid sync preserves bridge while a live publisher owns the lock'
     Assert-True (Test-Path -LiteralPath (Join-Path $testConfig 'usage-cache\summary') -PathType Leaf) 'invalid sync preserves usage state while a live publisher owns the lock'
     [IO.File]::WriteAllText((Join-Path $testCodexDir 'auth.json'), ('{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-07-15T03:00:01.123456Z","tokens":{"access_token":"codex-revalidated-access","refresh_token":"codex-source-refresh","id_token":"' + $managedIdToken + '","account_id":"account-test"}}'), $utf8)
@@ -2475,10 +2485,14 @@ process.stdout.write(JSON.stringify({
     [IO.Directory]::CreateDirectory($sessionSyncLock) | Out-Null
     [IO.File]::WriteAllText((Join-Path $sessionSyncLock 'owner'), "$PID held-logout`n", $utf8)
     $serializedLogoutArgs = Join-Path $temporary 'serialized-logout-args.log'
+    $serializedLogoutReady = Join-Path $temporary 'serialized-logout-lock-wait-ready'
+    $savedSessionLockTestMode = [Environment]::GetEnvironmentVariable('CLAUDEX_TEST_MODE', 'Process')
+    $env:CLAUDEX_TEST_MODE = '1'
     $env:FAKE_CODEX_AUTH_ARGS_LOG = $serializedLogoutArgs
+    $env:CLAUDEX_TEST_SESSION_SYNC_LOCK_WAIT_READY_FILE = $serializedLogoutReady
     try {
         $serializedLogout = Start-Process -FilePath $shellPath -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedSessionHelper, 'logout') -PassThru
-        Start-Sleep -Milliseconds 250
+        Wait-ForTestPath $serializedLogoutReady 'logout waits for publication ownership'
         Assert-True (-not (Test-Path -LiteralPath $serializedLogoutArgs -PathType Leaf)) 'logout does not mutate the Codex source before publication ownership transfers'
         Assert-True (Test-Path -LiteralPath $bridgeAuthFile -PathType Leaf) 'logout preserves bridge while a live publisher owns the lock'
         Assert-True (Test-Path -LiteralPath (Join-Path $testConfig 'usage-cache\summary') -PathType Leaf) 'logout preserves usage state while a live publisher owns the lock'
@@ -2486,6 +2500,9 @@ process.stdout.write(JSON.stringify({
         Wait-ForTestProcess $serializedLogout 'logout exits after publication ownership transfers'
     } finally {
         Remove-Item Env:FAKE_CODEX_AUTH_ARGS_LOG -ErrorAction SilentlyContinue
+        Remove-Item Env:CLAUDEX_TEST_SESSION_SYNC_LOCK_WAIT_READY_FILE -ErrorAction SilentlyContinue
+        if ($null -eq $savedSessionLockTestMode) { Remove-Item Env:CLAUDEX_TEST_MODE -ErrorAction SilentlyContinue }
+        else { $env:CLAUDEX_TEST_MODE = $savedSessionLockTestMode }
         Remove-Item -LiteralPath $sessionSyncLock -Recurse -Force -ErrorAction SilentlyContinue
     }
     Assert-True ($serializedLogout.ExitCode -eq 0) 'logout completes after publication ownership transfers'
