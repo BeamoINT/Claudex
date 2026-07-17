@@ -649,22 +649,29 @@ function Get-CodexSourceSnapshot {
     return [pscustomobject]@{ Valid = [bool] $valid; Raw = $raw; Source = $source }
 }
 
-function ConvertTo-CodexCmdArgument([string] $Value) {
-    if ($null -eq $Value) { $Value = '' }
-    return '"' + $Value.Replace('%', '%%').Replace('"', '""') + '"'
-}
-
 $script:lastCodexCommandExitCode = 1
 function Invoke-CodexCommand($Codex, [string[]] $Arguments, [switch] $DiscardOutput) {
     $commandPath = [string] $Codex.Source
     $extension = [IO.Path]::GetExtension($commandPath).ToLowerInvariant()
     if ($isWindowsPlatform -and $extension -in @('.cmd', '.bat')) {
-        $commandLine = (ConvertTo-CodexCmdArgument $commandPath) + ' ' +
-            (@($Arguments | ForEach-Object { ConvertTo-CodexCmdArgument ([string] $_) }) -join ' ')
         $startInfo = New-Object Diagnostics.ProcessStartInfo
         $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
-        $startInfo.Arguments = '/d /s /v:off /c "' + $commandLine + '"'
         $startInfo.UseShellExecute = $false
+        # cmd expands environment references once and does not recursively
+        # expand percent shaped text inside their values. Keep the trusted shim
+        # path and fixed internal arguments out of the /c source text so valid
+        # literal percent and metacharacter paths remain data, not cmd syntax.
+        $commandVariable = 'CLAUDEX_CODEX_SHIM_PATH'
+        $startInfo.EnvironmentVariables[$commandVariable] = $commandPath
+        $commandParts = @('"%' + $commandVariable + '%"')
+        for ($argumentIndex = 0; $argumentIndex -lt $Arguments.Count; $argumentIndex++) {
+            $argumentVariable = 'CLAUDEX_CODEX_SHIM_ARG_' + $argumentIndex
+            $argumentValue = [string] $Arguments[$argumentIndex]
+            if ($argumentValue -match '["\x00\r\n]') { throw 'internal Codex shim arguments cannot contain quotes or control line breaks' }
+            $startInfo.EnvironmentVariables[$argumentVariable] = $argumentValue
+            $commandParts += '"%' + $argumentVariable + '%"'
+        }
+        $startInfo.Arguments = '/d /s /v:off /c "' + ($commandParts -join ' ') + '"'
         if ($DiscardOutput) {
             $startInfo.RedirectStandardOutput = $true
             $startInfo.RedirectStandardError = $true
