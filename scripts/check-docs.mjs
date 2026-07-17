@@ -75,7 +75,7 @@ for (const file of readdirSync(join(root, '.github/workflows'))
 }
 
 const crossPlatformWorkflow = readFileSync(join(root, '.github/workflows/test.yml'), 'utf8');
-const unixJob = crossPlatformWorkflow.match(/\n  unix:\n([\s\S]*?)(?=\n  [A-Za-z0-9_-]+:\n)/);
+const unixJob = crossPlatformWorkflow.match(/\r?\n  unix:\r?\n([\s\S]*?)(?=\r?\n  [A-Za-z0-9_-]+:\r?\n)/);
 const unixTimeout = unixJob?.[1].match(/^\s+timeout-minutes:\s*(\d+)\s*$/m);
 if (!unixTimeout || Number(unixTimeout[1]) < 45) {
   failures.push('.github/workflows/test.yml must allow at least 45 minutes for the full Unix matrix');
