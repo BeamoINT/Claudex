@@ -1,6 +1,14 @@
-# CLAUDE.md
+# Claudex agent guide
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file is the authoritative repository guide for every AI coding agent
+working here (Claude Code, Codex, Gemini, Grok, Copilot, and others).
+`AGENTS.md` is a deliberate short stub that sends Codex here; keep it a stub.
+Do not add mirrored copies of this guide (`GEMINI.md`, `GROK.md`,
+`.github/copilot-instructions.md`): this repository is excluded from the
+workspace convention of mirrored instruction files, because
+`scripts/check-docs.mjs` (part of `npm test` and CI) lints every Markdown file
+in the repository and rejects long dashes and hyphenated words in prose, which
+that convention's required mirror header contains.
 
 ## What this is
 
@@ -22,7 +30,7 @@ Production code is intentionally dependency light: Bash, PowerShell, a small Nod
 ```bash
 ./test.sh                    # full Unix suite (runs test.zsh in an isolated fake home)
 ./test.ps1                   # full Windows suite (run from PowerShell)
-npm test                     # docs + preload + skill contract/security suites
+npm test                     # docs, preload, skill bridge/contract/security, package bootstrap and setup lock checks
 npm run test:all             # same as ./test.sh
 ./scripts/build-release.sh   # build release archives (tarball + Windows zip) into dist/
 ```
