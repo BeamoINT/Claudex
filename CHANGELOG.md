@@ -17,8 +17,9 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Stopped a native Claude plugin installed for one project from renaming an
   imported Codex plugin in every other project, and honored disabled native
   plugins when reserving namespaces.
-- Made the PowerShell verification entrypoint run reliably under PowerShell
-  7.6 on macOS with isolated Unix fixtures and deterministic cache assertions.
+- Made the PowerShell verification entrypoint run reliably under Windows
+  PowerShell 5.1 and PowerShell 7.6 on macOS with safe native stderr capture,
+  isolated Unix fixtures, and deterministic cache assertions.
 - Made the PowerShell self update race suite portable across Windows and macOS,
   and added it to the macOS CI leg so both filesystem identity paths stay covered.
 
