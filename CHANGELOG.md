@@ -22,6 +22,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
   fixtures, isolated Unix state, and deterministic cache assertions.
 - Made the PowerShell self update race suite portable across Windows and macOS,
   and added it to the macOS CI leg so both filesystem identity paths stay covered.
+- Preserved the conventional signal exit status when an interactive package
+  launcher traps a foreground group signal and exits before its wrapper callback.
 
 ## [1.6.1] - 2026-07-17
 
