@@ -30,6 +30,10 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
       - name: Run isolated Bash tests
         run: ./test.sh
+      - name: Run PowerShell self-update lock regressions on macOS
+        if: runner.os == 'macOS'
+        shell: pwsh
+        run: ./tests/self-update-lock-regressions.ps1
 
   windows:
     name: windows-latest

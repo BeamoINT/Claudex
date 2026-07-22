@@ -217,8 +217,14 @@ function testStrictPluginOnlySkillPolicy() {
   const plugin = path.join(fixture.codexHome, 'plugins', 'cache', 'market', 'strict-plugin', '1.0.0');
   write(path.join(plugin, '.codex-plugin', 'plugin.json'), '{"name":"strict-plugin","skills":["skills"]}\n');
   createSkill(path.join(plugin, 'skills', 'plugin-task'), 'plugin-task');
+  const singlePlugin = path.join(fixture.codexHome, 'plugins', 'cache', 'market', 'strict-single', '1.0.0');
+  write(path.join(singlePlugin, '.codex-plugin', 'plugin.json'), '{"name":"strict-single","skills":["skills"]}\n');
+  createSkill(path.join(singlePlugin, 'skills', 'strict-single'), 'strict-single');
   write(fixture.inventory, JSON.stringify({ installed: [{
     pluginId: 'strict-plugin@market', name: 'strict-plugin', marketplaceName: 'market',
+    version: '1.0.0', installed: true, enabled: true,
+  }, {
+    pluginId: 'strict-single@market', name: 'strict-single', marketplaceName: 'market',
     version: '1.0.0', installed: true, enabled: true,
   }] }));
   write(path.join(fixture.repo, '.claude', 'settings.local.json'), '{"strictPluginOnlyCustomization":false}\n');
@@ -228,6 +234,9 @@ function testStrictPluginOnlySkillPolicy() {
   assert(!aliases(strictBoolean).has('standalone-strict'), 'managed strict plugin-only policy must omit standalone skills');
   assert(!aliases(strictBoolean).has('standalone-command'), 'boolean strict plugin-only policy must omit standalone commands');
   assert(aliases(strictBoolean).has('strict-plugin:plugin-task'), 'strict plugin-only policy must retain plugin skills');
+  assert(aliases(strictBoolean).has('strict-single:strict-single'));
+  assert(!aliases(strictBoolean).has('strict-single'),
+    'strict plugin-only policy must not materialize a standalone plugin shortcut');
   assert(warningIncludes(strictBoolean, 'require skills to come from plugins'));
 
   write(managed, '{"strictPluginOnlyCustomization":["skills"]}\n');
@@ -241,6 +250,8 @@ function testStrictPluginOnlySkillPolicy() {
   assert(aliases(commandsOnly).has('standalone-strict'), 'non-skill strict categories must not block standalone skills');
   assert(!aliases(commandsOnly).has('standalone-command'), 'commands strict category must omit standalone Claude commands');
   assert(aliases(commandsOnly).has('strict-plugin:plugin-task'), 'commands strict category must retain plugin customizations');
+  assert(aliases(commandsOnly).has('strict-single'),
+    'a command-only strict policy must still allow safe standalone skill shortcuts');
   assert(warningIncludes(commandsOnly, 'require commands to come from plugins'));
 }
 
@@ -515,6 +526,85 @@ function testNativePluginNamespaceReservation() {
     'an imported plugin must not shadow a native Claudex plugin namespace');
 }
 
+function testScopedPluginReservationAndSameNameShortcuts() {
+  const fixture = setup('scoped-plugin-shortcuts');
+  const nativePlugin = path.join(fixture.config, 'plugins', 'cache', 'native', 'frontend-design', '1.0.0');
+  write(path.join(nativePlugin, '.claude-plugin', 'plugin.json'), '{"name":"frontend-design"}\n');
+  const unrelatedRepo = path.join(fixture.root, 'unrelated-repo');
+  write(path.join(fixture.config, 'plugins', 'installed_plugins.json'), JSON.stringify({
+    plugins: {
+      'frontend-design@native': [{
+        scope: 'project', projectPath: unrelatedRepo, installPath: nativePlugin,
+      }],
+    },
+  }));
+
+  const importedPlugin = path.join(fixture.codexHome, 'plugins', 'cache', 'market', 'frontend-design', '2.0.0');
+  write(path.join(importedPlugin, '.codex-plugin', 'plugin.json'), JSON.stringify({
+    name: 'frontend-design', skills: ['./skills'], mcpServers: './.mcp.json',
+    apps: './.app.json', hooks: './hooks/hooks.json',
+  }));
+  write(path.join(importedPlugin, '.mcp.json'), '{"design":{"command":"never-run"}}\n');
+  write(path.join(importedPlugin, '.app.json'), '{"design":"connector"}\n');
+  write(path.join(importedPlugin, 'hooks', 'hooks.json'), '{"hooks":{}}\n');
+  createSkill(path.join(importedPlugin, 'skills', 'frontend-design'), 'frontend-design');
+  write(path.join(importedPlugin, 'skills', 'frontend-design', 'assets', 'design.txt'), 'design support\n');
+  write(fixture.inventory, JSON.stringify({ installed: [{
+    pluginId: 'frontend-design@market', name: 'frontend-design', marketplaceName: 'market',
+    version: '2.0.0', installed: true, enabled: true,
+  }] }));
+
+  const unrelated = invoke(fixture.environment, fixture.project);
+  assert(aliases(unrelated).has('frontend-design:frontend-design'),
+    'a native plugin scoped to another project must not rename an imported plugin');
+  const shortcut = unrelated.skills.find((entry) => entry.alias === 'frontend-design');
+  assert(shortcut && shortcut.shortcutFor === 'frontend-design:frontend-design',
+    'a same-name single-skill plugin must expose its natural unqualified shortcut');
+  assert.deepStrictEqual(shortcut.runtimeComponents, ['mcp', 'apps', 'hooks'],
+    'skill diagnostics must report source plugin runtime components without activating them');
+  assert.strictEqual(fs.readFileSync(path.join(
+    unrelated.overlay, '.claude', 'skills', 'frontend-design', 'assets', 'design.txt',
+  ), 'utf8'), 'design support\n', 'a plugin shortcut must preserve all skill support files');
+  assert(!unrelated.pluginDirs.some((directory) => fs.existsSync(path.join(directory, '.mcp.json'))),
+    'a shortcut must not activate the source plugin MCP configuration');
+  const listed = childProcess.spawnSync(process.execPath, [helper, 'list', '--project', fixture.project], {
+    encoding: 'utf8', env: fixture.environment, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.strictEqual(listed.status, 0, listed.stderr || listed.stdout);
+  assert(listed.stdout.includes('/frontend-design\tcodex-plugin (shortcut for /frontend-design:frontend-design)'),
+    'skill diagnostics must explain the shortcut target');
+  assert(listed.stdout.includes('source runtime not activated\tmcp, apps, hooks\tuse the native codex route'),
+    'skill diagnostics must expose inactive source integrations and the native route');
+
+  write(path.join(fixture.config, 'plugins', 'installed_plugins.json'), JSON.stringify({
+    plugins: {
+      'frontend-design@native': [{
+        scope: 'project', projectPath: fixture.repo, installPath: nativePlugin,
+      }],
+    },
+  }));
+  write(path.join(fixture.config, 'settings.json'), JSON.stringify({
+    enabledPlugins: { 'frontend-design@native': false },
+  }));
+  const disabledNative = invoke(fixture.environment, fixture.project);
+  assert(aliases(disabledNative).has('frontend-design:frontend-design'),
+    'a disabled native plugin must not reserve its namespace');
+  fs.rmSync(path.join(fixture.config, 'settings.json'));
+  const matching = invoke(fixture.environment, fixture.project);
+  assert(aliases(matching).has('imported-frontend-design:frontend-design'),
+    'a matching native plugin must retain its namespace over the imported copy');
+  const collisionShortcut = matching.skills.find((entry) => entry.alias === 'imported-frontend-design');
+  assert(collisionShortcut && collisionShortcut.shortcutFor === 'imported-frontend-design:frontend-design',
+    'a renamed same-name plugin must expose the exact namespace shortcut models naturally try');
+
+  createSkill(path.join(fixture.home, '.agents', 'skills', 'imported-frontend-design'), 'imported-frontend-design');
+  const standaloneCollision = invoke(fixture.environment, fixture.project);
+  const claimedAlias = standaloneCollision.skills.filter((entry) => entry.alias === 'imported-frontend-design');
+  assert.strictEqual(claimedAlias.length, 1, 'a plugin shortcut must not duplicate an existing standalone alias');
+  assert(!claimedAlias[0].shortcutFor && claimedAlias[0].kind === 'codex-user',
+    'an existing standalone skill must keep precedence over a plugin convenience shortcut');
+}
+
 function testLastKnownGoodFallback() {
   const fixture = setup('last-known-good');
   const source = path.join(fixture.home, '.agents', 'skills', 'fallback-tree');
@@ -567,6 +657,7 @@ try {
   testNativeConfigCollisionReservation();
   testManagedPersonalProjectPrecedence();
   testNativePluginNamespaceReservation();
+  testScopedPluginReservationAndSameNameShortcuts();
   testLastKnownGoodFallback();
   process.stdout.write(`skill security tests passed${skipped.length ? ` (${skipped.join('; ')})` : ''}\n`);
 } finally {

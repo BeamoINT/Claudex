@@ -72,6 +72,16 @@ use `$skill-name` as the Codex style instruction reference. Set
 `claudex skills` outside a session to list the exact aliases, sources,
 compatibility plugins, and model mappings for the current project.
 
+When an imported plugin contains exactly one skill and its plugin and skill
+names match, Claudex also publishes the natural unqualified form. For example,
+`/frontend-design` is a shortcut for
+`/frontend-design:frontend-design`. If a native or standalone skill already
+owns that unqualified name, Claudex omits the shortcut and keeps only the safe
+namespaced form. A renamed collision such as
+`/imported-frontend-design:frontend-design` receives the matching
+`/imported-frontend-design` shortcut, so the namespace form shown to the model
+is also a valid invocation.
+
 Both products implement the open Agent Skills `SKILL.md` format, so skill
 instructions, scripts, references, assets, and relative paths stay intact.
 Claudex applies only the compatibility adaptations that are necessary:
@@ -109,6 +119,12 @@ only a qualified alias instead of claiming personal scope precedence it does
 not have at runtime. Plugin namespaces remain separate. `claudex skills` shows
 the resolved mapping rather than silently dropping either skill.
 
+Native plugin namespace reservations follow the same scope rules as plugin
+loading. User and managed plugins apply everywhere. Project and local plugins
+reserve a namespace only in their matching project, and disabled plugins do
+not reserve it. This prevents a plugin used in one repository from forcing an
+unrelated imported plugin to use an `imported-` prefix elsewhere.
+
 The bridge recomputes discovery on every launch and creates a hard bounded,
 content addressed snapshot. The newest eight generations per project are kept,
 with a global emergency cap, and abandoned staging directories are age- and
@@ -129,6 +145,14 @@ hooks, MCP configuration, agents, settings, and nested component roots from a
 plugin root skill. Legacy Claude plugin commands, including direct Markdown
 component paths, are adapted into inert namespaced skills; their source plugin
 runtime is never activated.
+
+`claudex skills` reports MCP, app, hook, agent, language server, and settings
+components that exist beside an imported skill as source runtime that was not
+activated. This makes an integration requirement visible without starting a
+server, trusting a hook, authorizing an account, or exposing another harness's
+credentials. Use `claudex codex` or `claudex claude` when the workflow needs
+the source plugin's native runtime, or pass an explicit Claude
+`--mcp-config` when that is the intended configuration.
 
 Use these opt outs only when isolation is more important than sharing:
 

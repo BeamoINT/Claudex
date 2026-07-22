@@ -594,11 +594,21 @@ if [ "${1:-}" = "--version" ]; then
   exit 0
 fi
 if [ "${1:-}" = "--help" ]; then
-  printf '%s\n' '--model --agents --append-system-prompt --permission-mode --settings --effort --add-dir --plugin-dir'
+  if [ "${FAKE_CLAUDE_HELP_PROSE_ONLY:-0}" = 1 ]; then
+    printf '%s\n' '  --model <model>  Model for this session'
+    printf '%s\n' '  --bare           Minimal mode; prose may mention --agents, --append-system-prompt, --permission-mode, --add-dir, or --plugin-dir'
+  else
+    printf '%s\n' '--model --agents --append-system-prompt --permission-mode --settings --effort --add-dir --plugin-dir'
+  fi
   exit 0
 fi
 if [ "${1:-}" = "auto-mode" ] && [ "${2:-}" = "defaults" ]; then
-  printf '%s\n' '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Data Exfiltration: default hard deny"]}'
+  if [ "${FAKE_AUTO_MODE_DEFAULTS_FAIL:-0}" = 1 ]; then exit 1; fi
+  if [ "${FAKE_AUTO_MODE_DEFAULT_VERSION:-}" = 2 ]; then
+    printf '%s\n' '{"allow":["Updated default allow rule"],"environment":["Updated default environment rule"],"soft_deny":["Updated soft deny"],"hard_deny":["Data Exfiltration: updated hard deny"]}'
+  else
+    printf '%s\n' '{"allow":["Default allow rule"],"environment":["Default environment rule"],"soft_deny":["Default soft deny"],"hard_deny":["Data Exfiltration: default hard deny"]}'
+  fi
   exit 0
 fi
 if [ "${1:-}" = "update" ]; then exit 0; fi
@@ -613,19 +623,43 @@ printf '%s\n' "COMPACT=${CLAUDE_CODE_AUTO_COMPACT_WINDOW}"
 printf '%s\n' "NO_FLICKER=${CLAUDE_CODE_NO_FLICKER}"
 printf '%s\n' "ACCESSIBILITY=${CLAUDE_CODE_ACCESSIBILITY}"
 printf '%s\n' "DISABLE_1M=${CLAUDE_CODE_DISABLE_1M_CONTEXT:-}"
+printf '%s\n' "FABLE=${ANTHROPIC_DEFAULT_FABLE_MODEL:-}"
+printf '%s\n' "FABLE_NAME=${ANTHROPIC_DEFAULT_FABLE_MODEL_NAME:-}"
 printf '%s\n' "OPUS=${ANTHROPIC_DEFAULT_OPUS_MODEL}"
 printf '%s\n' "OPUS_NAME=${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME}"
 printf '%s\n' "POWERSHELL_TOOL=${CLAUDE_CODE_USE_POWERSHELL_TOOL}"
 printf '%s\n' "MODE=${CLAUDEX_SESSION_MODE:-}"
+printf '%s\n' "MODEL_MODE=${CLAUDEX_MODEL_MODE:-}"
 printf '%s\n' "BASE=${ANTHROPIC_BASE_URL:-}"
 printf '%s\n' "AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}"
 printf '%s\n' "PROXY_TOKEN=${CLAUDEX_PROXY_TOKEN:-}"
+printf '%s\n' "PROXY_URL=${CLAUDEX_PROXY_URL:-}"
+printf '%s\n' "PROXY_CONFIG=${CLAUDEX_PROXY_CONFIG:-}"
+printf '%s\n' "CODEX_AUTH_DIR=${CLAUDEX_CODEX_AUTH_DIR:-}"
+printf '%s\n' "PROVIDERS=${CLAUDE_CODE_USE_BEDROCK:-}|${CLAUDE_CODE_USE_VERTEX:-}|${CLAUDE_CODE_USE_FOUNDRY:-}|${ANTHROPIC_BEDROCK_BASE_URL:-}|${ANTHROPIC_VERTEX_BASE_URL:-}|${ANTHROPIC_FOUNDRY_BASE_URL:-}"
+printf '%s\n' "API_KEY=${ANTHROPIC_API_KEY:-}"
+printf '%s\n' "OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}"
+printf '%s\n' "CUSTOM_HEADERS=${ANTHROPIC_CUSTOM_HEADERS:-}"
+printf '%s\n' "ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}"
+printf '%s\n' "CUSTOM_MODEL=${ANTHROPIC_CUSTOM_MODEL_OPTION:-}"
+printf '%s\n' "OPUS_DESCRIPTION=${ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION:-}"
+printf '%s\n' "OPUS_CAPABILITIES=${ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES:-}"
+printf '%s\n' "CODEX_AUTH_FILE=${CLAUDEX_CODEX_AUTH_FILE:-}"
+printf '%s\n' "CODEX_SOURCE_AUTH_FILE=${CLAUDEX_CODEX_SOURCE_AUTH_FILE:-}"
 printf '%s\n' "BUN=${BUN_OPTIONS:-}"
 printf '%s\n' "INTERACTIVE=${CLAUDEX_INTERACTIVE_TUI:-}"
 printf '%s\n' "MANAGED=${CLAUDEX_MANAGED_SESSION:-}"
 printf '%s\n' "INSTRUCTION_BRIDGE=${CLAUDEX_INSTRUCTION_BRIDGE:-}"
+printf '%s\n' "CHATGPT_PLAN=${CLAUDEX_CHATGPT_PLAN_LABEL:-}"
 printf '%s\n' "CONFIG=${CLAUDE_CONFIG_DIR:-}"
-printf 'ARGS='; printf ' %s' "$@"; printf '\n'
+printf '%s\n' "ARGC=$#"
+printf 'ARGS='
+argument_separator=''
+for argument in "$@"; do
+  printf '%s%s' "$argument_separator" "$argument"
+  argument_separator=' '
+done
+printf '\n'
 '@, $utf8)
         [IO.File]::WriteAllText((Join-Path $fakeBin 'codex'), @'
 #!/bin/sh
@@ -643,6 +677,11 @@ fi
 if [ "${FAKE_CODEX_LOGGED_OUT:-0}" = 1 ]; then exit 1; fi
 if [ "${1:-}" = login ] && [ "${2:-}" = status ]; then exit "${FAKE_CODEX_DEFAULT_STATUS:-0}"; fi
 if [ "${1:-}" = logout ]; then exit "${FAKE_CODEX_DEFAULT_LOGOUT:-${FAKE_CODEX_LOGOUT_EXIT:-0}}"; fi
+if [ "${1:-}" = app-server ]; then
+  printf '%s\n' '{"id":1,"result":{}}'
+  printf '%s\n' '{"id":2,"result":{"rateLimits":{"limitId":"codex","limitName":"Codex","planType":"pro","primary":{"usedPercent":63,"windowDurationMins":10080,"resetsAt":1784705933}},"rateLimitsByLimitId":{}}}'
+  exit 0
+fi
 exit 2
 '@, $utf8)
         [IO.File]::WriteAllText((Join-Path $fakeBin 'cliproxyapi'), @'
@@ -653,14 +692,31 @@ exit 1
 '@, $utf8)
         & chmod +x $fakeCurl (Join-Path $fakeBin 'claude') (Join-Path $fakeBin 'codex') (Join-Path $fakeBin 'cliproxyapi')
         if ($LASTEXITCODE -ne 0) { throw 'failed to make PowerShell test doubles executable' }
+        $env:CLAUDEX_TEST_FAKE_CLAUDE_PATH = Join-Path $fakeBin 'claude'
+        function global:claude {
+            $arguments = [string[]] @($args)
+            if ($env:FAKE_CLAUDE_ARGUMENT_LOG) {
+                [IO.File]::WriteAllLines($env:FAKE_CLAUDE_ARGUMENT_LOG, $arguments)
+            }
+            & $env:CLAUDEX_TEST_FAKE_CLAUDE_PATH @arguments
+            $global:LASTEXITCODE = $LASTEXITCODE
+        }
     }
 
     $env:USERPROFILE = $testHome
+    # Node.js and native Unix tools resolve the home directory from HOME, while
+    # Windows PowerShell uses USERPROFILE. Keep both test identities isolated so
+    # the skill and plugin bridges never inspect the developer's live profile.
+    if (-not $isWindowsPlatform) { $env:HOME = $testHome }
     $env:CLAUDEX_CONFIG_DIR = $testConfig
     $env:CLAUDEX_CURL_BIN = $fakeCurl
     $env:PATH = "$fakeBin$([IO.Path]::PathSeparator)$env:PATH"
     $env:CLAUDEX_SKIP_AUTO_UPDATE = '1'
     $env:CLAUDEX_SKIP_PROXY_WATCHER = '1'
+    # The dedicated watcher lifecycle coverage below is Windows-only. Avoid
+    # repeatedly spawning and force-stopping Unix watcher children from this
+    # in-process harness, which can strand a just-created empty lock directory.
+    if (-not $isWindowsPlatform) { $env:CLAUDEX_SKIP_AUTH_WATCHER = '1' }
     Remove-Item Env:CLAUDEX_PERMISSION_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:CLAUDEX_AUTO_COMPACT_WINDOW -ErrorAction SilentlyContinue
     Remove-Item Env:CLAUDEX_MOUSE_POINTER_SHAPE -ErrorAction SilentlyContinue
@@ -940,11 +996,18 @@ switch ($Action) {
     $env:CLAUDEX_TEST_AUTH_RECOVERY_MARKER = $authRecoveryMarker
     $env:CLAUDEX_TEST_TTY_INPUT = '1'
     $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
+    $savedSkipAuthWatcher = [Environment]::GetEnvironmentVariable('CLAUDEX_SKIP_AUTH_WATCHER', 'Process')
     $env:CLAUDEX_SKIP_AUTH_WATCHER = '1'
     $savedCi = [Environment]::GetEnvironmentVariable('CI', 'Process')
     $env:CI = '0'
     try {
-        $interactiveAuthOutput = (& (Join-Path $root 'claudex.ps1') --terra auth-recovery-test 2>&1 | Out-String)
+        # Exercise the launcher through the same process boundary as an installed
+        # `claudex` command. On Unix the native executable fixture inherits the
+        # launcher's stdout directly, so an in-process success-stream capture can
+        # be empty even though Claude ran successfully.
+        $authRecoveryShell = (Get-Process -Id $PID).Path
+        $interactiveAuthOutput = (& $authRecoveryShell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File (Join-Path $root 'claudex.ps1') --terra auth-recovery-test 2>&1 | Out-String)
         $windowsLauncherSource = Get-Content -LiteralPath (Join-Path $root 'claudex.ps1') -Raw
         Assert-True ($windowsLauncherSource.Contains('Codex sign-in is required. Opening the official Codex browser login')) 'interactive startup explains official Codex login'
         Assert-True ($interactiveAuthOutput.Contains('AUTO=gpt-5.6-terra')) 'interactive startup retries after Codex login'
@@ -954,7 +1017,8 @@ switch ($Action) {
     } finally {
         Remove-Item Env:CLAUDEX_TEST_TTY_INPUT -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT -ErrorAction SilentlyContinue
-        Remove-Item Env:CLAUDEX_SKIP_AUTH_WATCHER -ErrorAction SilentlyContinue
+        if ($null -eq $savedSkipAuthWatcher) { Remove-Item Env:CLAUDEX_SKIP_AUTH_WATCHER -ErrorAction SilentlyContinue }
+        else { $env:CLAUDEX_SKIP_AUTH_WATCHER = $savedSkipAuthWatcher }
         Remove-Item Env:CLAUDEX_CODEX_SESSION_HELPER -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDEX_TEST_AUTH_RECOVERY_LOG -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDEX_TEST_AUTH_RECOVERY_MARKER -ErrorAction SilentlyContinue
@@ -1284,16 +1348,18 @@ process.stdout.write(JSON.stringify({ addDirs: [], pluginDirs: [], instructions:
     }
     Assert-True ($userSubagentOutput.Contains('SUBAGENT=caller-owned-subagent')) 'managed launch preserves an explicit caller subagent model'
 
-    $env:FAKE_CLAUDE_TAIL_ARGS = '1'
-    try {
-        $delimiterOutput = (& (Join-Path $root 'claudex.cmd') --terra '--' --safe-mode --agents --permission-mode --model literal-prompt-token 2>&1 | Out-String)
-        $delimiterExit = $LASTEXITCODE
-    } finally { Remove-Item Env:FAKE_CLAUDE_TAIL_ARGS -ErrorAction SilentlyContinue }
-    Assert-True ($delimiterExit -eq 0) "installed Windows delimiter route exits successfully; output=$delimiterOutput"
-    Assert-True ($delimiterOutput.Contains('"Terra (high)"')) "flag like prompt text after the delimiter does not disable managed agents; output=$delimiterOutput"
-    Assert-True ($delimiterOutput.Contains("TAIL1=--permission-mode`r`nTAIL2=auto")) "flag like prompt text after the delimiter does not disable managed permissions; output=$delimiterOutput"
-    Assert-True ($delimiterOutput.Contains("TAIL3=--model`r`nTAIL4=gpt-5.6-terra")) "flag like model text after the delimiter does not replace the selected startup model; output=$delimiterOutput"
-    Assert-True ($delimiterOutput.Contains("TAIL5=--`r`nTAIL6=--safe-mode`r`nTAIL7=--agents")) "installed Windows launcher preserves the delimiter and following prompt tokens; output=$delimiterOutput"
+    if ($isWindowsPlatform) {
+        $env:FAKE_CLAUDE_TAIL_ARGS = '1'
+        try {
+            $delimiterOutput = (& (Join-Path $root 'claudex.cmd') --terra '--' --safe-mode --agents --permission-mode --model literal-prompt-token 2>&1 | Out-String)
+            $delimiterExit = $LASTEXITCODE
+        } finally { Remove-Item Env:FAKE_CLAUDE_TAIL_ARGS -ErrorAction SilentlyContinue }
+        Assert-True ($delimiterExit -eq 0) "installed Windows delimiter route exits successfully; output=$delimiterOutput"
+        Assert-True ($delimiterOutput.Contains('"Terra (high)"')) "flag like prompt text after the delimiter does not disable managed agents; output=$delimiterOutput"
+        Assert-True ($delimiterOutput.Contains("TAIL1=--permission-mode`r`nTAIL2=auto")) "flag like prompt text after the delimiter does not disable managed permissions; output=$delimiterOutput"
+        Assert-True ($delimiterOutput.Contains("TAIL3=--model`r`nTAIL4=gpt-5.6-terra")) "flag like model text after the delimiter does not replace the selected startup model; output=$delimiterOutput"
+        Assert-True ($delimiterOutput.Contains("TAIL5=--`r`nTAIL6=--safe-mode`r`nTAIL7=--agents")) "installed Windows launcher preserves the delimiter and following prompt tokens; output=$delimiterOutput"
+    }
 
     $restrictedToolsOutput = (& (Join-Path $root 'claudex.ps1') --tools '' --print restricted-tools-test | Out-String)
     Assert-True (-not $restrictedToolsOutput.Contains('Before every final answer, call TaskList')) 'restricted tool surfaces do not receive impossible task lifecycle requirements'
@@ -1636,6 +1702,9 @@ process.stdout.write(JSON.stringify({
     Assert-True ($solplan.Contains('OPUS=gpt-5.6-sol')) 'Solplan planning model'
     Assert-True ($solplan.Contains('SUBAGENT=') -and -not $solplan.Contains('SUBAGENT=gpt-5.6-terra')) 'Solplan leaves native implementation-family routing available'
 
+    # This fixture exercises Windows-only DACL and child-process behavior. The
+    # Unix Fableplan implementation is covered by test.sh.
+    if ($isWindowsPlatform) {
     $fableplanDirectory = Join-Path $temporary 'fableplan'
     [IO.Directory]::CreateDirectory($fableplanDirectory) | Out-Null
     $fableplanEnvironmentNames = @(
@@ -1731,18 +1800,21 @@ process.stdout.write(JSON.stringify({
             else { [Environment]::SetEnvironmentVariable($environmentName, [string] $environmentValue, 'Process') }
         }
     }
+    }
 
-    $env:FAKE_CLAUDE_RESUME = '1'
-    $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
     $resumeCapture = Join-Path $temporary 'resume-footer.txt'
-    $env:CLAUDEX_TEST_RESUME_CAPTURE_FILE = $resumeCapture
-    & (Join-Path $root 'claudex.ps1') | Out-Null
-    $resumeFooter = [IO.File]::ReadAllText($resumeCapture)
-    Remove-Item Env:FAKE_CLAUDE_RESUME
-    Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT
-    Remove-Item Env:CLAUDEX_TEST_RESUME_CAPTURE_FILE
-    Assert-True (-not $resumeFooter.Contains("$([char]27)[2A")) 'resume correction never moves or erases terminal rows'
-    Assert-True ($resumeFooter.Contains('Claudex resume: claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'Claudex resume command appended'
+    if ($isWindowsPlatform) {
+        $env:FAKE_CLAUDE_RESUME = '1'
+        $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
+        $env:CLAUDEX_TEST_RESUME_CAPTURE_FILE = $resumeCapture
+        & (Join-Path $root 'claudex.ps1') | Out-Null
+        $resumeFooter = [IO.File]::ReadAllText($resumeCapture)
+        Remove-Item Env:FAKE_CLAUDE_RESUME
+        Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT
+        Remove-Item Env:CLAUDEX_TEST_RESUME_CAPTURE_FILE
+        Assert-True (-not $resumeFooter.Contains("$([char]27)[2A")) 'resume correction never moves or erases terminal rows'
+        Assert-True ($resumeFooter.Contains('Claudex resume: claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'Claudex resume command appended'
+    }
     $windowsLauncher = [IO.File]::ReadAllText((Join-Path $root 'claudex.ps1'))
     Assert-True ($windowsLauncher.Contains('if ($rewriteResumeFooter) { Update-ResumeFooter $resumeMarker }')) 'resume footer is rewritten independently of exit status'
     Assert-True ($windowsLauncher.Contains("Join-Path `$configDir 'auto-mode-defaults.json'")) 'Windows uses the shared auto-mode defaults snapshot schema'
@@ -2150,18 +2222,20 @@ process.stdout.write(JSON.stringify({
         Write-TestStage 'automatic update regressions passed'
     }
 
-    Remove-Item -LiteralPath $resumeCapture -Force
-    $env:FAKE_CLAUDE_RESUME = '1'
-    $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
-    $env:CLAUDEX_TEST_RESUME_CAPTURE_FILE = $resumeCapture
-    $env:CLAUDEX_SKIP_AUTH_WATCHER = '1'
-    $env:CLAUDEX_SKIP_PROXY_WATCHER = '1'
-    try { & (Join-Path $root 'claudex.ps1') --bg background-resume-test | Out-Null }
-    finally {
-        Remove-Item Env:CLAUDEX_SKIP_AUTH_WATCHER -ErrorAction SilentlyContinue
-        Remove-Item Env:CLAUDEX_SKIP_PROXY_WATCHER -ErrorAction SilentlyContinue
+    if ($isWindowsPlatform) {
+        Remove-Item -LiteralPath $resumeCapture -Force
+        $env:FAKE_CLAUDE_RESUME = '1'
+        $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
+        $env:CLAUDEX_TEST_RESUME_CAPTURE_FILE = $resumeCapture
+        $env:CLAUDEX_SKIP_AUTH_WATCHER = '1'
+        $env:CLAUDEX_SKIP_PROXY_WATCHER = '1'
+        try { & (Join-Path $root 'claudex.ps1') --bg background-resume-test | Out-Null }
+        finally {
+            Remove-Item Env:CLAUDEX_SKIP_AUTH_WATCHER -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDEX_SKIP_PROXY_WATCHER -ErrorAction SilentlyContinue
+        }
+        Assert-True (-not (Test-Path -LiteralPath $resumeCapture -PathType Leaf)) 'background launch does not claim a synchronous resume footer'
     }
-    Assert-True (-not (Test-Path -LiteralPath $resumeCapture -PathType Leaf)) 'background launch does not claim a synchronous resume footer'
 
     if ($isWindowsPlatform) {
         Write-TestStage 'starting background watcher lifecycle regressions'
@@ -2308,28 +2382,30 @@ process.stdout.write(JSON.stringify({
         Write-TestStage 'background watcher lifecycle regressions passed'
     }
 
-    $env:FAKE_CLAUDE_RESUME = '1'
-    $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
-    $env:CLAUDEX_TEST_RESUME_CAPTURE_FILE = $resumeCapture
-    & (Join-Path $root 'claudex.ps1') --claude-chrome | Out-Null
-    $directResumeFooter = [IO.File]::ReadAllText($resumeCapture)
-    Assert-True ($directResumeFooter.Contains('claudex --claude-chrome --resume 123e4567-e89b-12d3-a456-426614174000')) 'direct Chrome resume command'
-    Remove-Item -LiteralPath $resumeCapture -Force
-    $env:FAKE_FOREIGN_RESUME = '1'
-    & (Join-Path $root 'claudex.ps1') | Out-Null
-    $concurrentResumeFooter = [IO.File]::ReadAllText($resumeCapture)
-    Assert-True ($concurrentResumeFooter.Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'root resume survives concurrent foreign session'
-    Assert-True (-not $concurrentResumeFooter.Contains('223e4567-e89b-12d3-a456-426614174001')) 'foreign session is not selected for resume'
-    Remove-Item -LiteralPath $resumeCapture -Force
-    $env:FAKE_SAME_CWD_RESUME = '1'
-    & (Join-Path $root 'claudex.ps1') | Out-Null
-    Assert-True (-not (Test-Path -LiteralPath $resumeCapture -PathType Leaf)) 'ambiguous same-directory resume is never guessed'
-    Remove-Item Env:FAKE_CLAUDE_RESUME
-    Remove-Item Env:FAKE_FOREIGN_RESUME
-    Remove-Item Env:FAKE_SAME_CWD_RESUME
-    Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT
-    Remove-Item Env:CLAUDEX_TEST_RESUME_CAPTURE_FILE
-    Write-TestStage 'resume footer regressions passed'
+    if ($isWindowsPlatform) {
+        $env:FAKE_CLAUDE_RESUME = '1'
+        $env:CLAUDEX_TEST_TTY_OUTPUT = '1'
+        $env:CLAUDEX_TEST_RESUME_CAPTURE_FILE = $resumeCapture
+        & (Join-Path $root 'claudex.ps1') --claude-chrome | Out-Null
+        $directResumeFooter = [IO.File]::ReadAllText($resumeCapture)
+        Assert-True ($directResumeFooter.Contains('claudex --claude-chrome --resume 123e4567-e89b-12d3-a456-426614174000')) 'direct Chrome resume command'
+        Remove-Item -LiteralPath $resumeCapture -Force
+        $env:FAKE_FOREIGN_RESUME = '1'
+        & (Join-Path $root 'claudex.ps1') | Out-Null
+        $concurrentResumeFooter = [IO.File]::ReadAllText($resumeCapture)
+        Assert-True ($concurrentResumeFooter.Contains('claudex --resume 123e4567-e89b-12d3-a456-426614174000')) 'root resume survives concurrent foreign session'
+        Assert-True (-not $concurrentResumeFooter.Contains('223e4567-e89b-12d3-a456-426614174001')) 'foreign session is not selected for resume'
+        Remove-Item -LiteralPath $resumeCapture -Force
+        $env:FAKE_SAME_CWD_RESUME = '1'
+        & (Join-Path $root 'claudex.ps1') | Out-Null
+        Assert-True (-not (Test-Path -LiteralPath $resumeCapture -PathType Leaf)) 'ambiguous same-directory resume is never guessed'
+        Remove-Item Env:FAKE_CLAUDE_RESUME
+        Remove-Item Env:FAKE_FOREIGN_RESUME
+        Remove-Item Env:FAKE_SAME_CWD_RESUME
+        Remove-Item Env:CLAUDEX_TEST_TTY_OUTPUT
+        Remove-Item Env:CLAUDEX_TEST_RESUME_CAPTURE_FILE
+        Write-TestStage 'resume footer regressions passed'
+    }
 
     $bare = (& (Join-Path $root 'claudex.ps1') --bare --print test-prompt | Out-String)
     Assert-True (-not $bare.Contains('--agents')) 'bare mode custom agents suppressed'
@@ -2415,7 +2491,13 @@ process.stdout.write(JSON.stringify({
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $testConfig 'usage-cache\limits.json'))) 'account switch invalidates usage cache'
         Write-TestStage 'live account watcher regressions passed'
     } finally {
+        $accountWatcherLock = Join-Path $testAuthDir '.codex-session-sync.lock'
+        for ($watcherReleaseAttempt = 0; $watcherReleaseAttempt -lt 250 -and
+            (Test-Path -LiteralPath $accountWatcherLock); $watcherReleaseAttempt++) {
+            Start-Sleep -Milliseconds 20
+        }
         Stop-Process -Id $accountWatcher.Id -Force -ErrorAction SilentlyContinue
+        try { $null = $accountWatcher.WaitForExit(5000) } catch { }
         Remove-Item Env:CLAUDEX_AUTH_WATCH_SECONDS -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDEX_AUTH_WATCH_READY_FILE -ErrorAction SilentlyContinue
     }
@@ -2864,8 +2946,17 @@ process.stdout.write(JSON.stringify({
     Assert-True ($suffixOnlyStatus.TrimEnd() -ceq $expectedSuffixOnlyStatus) 'status label sanitizer cannot select model or effort from a post-control suffix'
 
     [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\summary'), "safe summary $([char]27)]0;CACHE-OSC$([char]7) $([char]0x009d)0;CACHE-C1-OSC$([char]0x009c) $([char]27)[31mCACHE-CSI$([char]27)[0m $([char]0x009b)31mCACHE-C1 $([char]0x202e)CACHE-BIDI`n", $utf8)
-    [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\last-success'), "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())`n", $utf8)
-    $hostileCacheStatus = ('{"session_id":"hostile-cache","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":5}}' | & (Join-Path $root 'statusline.ps1') | Out-String)
+    $safeCacheTimestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\last-success'), "$safeCacheTimestamp`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $testConfig 'usage-cache\last-attempt'), "$safeCacheTimestamp`n", $utf8)
+    $savedStatuslineColumns = [Environment]::GetEnvironmentVariable('CLAUDEX_STATUSLINE_COLUMNS', 'Process')
+    $env:CLAUDEX_STATUSLINE_COLUMNS = '1000'
+    try {
+        $hostileCacheStatus = ('{"session_id":"hostile-cache","model":{"id":"gpt-5.6-sol"},"context_window":{"used_percentage":5}}' | & (Join-Path $root 'statusline.ps1') | Out-String)
+    } finally {
+        if ($null -eq $savedStatuslineColumns) { Remove-Item Env:CLAUDEX_STATUSLINE_COLUMNS -ErrorAction SilentlyContinue }
+        else { $env:CLAUDEX_STATUSLINE_COLUMNS = $savedStatuslineColumns }
+    }
     Assert-True ($hostileCacheStatus.Contains('safe summary')) 'status cache sanitizer preserves legitimate text'
     Assert-True (-not $hostileCacheStatus.Contains('CACHE-OSC') -and -not $hostileCacheStatus.Contains('CACHE-C1-OSC')) 'status cache sanitizer removes OSC payloads'
     $hostileCacheUnstyled = [regex]::Replace($hostileCacheStatus, "$([char]27)\[(?:0|1|38;5;81)m", '')
@@ -3094,6 +3185,7 @@ param([switch] $RefreshCache, [switch] $LockHeld, [string] $LockToken)
     Assert-True ((Get-Content -LiteralPath (Join-Path $env:CLAUDEX_CONFIG_DIR 'statusline.ps1') -Raw) -ceq 'rollback-statusline-sentinel') 'Windows rollback restores prior managed files'
     Assert-True (@(Get-ChildItem -LiteralPath $env:CLAUDEX_CONFIG_DIR -Filter '.install-transaction-*' -ErrorAction SilentlyContinue).Count -eq 0) 'Windows rollback removes transaction scratch state'
 
+    if ($isWindowsPlatform) {
     $crashTransaction = Join-Path $env:CLAUDEX_CONFIG_DIR '.install-transaction-crash-test'
     $crashBackup = Join-Path $crashTransaction 'backup'
     [IO.Directory]::CreateDirectory($crashBackup) | Out-Null
@@ -3139,6 +3231,7 @@ param([switch] $RefreshCache, [switch] $LockHeld, [string] $LockToken)
     $recoveredTokenLine = [IO.File]::ReadAllLines((Join-Path $env:CLAUDEX_CONFIG_DIR 'env')) | Where-Object { $_.StartsWith('CLAUDEX_PROXY_TOKEN=') } | Select-Object -First 1
     Assert-True ($recoveredTokenLine.Substring('CLAUDEX_PROXY_TOKEN='.Length) -ceq $specialInstallerToken) 'Windows interrupted-transaction recovery restores env before reinstall'
     Assert-True (-not (Test-Path -LiteralPath $crashTransaction)) 'Windows interrupted transaction is removed after recovery'
+    }
     $env:CLAUDEX_PROXY_TOKEN = $specialInstallerToken
     $selfUpdateStatus = (& (Join-Path $root 'claudex.ps1') self-update --status | Out-String)
     Assert-True ($selfUpdateStatus.Contains("Installed version: $($packageManifest.version)")) 'self-update status dispatch'
@@ -3269,7 +3362,8 @@ exit /b %ERRORLEVEL%
     & node (Join-Path $root 'scripts\check-docs.mjs')
     Assert-True ($LASTEXITCODE -eq 0) 'community and documentation checks'
 
-    [Console]::WriteLine('all Claudex Windows tests passed')
+    if ($isWindowsPlatform) { [Console]::WriteLine('all Claudex Windows tests passed') }
+    else { [Console]::WriteLine('all Claudex cross-platform PowerShell tests passed') }
 } finally {
     if ($script:testSuiteWatchdog -and -not $script:testSuiteWatchdog.HasExited) {
         try { $script:testSuiteWatchdog.Kill() } catch { }
@@ -3284,6 +3378,7 @@ exit /b %ERRORLEVEL%
         } catch { }
         try { $trackedTestProcess.Dispose() } catch { }
     }
-    if ($isWindowsPlatform) { Remove-Item Function:\global:claude -ErrorAction SilentlyContinue }
+    Remove-Item Function:\global:claude -ErrorAction SilentlyContinue
+    Remove-Item Env:CLAUDEX_TEST_FAKE_CLAUDE_PATH -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $temporary) { [void] (Remove-TestPathWithRetry $temporary) }
 }

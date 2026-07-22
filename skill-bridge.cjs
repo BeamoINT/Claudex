@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const childProcess = require('child_process');
 
 const BRIDGE_SCHEMA = 3;
-const BRIDGE_FORMAT = 'skills-v6-cross-harness-20260716';
+const BRIDGE_FORMAT = 'skills-v7-plugin-aliases-20260722';
 const MAX_FILES = 4096;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_TREE_BYTES = 64 * 1024 * 1024;
@@ -875,23 +875,39 @@ function discoverNativeReservedNames() {
   return names;
 }
 
-function discoverNativePluginNames() {
+function pluginInstallApplies(install, projectDir, globalOnly = false) {
+  if (!install || typeof install !== 'object') return false;
+  const scope = String(install.scope || 'user').toLocaleLowerCase();
+  if (scope === 'user' || scope === 'managed') return true;
+  if (globalOnly || typeof install.projectPath !== 'string') return false;
+  return isWithin(projectDir, install.projectPath);
+}
+
+function discoverNativePluginNames(projectDir, globalOnly = false, settings = null) {
   const names = new Set();
   const registry = readJson(path.join(configDir, 'plugins', 'installed_plugins.json'), {});
   const plugins = registry && typeof registry.plugins === 'object' && registry.plugins ? registry.plugins : {};
+  const enabled = settings && settings.enabledPlugins ? settings.enabledPlugins : {};
   for (const [pluginId, installs] of Object.entries(plugins)) {
-    names.add(skillAlias(pluginId.split('@')[0], 'plugin'));
     if (!Array.isArray(installs)) continue;
     for (const install of installs) {
-      if (!install || typeof install.installPath !== 'string') continue;
-      const { value } = pluginManifest(path.resolve(install.installPath), 'claude');
-      if (value && value.name) names.add(skillAlias(value.name, 'plugin'));
+      if (!pluginInstallApplies(install, projectDir, globalOnly)
+          || typeof install.installPath !== 'string') continue;
+      const installPath = path.resolve(install.installPath);
+      if (!existsDirectory(installPath)) continue;
+      const inspected = pluginManifest(installPath, 'claude');
+      if (!inspected.valid || !inspected.present) continue;
+      const manifest = inspected.value;
+      if (enabled[pluginId] === false
+          || (enabled[pluginId] === undefined && manifest.defaultEnabled === false)) continue;
+      names.add(skillAlias(pluginId.split('@')[0], 'plugin'));
+      if (manifest.name) names.add(skillAlias(manifest.name, 'plugin'));
     }
   }
   return names;
 }
 
-function mergedClaudeSettings(projectDir, repoRoot, globalOnly = false) {
+function mergedClaudeSettings(projectDir, repoRoot, globalOnly = false, userSettingsRoot = claudeHome) {
   const settings = { enabledPlugins: {}, skillOverrides: {}, disableSideloadFlags: false, strictPluginOnlyCustomization: false };
   const apply = (file) => {
     const value = readJson(file, {});
@@ -904,7 +920,7 @@ function mergedClaudeSettings(projectDir, repoRoot, globalOnly = false) {
       settings.strictPluginOnlyCustomization = value.strictPluginOnlyCustomization;
     }
   };
-  apply(path.join(claudeHome, 'settings.json'));
+  apply(path.join(userSettingsRoot, 'settings.json'));
   if (!globalOnly) {
     apply(path.join(repoRoot, '.claude', 'settings.json'));
     // Claude still reads legacy nested local settings, but the repository-root
@@ -1021,6 +1037,17 @@ function pluginSkillRoots(pluginRoot, provider, warnings, inspected = pluginMani
   return roots;
 }
 
+function pluginRuntimeComponents(pluginRoot, manifest) {
+  const components = [];
+  if (manifest.mcpServers !== undefined || existsFile(path.join(pluginRoot, '.mcp.json'))) components.push('mcp');
+  if (manifest.apps !== undefined || existsFile(path.join(pluginRoot, '.app.json'))) components.push('apps');
+  if (manifest.hooks !== undefined || existsFile(path.join(pluginRoot, 'hooks', 'hooks.json'))) components.push('hooks');
+  if (manifest.agents !== undefined || existsDirectory(path.join(pluginRoot, 'agents'))) components.push('agents');
+  if (manifest.lspServers !== undefined || existsFile(path.join(pluginRoot, '.lsp.json'))) components.push('lsp');
+  if (existsFile(path.join(pluginRoot, 'settings.json'))) components.push('settings');
+  return components;
+}
+
 function discoverPluginContents(pluginRoot, metadata, candidates, disabled, warnings) {
   const inspected = pluginManifest(pluginRoot, metadata.provider);
   const { file: manifestFile, value: manifest } = inspected;
@@ -1029,8 +1056,11 @@ function discoverPluginContents(pluginRoot, metadata, candidates, disabled, warn
     return;
   }
   const namespace = skillAlias((manifest && manifest.name) || metadata.pluginName || path.basename(pluginRoot), 'plugin');
+  const runtimeComponents = pluginRuntimeComponents(pluginRoot, manifest);
   for (const root of pluginSkillRoots(pluginRoot, metadata.provider, warnings, inspected)) {
-    discoverSkillRoot(root, { ...metadata, namespace, pluginName: namespace, pluginRootBoundary: pluginRoot }, candidates, disabled, warnings);
+    discoverSkillRoot(root, {
+      ...metadata, namespace, pluginName: namespace, pluginRootBoundary: pluginRoot, runtimeComponents,
+    }, candidates, disabled, warnings);
   }
   if (!/\.codex-plugin[\\/]plugin\.json$/i.test(manifestFile || '')) {
     let commandRoots = manifest && manifest.commands;
@@ -1044,7 +1074,7 @@ function discoverPluginContents(pluginRoot, metadata, candidates, disabled, warn
       }
       const commandRoot = path.resolve(pluginRoot, relative);
       if (isWithin(commandRoot, pluginRoot)) discoverClaudeCommands(commandRoot, candidates, warnings, {
-        ...metadata, namespace, pluginRootBoundary: pluginRoot,
+        ...metadata, namespace, pluginRootBoundary: pluginRoot, runtimeComponents,
       });
     }
   }
@@ -1059,11 +1089,7 @@ function discoverClaudePlugins(projectDir, repoRoot, candidates, disabled, warni
     if (!Array.isArray(installs)) continue;
     for (const install of installs) {
       if (!install || typeof install !== 'object') { warnings.push(`Ignored malformed Claude plugin record for ${pluginId}`); continue; }
-      const scope = String(install.scope || 'user');
-      if (scope !== 'user' && scope !== 'managed') {
-        if (globalOnly) continue;
-        if (typeof install.projectPath !== 'string' || !isWithin(projectDir, install.projectPath)) continue;
-      }
+      if (!pluginInstallApplies(install, projectDir, globalOnly)) continue;
       const installPath = typeof install.installPath === 'string' ? path.resolve(install.installPath) : null;
       if (!installPath || !existsDirectory(installPath)) continue;
       const { value: manifest } = pluginManifest(installPath, 'claude');
@@ -1229,6 +1255,33 @@ function assignPluginAliases(candidates, nativePluginNames = new Set()) {
   return mappings.sort((a, b) => `${a.namespace}:${a.alias}`.localeCompare(`${b.namespace}:${b.alias}`));
 }
 
+function assignPluginShortcuts(mappings, standaloneMappings, nativeNames) {
+  const used = new Set(nativeNames);
+  for (const mapping of standaloneMappings) used.add(mapping.alias.toLocaleLowerCase());
+  const namespaces = new Map();
+  for (const mapping of mappings) {
+    if (!namespaces.has(mapping.namespace)) namespaces.set(mapping.namespace, []);
+    namespaces.get(mapping.namespace).push(mapping);
+  }
+  const shortcuts = [];
+  for (const [namespace, entries] of namespaces) {
+    if (entries.length !== 1) continue;
+    const mapping = entries[0];
+    const sourceNamespace = skillAlias(mapping.candidate.namespace, 'plugin');
+    if (mapping.alias.toLocaleLowerCase() !== sourceNamespace.toLocaleLowerCase()) continue;
+    const shortcut = namespace.toLocaleLowerCase();
+    if (used.has(shortcut)) continue;
+    used.add(shortcut);
+    shortcuts.push({
+      alias: namespace,
+      candidate: mapping.candidate,
+      collisionAlias: false,
+      shortcutFor: `${namespace}:${mapping.alias}`,
+    });
+  }
+  return shortcuts.sort((a, b) => a.alias.localeCompare(b.alias));
+}
+
 function sensitivePath(relative) {
   const normalized = relative.replace(/\\/g, '/').toLocaleLowerCase();
   const base = path.posix.basename(normalized);
@@ -1372,6 +1425,26 @@ function materializeCandidate(mapping, destination, modelMappings) {
   }
 }
 
+function materializeShortcutCandidate(mapping, destination, canonicalDestination, modelMappings) {
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  writeExclusive(path.join(destination, 'SKILL.md'), Buffer.from(adaptedMarkdown(mapping.candidate, mapping.alias, modelMappings)), 0o600);
+  if (mapping.candidate.commandFile) return;
+  for (const file of mapping.candidate.tree.files) {
+    if (file.relative.toLocaleLowerCase() === 'skill.md') continue;
+    const segments = file.relative.split('/');
+    const source = path.resolve(canonicalDestination, ...segments);
+    const target = path.resolve(destination, ...segments);
+    const relativeTarget = path.relative(path.resolve(destination), target);
+    if (relativeTarget === '..' || relativeTarget.startsWith(`..${path.sep}`) || path.isAbsolute(relativeTarget)
+        || !isWithin(source, canonicalDestination) || !existsFile(source)) {
+      throw new Error(`invalid skill shortcut support path: ${file.relative}`);
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    try { fs.linkSync(source, target); }
+    catch { writeExclusive(target, verifiedBytes(file), file.mode); }
+  }
+}
+
 function verifiedInstructionBytes(file) {
   const bytes = fs.readFileSync(file.realSource);
   const digest = crypto.createHash('sha256').update(bytes).digest('hex');
@@ -1432,6 +1505,8 @@ function sourceSignature(mapping) {
     source: mapping.candidate.realSource, kind: mapping.candidate.kind,
     tree: mapping.candidate.tree.signature, manualOnly: mapping.candidate.manualOnly,
     overrideState: mapping.candidate.overrideState || 'on',
+    shortcutFor: mapping.shortcutFor || null,
+    runtimeComponents: mapping.candidate.runtimeComponents || [],
   };
 }
 
@@ -1445,8 +1520,9 @@ function discover(projectDir, scopeMode = SCOPE_PROJECT) {
   const directories = globalOnly ? [] : ancestry(projectDir, repoRoot);
   const disabled = parseDisabledCodexSkills(projectDir, repoRoot, codexConfig.projectTrusted);
   const claudeSettings = mergedClaudeSettings(projectDir, repoRoot, globalOnly);
+  const nativeClaudeSettings = mergedClaudeSettings(projectDir, repoRoot, globalOnly, configDir);
   const nativeNames = discoverNativeReservedNames();
-  const nativePluginNames = discoverNativePluginNames();
+  const nativePluginNames = discoverNativePluginNames(projectDir, globalOnly, nativeClaudeSettings);
   nativePluginNames.add('claudex-codex-skill-references');
 
   discoverClaudePersonalSkills(path.join(claudeHome, 'skills'), claudeSettings, candidates, disabled, warnings);
@@ -1512,9 +1588,14 @@ function discover(projectDir, scopeMode = SCOPE_PROJECT) {
     'Managed Claude settings require commands to come from plugins; standalone imported commands were omitted while unrelated skills remain available.',
   );
   const standalone = unique.filter((candidate) => candidate.kind === 'claude-command' ? !strictCommands : !strictSkills);
+  const mappings = assignAliases(standalone, nativeNames);
+  const pluginMappings = allowPluginDirs ? assignPluginAliases(unique, nativePluginNames) : [];
   return {
-    mappings: assignAliases(standalone, nativeNames),
-    pluginMappings: allowPluginDirs ? assignPluginAliases(unique, nativePluginNames) : [],
+    mappings,
+    pluginMappings,
+    shortcutMappings: allowPluginDirs && !strictSkills
+      ? assignPluginShortcuts(pluginMappings, mappings, nativeNames)
+      : [],
     instructions,
     warnings,
     repoRoot,
@@ -1798,7 +1879,7 @@ function bridgeCacheKey(projectDir, scopeMode) {
 
 function syncOnce(projectDir, scopeMode = SCOPE_PROJECT) {
   const discovered = discover(projectDir, scopeMode);
-  const allMappings = [...discovered.mappings, ...discovered.pluginMappings];
+  const allMappings = [...discovered.mappings, ...discovered.pluginMappings, ...discovered.shortcutMappings];
   const sortObjects = (values) => values.sort((left, right) => {
     const leftKey = JSON.stringify(left);
     const rightKey = JSON.stringify(right);
@@ -1809,6 +1890,8 @@ function syncOnce(projectDir, scopeMode = SCOPE_PROJECT) {
     alias: mapping.alias, namespace: mapping.namespace || null, source: mapping.candidate.realSource,
     kind: mapping.candidate.kind, provider: mapping.candidate.provider, manualOnly: mapping.candidate.manualOnly,
     overrideState: mapping.candidate.overrideState || 'on',
+    shortcutFor: mapping.shortcutFor || null,
+    runtimeComponents: mapping.candidate.runtimeComponents || [],
   })));
   const policyInstructions = {
     files: discovered.instructions.files.map((file) => ({
@@ -1861,6 +1944,7 @@ function syncOnce(projectDir, scopeMode = SCOPE_PROJECT) {
         source: mapping.candidate.source, mode: 'snapshot', collisionAlias: mapping.collisionAlias,
         manualOnly: mapping.candidate.manualOnly,
         overrideState: mapping.candidate.overrideState || 'on',
+        runtimeComponents: mapping.candidate.runtimeComponents || [],
       };
       records.push(record);
       dollarReferences.push([mapping.alias.toLocaleLowerCase(), {
@@ -1871,6 +1955,7 @@ function syncOnce(projectDir, scopeMode = SCOPE_PROJECT) {
     }
 
     const pluginGroups = new Map();
+    const pluginSkillDestinations = new Map();
     for (const mapping of discovered.pluginMappings) {
       if (!pluginGroups.has(mapping.namespace)) pluginGroups.set(mapping.namespace, []);
       pluginGroups.get(mapping.namespace).push(mapping);
@@ -1884,11 +1969,13 @@ function syncOnce(projectDir, scopeMode = SCOPE_PROJECT) {
       for (const mapping of mappings) {
         materializeCandidate(mapping, path.join(pluginRoot, 'skills', mapping.alias), modelMappings);
         const fullAlias = `${namespace}:${mapping.alias}`;
+        pluginSkillDestinations.set(fullAlias, path.join(pluginRoot, 'skills', mapping.alias));
         records.push({
           alias: fullAlias, provider: mapping.candidate.provider, kind: mapping.candidate.kind,
           source: mapping.candidate.source, mode: 'snapshot-plugin', collisionAlias: mapping.collisionAlias,
           manualOnly: mapping.candidate.manualOnly,
           overrideState: mapping.candidate.overrideState || 'on',
+          runtimeComponents: mapping.candidate.runtimeComponents || [],
         });
         dollarReferences.push([fullAlias.toLocaleLowerCase(), {
           file: path.join(generation, 'plugins', namespace, 'skills', mapping.alias, 'SKILL.md'),
@@ -1897,6 +1984,26 @@ function syncOnce(projectDir, scopeMode = SCOPE_PROJECT) {
         }]);
       }
       pluginRelativeDirs.push(relative.split(path.sep).join('/'));
+    }
+
+    for (const mapping of discovered.shortcutMappings) {
+      const destination = path.join(skillsDir, mapping.alias);
+      const canonicalDestination = pluginSkillDestinations.get(mapping.shortcutFor);
+      if (!canonicalDestination) throw new Error(`missing canonical plugin skill for shortcut: ${mapping.shortcutFor}`);
+      materializeShortcutCandidate(mapping, destination, canonicalDestination, modelMappings);
+      records.push({
+        alias: mapping.alias, provider: mapping.candidate.provider, kind: mapping.candidate.kind,
+        source: mapping.candidate.source, mode: 'snapshot', collisionAlias: false,
+        manualOnly: mapping.candidate.manualOnly,
+        overrideState: mapping.candidate.overrideState || 'on',
+        shortcutFor: mapping.shortcutFor,
+        runtimeComponents: mapping.candidate.runtimeComponents || [],
+      });
+      dollarReferences.push([mapping.alias.toLocaleLowerCase(), {
+        file: path.join(generation, '.claude', 'skills', mapping.alias, 'SKILL.md'),
+        directory: path.join(generation, '.claude', 'skills', mapping.alias),
+        provider: mapping.candidate.provider,
+      }]);
     }
 
     const hookPlugin = materializeDollarReferencePlugin(stage, dollarReferences, discovered.allowPluginDirs);
@@ -1982,8 +2089,13 @@ function printList(result) {
   }
   process.stdout.write(`Claudex skills: ${result.skills.length} bridged aliases, ${result.pluginDirs.length} isolated compatibility plugins, ${(result.instructions || []).length} Codex instruction files\n`);
   for (const skill of result.skills) {
-    const qualifier = skill.collisionAlias ? ' (collision alias)' : '';
+    const qualifier = skill.shortcutFor
+      ? ` (shortcut for /${skill.shortcutFor})`
+      : skill.collisionAlias ? ' (collision alias)' : '';
     process.stdout.write(`/${skill.alias}\t${skill.kind}${qualifier}\t${skill.source}\n`);
+    if (!skill.shortcutFor && Array.isArray(skill.runtimeComponents) && skill.runtimeComponents.length) {
+      process.stdout.write(`  source runtime not activated\t${skill.runtimeComponents.join(', ')}\tuse the native ${skill.provider} route\n`);
+    }
   }
   for (const pluginDir of result.pluginDirs) process.stdout.write(`plugin\t${pluginDir}\n`);
   for (const instruction of result.instructions || []) {

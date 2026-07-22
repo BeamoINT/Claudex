@@ -118,6 +118,12 @@ manual only skills implicitly invocable. Original skill and plugin trees are
 read only inputs. Direct Chrome, safe, bare, and maintenance flows do not
 receive the overlay.
 
+Native plugin namespace reservation follows user, managed, project, and local
+scope. Single skill plugins whose plugin and skill names match receive an
+unqualified shortcut when that name is free. The canonical namespaced skill
+remains available, and source runtime components are reported without being
+activated.
+
 For the lifetime of each proxied session, a lightweight watcher checks the
 loopback listener without generating API traffic. If CLIProxyAPI exits, one
 session acquires a shared startup lock and restores it while other open tabs

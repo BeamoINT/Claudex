@@ -180,7 +180,7 @@ credentials are never selected.
 
 | Command or reference | Behavior |
 | --- | --- |
-| `claudex skills` | List every bridged alias and its source for the current project |
+| `claudex skills` | List every bridged alias, shortcut, source, and inactive source plugin runtime component for the current project |
 | `/skill-name` | Invoke a Claude native or bridged Codex skill inside Claudex |
 | `$skill-name` | Codex style explicit reference to the matching bridged skill |
 

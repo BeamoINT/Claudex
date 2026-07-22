@@ -9,6 +9,7 @@ $update = Join-Path $config 'update\claudex'
 $lock = Join-Path $update 'lock'
 $utf8 = New-Object Text.UTF8Encoding($false)
 $shell = (Get-Process -Id $PID).Path
+$isWindowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 $scriptPath = Join-Path $root 'self-update.ps1'
 $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $scriptPath + '"'), '-Check')
 
@@ -43,7 +44,13 @@ function Continue-Pause([string] $Name) {
 }
 
 function Start-Check {
-    return Start-Process -FilePath $shell -ArgumentList $arguments -PassThru -WindowStyle Hidden
+    $parameters = @{
+        FilePath = $shell
+        ArgumentList = $arguments
+        PassThru = $true
+    }
+    if ($isWindowsPlatform) { $parameters.WindowStyle = 'Hidden' }
+    return Start-Process @parameters
 }
 
 function Invoke-ExpectedFailedCheck {
@@ -68,7 +75,16 @@ function Invoke-ExpectedFailedCheck {
 try {
     [IO.Directory]::CreateDirectory($config) | Out-Null
     [IO.Directory]::CreateDirectory($fixture) | Out-Null
-    [IO.File]::WriteAllText((Join-Path $config 'install.json'), '{"schema":1,"version":"1.3.1","method":"archive","binDir":"C:\\claudex-test","repository":"BeamoINT/Claudex"}', $utf8)
+    $launcherDirectory = Join-Path $temporary 'launcher'
+    [IO.Directory]::CreateDirectory($launcherDirectory) | Out-Null
+    $receipt = [ordered]@{
+        schema = 1
+        version = '1.3.1'
+        method = 'archive'
+        binDir = $launcherDirectory
+        repository = 'BeamoINT/Claudex'
+    }
+    [IO.File]::WriteAllText((Join-Path $config 'install.json'), (($receipt | ConvertTo-Json -Compress) + "`n"), $utf8)
     $release = [ordered]@{
         tag_name = 'v1.3.2'; draft = $false; prerelease = $false; published_at = '2026-07-16T00:00:00Z'
         assets = @(

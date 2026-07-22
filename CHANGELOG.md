@@ -5,6 +5,23 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+### Added
+
+- Added collision safe shortcuts for single skill plugins whose plugin and
+  skill names match, while retaining the canonical namespaced invocation.
+- Added skill diagnostics for source plugin MCP, app, hook, agent, language
+  server, and settings components that remain on their native harness route.
+
+### Fixed
+
+- Stopped a native Claude plugin installed for one project from renaming an
+  imported Codex plugin in every other project, and honored disabled native
+  plugins when reserving namespaces.
+- Made the PowerShell verification entrypoint run reliably under PowerShell
+  7.6 on macOS with isolated Unix fixtures and deterministic cache assertions.
+- Made the PowerShell self update race suite portable across Windows and macOS,
+  and added it to the macOS CI leg so both filesystem identity paths stay covered.
+
 ## [1.6.1] - 2026-07-17
 
 ### Fixed
