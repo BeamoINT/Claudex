@@ -1001,13 +1001,19 @@ switch ($Action) {
     $savedCi = [Environment]::GetEnvironmentVariable('CI', 'Process')
     $env:CI = '0'
     try {
-        # Exercise the launcher through the same process boundary as an installed
-        # `claudex` command. On Unix the native executable fixture inherits the
-        # launcher's stdout directly, so an in-process success-stream capture can
-        # be empty even though Claude ran successfully.
-        $authRecoveryShell = (Get-Process -Id $PID).Path
-        $interactiveAuthOutput = (& $authRecoveryShell -NoLogo -NoProfile -ExecutionPolicy Bypass `
-            -File (Join-Path $root 'claudex.ps1') --terra auth-recovery-test 2>&1 | Out-String)
+        if ($isWindowsPlatform) {
+            # Windows uses an in-process function/executable fixture whose
+            # success stream is captured by the containing PowerShell pipeline.
+            $interactiveAuthOutput = (& (Join-Path $root 'claudex.ps1') --terra auth-recovery-test 2>&1 | Out-String)
+        } else {
+            # Exercise the Unix launcher through the same process boundary as an
+            # installed `claudex` command. The native executable fixture inherits
+            # the launcher's stdout directly, so an in-process success-stream
+            # capture can be empty even though Claude ran successfully.
+            $authRecoveryShell = (Get-Process -Id $PID).Path
+            $interactiveAuthOutput = (& $authRecoveryShell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+                -File (Join-Path $root 'claudex.ps1') --terra auth-recovery-test 2>&1 | Out-String)
+        }
         $windowsLauncherSource = Get-Content -LiteralPath (Join-Path $root 'claudex.ps1') -Raw
         Assert-True ($windowsLauncherSource.Contains('Codex sign-in is required. Opening the official Codex browser login')) 'interactive startup explains official Codex login'
         Assert-True ($interactiveAuthOutput.Contains('AUTO=gpt-5.6-terra')) 'interactive startup retries after Codex login'

@@ -5,6 +5,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-07-22
+
 ### Added
 
 - Added collision safe shortcuts for single skill plugins whose plugin and
@@ -17,10 +19,13 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Stopped a native Claude plugin installed for one project from renaming an
   imported Codex plugin in every other project, and honored disabled native
   plugins when reserving namespaces.
-- Made the PowerShell verification entrypoint run reliably under PowerShell
-  7.6 on macOS with isolated Unix fixtures and deterministic cache assertions.
+- Made the PowerShell verification entrypoint run reliably under Windows
+  PowerShell 5.1 and PowerShell 7.6 on macOS with platform specific process
+  fixtures, isolated Unix state, and deterministic cache assertions.
 - Made the PowerShell self update race suite portable across Windows and macOS,
   and added it to the macOS CI leg so both filesystem identity paths stay covered.
+- Preserved the conventional signal exit status when an interactive package
+  launcher traps a foreground group signal and exits before its wrapper callback.
 
 ## [1.6.1] - 2026-07-17
 
@@ -485,7 +490,8 @@ uses [Semantic Versioning](https://semver.org/) for tagged releases.
 - Claude in Chrome first party profile support.
 - Cross platform regression coverage in GitHub Actions.
 
-[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/BeamoINT/Claudex/compare/v1.6.2...HEAD
+[1.6.2]: https://github.com/BeamoINT/Claudex/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/BeamoINT/Claudex/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/BeamoINT/Claudex/compare/v1.5.8...v1.6.0
 [1.5.8]: https://github.com/BeamoINT/Claudex/compare/v1.5.7...v1.5.8

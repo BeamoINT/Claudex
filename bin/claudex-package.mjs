@@ -262,7 +262,7 @@ function run(command, args, env = process.env) {
       cleanupSignalHandlers();
       fail(`could not start ${command}: ${error.message}`);
     });
-    child.once('exit', (status, childSignal) => {
+    const settleChildExit = (status, childSignal) => {
       cleanupSignalHandlers();
       if (forwardedSignal) {
         // The launcher may trap the forwarded signal and exit before one of
@@ -284,6 +284,18 @@ function run(command, args, env = process.env) {
       } else {
         resolveStatus(status ?? 1);
       }
+    };
+    child.once('exit', (status, childSignal) => {
+      if (!isWindows && ownsInteractiveProcessGroup && status === 0 && !childSignal && !forwardedSignal) {
+        // A foreground-group signal reaches the wrapper and launcher at the
+        // same time. A launcher trap can exit cleanly before Node dispatches
+        // the wrapper's already queued signal callback. Keep the handlers for
+        // one short reconciliation window so that signal controls the public
+        // exit status instead of racing with the child's clean exit event.
+        setTimeout(() => settleChildExit(status, childSignal), 25);
+        return;
+      }
+      settleChildExit(status, childSignal);
     });
   });
 }
